@@ -1,7 +1,7 @@
 {
   "name": "dsh-paper-workbench",
-  "version": "0.1.0",
-  "description": "DSH 论文工作台：文献库 + PDF 阅读器 + 整本翻译 + Obsidian 论文知识库联动",
+  "version": "0.2.0",
+  "description": "DSH 论文工作台：文献库 + 对照阅读器 + 面板内逐段翻译与侧边对话 + Obsidian 论文知识库联动",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -31,9 +31,10 @@
   ],
   "scripts": {
     "dev": "node scripts/dev-server.mjs",
+    "dev:mock": "node scripts/dev-server.mjs 57571 --mock-llm",
     "seed": "node scripts/seed.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "test": "node scripts/test-tools.mjs && node scripts/test-obsidian.mjs && node scripts/test-arxiv.mjs && node scripts/test-ocr.mjs && python assets/pdf_tool.py --self-test",
+    "test": "node scripts/test-tools.mjs && node scripts/test-doc.mjs && node scripts/test-ai.mjs && node scripts/test-obsidian.mjs && node scripts/test-arxiv.mjs && node scripts/test-ocr.mjs && python assets/pdf_tool.py --self-test",
     "selftest:pdf": "python assets/pdf_tool.py --self-test"
   },
   "keywords": [

@@ -2,20 +2,26 @@
 
 [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) 插件：**论文工作台**。
 
-左侧导航多一行「论文工作台」：左边是文献库，右边是 PDF 阅读器 + 中文版 + 笔记 + Obsidian 卡片。
-插件**不做自己的 AI 对话**——所有「理解 / 翻译 / 整理」按钮都只是把一段带论文 id 的指令写进当前会话，
-由会话里的 agent 调用插件注册的 `paper_*` 工具完成，结果落回本地库与你的 Obsidian 论文知识库。
+左侧导航多一行「论文工作台」：左边是文献库，右边是**对照阅读**（原文段 + 中文译文逐段穿插）、
+PDF 页图、笔记与 Obsidian 卡片，最右侧是**面板内对话**。
 
-> 状态：0.1.x，接口与数据结构仍可能变动。
+理解与翻译不再需要退出工作台：翻译走插件自己的 SSE 流，逐段落到原文下方；讲解与追问在右侧对话抽屉里流式回答。
+模型从 DSH 已配置的模型里选（默认跟随当前会话模型），也可以用 `paper_*` 工具让会话里的 agent 处理整本级别的工作。
+
+> 状态：0.2.x，接口与数据结构仍可能变动。
 
 ## 能做什么
 
-- **文献库**：按专题分组；上传 PDF、按本地路径导入、从 Obsidian 卡片反查原始 PDF 批量入库；删除进回收站。
-- **阅读器**：整页渲染（按需渲染 + 预取下一页）、目录（PDF 书签，没有则按字号启发式）、全文检索、页内文本层可选可问、高亮笔记。
+- **三栏布局**：文献库 / 目录 / 对话三栏都能拖宽、双击复位、拖到最窄自动收起；顶栏三个按钮随时重开，状态存在本地。
+- **文献库**：按专题分组（默认全部收起）、记住展开状态；上传 PDF、按本地路径导入、从 Obsidian 卡片反查原始 PDF 批量入库；删除进回收站。
+- **对照阅读**：默认视图。节标题 + 原文段 + 中文译文连续滚动，`目录` 点击只跳转（不过滤内容），滚动时自动高亮当前节。
+- **面板内翻译**：`译` 开关、`译本节`、`整篇翻译`、`目录翻译` 全在面板里完成，SSE 逐段推、可随时 `停止`；译文按段落 hash 缓存在 `trans.json`，重开直接显示。
+- **面板内对话**：右侧抽屉，流式回答，回答里的 `[p.N]` 点开原文页；`讲解本节` / `讲解选中段落` / `总结全文` 一键追问；历史按论文存在 `chat.json`。
+- **模型可选**：设置 → AI 里给「翻译」和「对话」分别指定 DSH 模型（默认跟随当前模型），温度可调。
+- **原文页**：整页渲染（按需渲染 + 预取下一页）、翻页/缩放、PDF 书签目录（没有则按字号启发式）。
 - **在线检索**：arXiv / OpenAlex，支持关键词、arXiv ID、DOI；一键下载开放 PDF 入库。
-- **整本翻译**：agent 分批读原文、逐页翻译，用 `paper_translate` 写进 `zh.md`；面板「中文」页签边译边刷新。
-- **理解与整理**：划词问 agent、双击段落解释、精读报告（摘要 / 方法 / 贡献 / 局限 / 可复现要点）、多篇勾选后生成对比综述。
-- **扫描件 OCR**：没有文本层的 PDF 可以调 PaddleOCR 云端接口（PaddleOCR-VL-1.6 / PP-StructureV3 / PP-OCRv6）识别成按页 Markdown，之后照常翻译、检索、问答。
+- **理解与整理**：划词问 agent、双击段落解释、精读报告（摘要 / 方法 / 贡献 / 局限 / 可复现要点）、多篇勾选后生成对比综述（这些仍走会话，结果落回本地库与 Obsidian）。
+- **扫描件 OCR**：没有文本层的 PDF 可以调 PaddleOCR 云端接口（PaddleOCR-VL-1.6 / PP-StructureV3 / PP-OCRv6）识别成按页 Markdown，之后照常对照、翻译、检索、问答。
 - **Obsidian 联动**：直接读写已有「论文知识库」卡片；frontmatter **行级合并**（只改传入的键，保留未知字段、注释和书写风格），写前备份，幂等。
 
 ## 依赖
@@ -41,12 +47,23 @@ dsh plugin --profile desktop add /absolute/path/to/dsh-paper-workbench
 ## 用起来
 
 1. 左栏点「论文工作台」。首次可以「按路径导入」一篇 PDF，或「在线检索」。
-2. 选中论文：`原文` 看页图，`文本` 选字（浮出 问 agent / 翻译 / 高亮 / 复制），`中文` 看译文，`笔记` 管高亮，`卡片` 看 Obsidian 卡片。
-3. 顶部按钮把指令写进**当前会话**输入框，回到对话点发送：
-   - `精读整篇` → 七节报告 + 写入卡片「精读报告」
-   - `整本翻译` → 分批读原文、逐页翻译、`paper_translate` 落盘
-   - `导读` / `写入卡片` / `讲解本页` / `翻译本页`
-4. 左栏勾选 ≥2 篇 → `对比综述` → 对比表 + 研究脉络，写入 `方向综述/`。
+2. 选中论文后默认进入 `对照`：滚轮往下就是全文，原文段下面跟着中文（点 `译` 或 `译本节` 才翻，不自动烧钱）。
+3. 目录点一下只跳到那一节；想翻哪节就按那一行右侧的 `译` / `讲`。
+4. `整篇翻译` 会先告诉你「N 节 · M 段」，确认后按节串行推进，状态栏显示进度，`停止` 立即中断并保留已翻部分。
+5. 右侧对话直接问；`讲解本节` / `讲解选中段落` / `总结全文` 是快捷指令，回答里 `[p.N]` 可点。
+6. 要把结果带回主会话：对话气泡上的 `插入到会话`，或用顶部仍保留的 `精读整篇` / `整本翻译` / `导读` / `写入卡片` 等会话指令。
+7. 左栏勾选 ≥2 篇 → `对比综述` → 对比表 + 研究脉络，写入 `方向综述/`。
+
+## 翻译与对话（面板内，不占用会话）
+
+- **走谁**：默认跟随 DSH 当前模型；`⚙ 设置 → AI` 可以给「翻译」和「对话」分别钉一个模型（列表来自 DSH 已配置的 provider/model），
+  也可调温度（默认 0.2）。插件**不读也不存**任何 API Key，请求一律通过宿主 `ctx.llm`，用哪个 provider/model 由设置决定。
+- **段落模型**：打开论文时按 PDF 文本层（扫描件用 OCR 结果）切段落、按目录分节，段落 hash 是缓存的键。
+  公式/图表段不送翻译，只提示「见原文页 p.N」。
+- **批量与容错**：一批最多 6 段、2000 字符；模型回的不是合法 JSON 时自动退化成逐段重发；被 `max-tokens` 截断就把预算翻倍重试一次。
+- **缓存**：译文按 hash 存 `trans.json`，默认不覆盖（想重翻按 `重新翻译`）；标题另存 `t:<hash>`，`目录翻译` 一次请求翻一批。
+- **对话**：每条问题带上当前节的原文上下文（必要时压缩），流式 SSE 返回；历史按论文存 `chat.json`（保留最近 200 条），`清空` 只清当前论文。
+- **停止**：翻译与对话都能中途停；停止后已收到的段落/片段保留。
 
 ## 扫描件 OCR（PaddleOCR 云端接口）
 
@@ -75,6 +92,7 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 | --- | --- |
 | `paper_library` | 列/查/改/删文献库条目（`action=list/get/update/remove/topics`） |
 | `paper_read` | 读正文（`pages="1-5"`）、目录、元数据；扫描件自动改读 OCR 文本 |
+| `paper_doc` | 读结构化段落（`id` / `sectionId` / `pages` / `maxChars`），按节输出 `[p.N](段落hash)`，供整本理解与翻译 |
 | `paper_ocr` | 扫描件 OCR：`action=start/status/read/pages`（PaddleOCR 云端） |
 | `paper_import` | 按 `path` / `arxivId` / `doi` / `query` 入库 |
 | `paper_search_online` | arXiv + OpenAlex 检索（不下载） |
@@ -87,7 +105,10 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 | 路由 | 说明 |
 | --- | --- |
 | `GET  /paper-workbench/app` | 工作台页面（主区 iframe 的内容） |
-| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`vault.upsert` |
+| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`doc.get`、`ai.models`、`trans.get`、`chat.get`、`vault.upsert` |
+| `POST /paper-workbench/ai/translate` | SSE 逐段翻译（事件 `start/delta/done/error/end`） |
+| `POST /paper-workbench/ai/chat` | SSE 对话（事件 `delta/done/error/end`） |
+| `POST /paper-workbench/ai/cancel` | 取消正在跑的流式请求（`{reqId}`） |
 | `GET  /paper-workbench/api/page?id=&page=&scale=` | 页图 PNG（按需渲染，带磁盘缓存） |
 | `GET  /paper-workbench/api/raw?id=` | 原始 PDF（支持单段 Range，供浏览器查看器） |
 | `POST /paper-workbench/api/upload?name=` | 上传 PDF 原始字节 |
@@ -104,8 +125,11 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
     meta.json
     paper.pdf            # storage=copy 时的库内副本
     text.json            # 文本块缓存（按源 PDF mtime+size 失效）
+    doc.json             # 段落/分节模型（按 PDF sha1 缓存，段落 hash 是翻译的键）
+    trans.json           # 段落译文缓存（正文段 + `t:<hash>` 标题）
+    chat.json            # 面板内对话历史（最近 200 条）
     notes.json           # 高亮
-    zh.md                # 中文版（## p.N 分段）
+    zh.md                # 中文版（## p.N 分段，会话侧翻译产物）
     ocr.md               # 扫描件 OCR 结果（## p.N 分段）
     ocr.json             # 最近一次 OCR 任务状态（进度/错误）
   .pages/<id>/           # 页图缓存
@@ -119,37 +143,45 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 ## 开发
 
 ```bash
-npm run dev      # 独立调试服务器 http://127.0.0.1:57571/paper-workbench/app
-npm run seed     # 塞几篇本机样例论文（幂等）
-npm test         # 工具层 + Obsidian + arXiv + OCR + PDF 自检
-npm run smoke -- http://127.0.0.1:57571   # 打一遍 HTTP 接口
+npm run dev       # 独立调试服务器 http://127.0.0.1:57571/paper-workbench/app
+npm run dev:mock  # 同上，但翻译/对话用假模型（不烧 token，验证界面用）
+npm run seed      # 塞几篇本机样例论文（幂等）
+npm test          # 工具层 + 段落模型 + AI（假 llm）+ Obsidian + arXiv + OCR + PDF 自检
+npm run smoke -- http://127.0.0.1:57571   # 打一遍 HTTP 接口（含 SSE 翻译/对话）
 ```
 
 `scripts/dev-server.mjs` 与宿主共用 `lib/server.js` + `createApi()`，因此这里调通的行为装进 DSH 后一致。
+`--mock-llm` 注入一个假 `llm`（按 prompt 标记回 JSON / 中文），不联网、不消耗配额。
 
 目录：
 
 ```
-lib/index.js    宿主入口（路由 + API + 工具注册）
-lib/server.js   HTTP 处理（宿主与 dev-server 共用）
-lib/store.js    本地存储（索引/笔记/译文，原子写）
+lib/index.js    宿主入口（路由 + API + 工具注册 + 把 ctx.llm 注入 ai 层）
+lib/server.js   HTTP 处理（宿主与 dev-server 共用，含 SSE 与取消）
+lib/store.js    本地存储（索引/笔记/译文/对话/段落模型，原子写）
+lib/doc.js      段落模型（块合并、分节、hash、按 sha1 缓存）
+lib/ai.js       翻译与对话（批量、JSON 解析、退化重试、标题、SSE 事件）
+lib/sse.js      SSE 输出（心跳、客户端断开即 abort）
 lib/pdf.js      PyMuPDF 子进程桥
 lib/obsidian.js frontmatter 行级合并、卡片定位/写入、检索
 lib/arxiv.js    arXiv Atom + OpenAlex 解析、PDF 下载
 lib/ocr.js      PaddleOCR 云端任务（提交/轮询/jsonl → 按页 Markdown）
-lib/tools.js    8 个 agent 工具（裸 JSON-Schema）
+lib/tools.js    9 个 agent 工具（裸 JSON-Schema）
 lib/client.js   左栏入口 + 主区 iframe 壳 + 把指令写入会话输入框
-assets/app/     工作台 SPA（vanilla JS）
+assets/app/     工作台 SPA（vanilla JS，三栏 + 对照视图）
 assets/pdf_tool.py  PyMuPDF 命令行协处理器
+docs/v2-contracts.md  v2 的数据形状与接口契约（改这些先看它）
 ```
 
 ## 已知限制
 
 - 扫描件要能读/译，得先走一次 OCR（「设置 → 扫描件 OCR」填 PaddleOCR Key）；OCR 结果是按页 Markdown，不还原图片位置。
-- 翻译目标是「可读」而非 PDF 版面重排，双栏与公式可能按行拆开。
+- 对照阅读的粒度是「段落」，段落由 PDF 文本层切出来；双栏论文偶尔会把两栏并成一段，公式与表格段不送翻译（只给原文页跳转）。
+- 面板内翻译是逐段"可读"译文，不做 PDF 版面重排；需要整版双语 PDF 的话本插件不提供（不做 BabelDOC/MinerU 那类子进程）。
+- 面板内对话是插件自己的对话（按论文存历史），**不是** DSH 会话；要把结论带回主对话用气泡上的「插入到会话」。
+- `精读整篇` / `整本翻译` / `对比综述` 这类整本活在主会话里跑（依赖 agent 与 `paper_*` 工具），且仍会往会话输入框写指令。
 - 只下载公开 PDF（arXiv / OpenAlex 开放获取），不绕过任何付费墙。
-- 插件内部没有独立对话；会话里要有 agent 才能完成翻译/报告（这是设计选择，不是缺失）。
-- 宿主代码改动不会热重载：改完需在插件页重新启用或重启桌面端。
+- 宿主代码改动不会热重载：改完需在插件页重新启用或重启桌面端；`assets/app/` 是静态文件，刷新页面即可。
 
 ## License
 

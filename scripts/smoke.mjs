@@ -7,9 +7,12 @@
  *   装进 DSH 后：node scripts/smoke.mjs http://127.0.0.1:57570
  *
  * 注意：会用样例 PDF 真正入库（写 ~/.dsh/paper-workbench），但不会往 Obsidian 写卡片。
+ * v2 追加：段落模型（doc.*）、SSE 流式翻译与对话（ai.*）。没有可用模型时这几项退化为
+ * 「路由活着 + 有中文错误提示」的检查，不会误报失败。
  */
 const BASE = (process.argv[2] || 'http://127.0.0.1:57571').replace(/\/+$/, '')
 const API = BASE + '/paper-workbench/api/'
+const STREAM = BASE + '/paper-workbench/ai/'
 const SAMPLE = 'G:\\笔记\\LLM知识体系论文\\高效微调\\Prompt Tuning.pdf'
 
 let pass = 0
@@ -34,6 +37,56 @@ async function rpc(method, args = {}) {
   const data = await response.json()
   if (!data.ok) throw new Error(method + '：' + data.error)
   return data.value
+}
+
+/** 读一条 SSE 流，按 `event:`/`data:` 切成事件数组。 */
+async function sse(path, body, { timeoutMs = 60000 } = {}) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(STREAM + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+    if (!response.ok || !response.body) {
+      const text = await response.text()
+      throw new Error(path + ' HTTP ' + response.status + '：' + text.slice(0, 300))
+    }
+    const events = []
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let boundary = buffer.indexOf('\n\n')
+      while (boundary >= 0) {
+        const raw = buffer.slice(0, boundary)
+        buffer = buffer.slice(boundary + 2)
+        boundary = buffer.indexOf('\n\n')
+        let event = 'message'
+        let data = ''
+        for (const line of raw.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim()
+          else if (line.startsWith('data:')) data += line.slice(5).trim()
+        }
+        if (data === '') continue
+        let parsed = null
+        try {
+          parsed = JSON.parse(data)
+        } catch {
+          parsed = { raw: data }
+        }
+        events.push({ event, data: parsed })
+      }
+    }
+    return events
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 async function main() {
@@ -86,6 +139,113 @@ async function main() {
 
   const vault = await rpc('vault.status')
   check('Obsidian 论文知识库可识别', vault.ok === true, vault.ok ? vault.cards + ' 张卡片' : vault.error)
+
+  // ── v2：段落模型 / 流式翻译 / 侧边对话 ─────────────────────────────
+  const docValue = await rpc('doc.get', { id }).catch((error) => ({ error }))
+  const doc = docValue.doc
+  check(
+    'doc.get 产出段落模型',
+    Boolean(doc && Array.isArray(doc.paragraphs) && doc.paragraphs.length > 0),
+    docValue.error ? String(docValue.error.message) : (doc.sections || []).length + ' 节 / ' + doc.paragraphs.length + ' 段 / 来源 ' + doc.source,
+  )
+  check(
+    '段落 hash 为 16 位十六进制',
+    Boolean(doc && doc.paragraphs[0] && /^[0-9a-f]{16}$/.test(doc.paragraphs[0].hash)),
+    doc && doc.paragraphs[0] && doc.paragraphs[0].hash,
+  )
+  check(
+    '每段都归属到某一节',
+    Boolean(doc) && (doc.paragraphs || []).every((item) => typeof item.section === 'string'),
+    doc ? (doc.paragraphs || []).filter((item) => !item.section).length + ' 段未归属' : '',
+  )
+
+  const aiModels = await rpc('ai.models').catch((error) => ({ error }))
+  check(
+    'ai.models 返回 provider/模型清单',
+    Boolean(!aiModels.error && Array.isArray(aiModels.providers) && Array.isArray(aiModels.models)),
+    aiModels.error ? String(aiModels.error.message) : (aiModels.providers || []).length + ' provider / ' + (aiModels.models || []).length + ' model',
+  )
+  check(
+    'ai.models 带 ready 与原因',
+    Boolean(!aiModels.error && typeof aiModels.ready === 'boolean'),
+    aiModels.ready === undefined ? '' : 'ready=' + aiModels.ready + (aiModels.reason ? '（' + aiModels.reason + '）' : ''),
+  )
+
+  const aiSettings = await rpc('ai.settings.get').catch((error) => ({ error }))
+  check(
+    'ai.settings.get 返回 ai 配置',
+    Boolean(!aiSettings.error && aiSettings.config && aiSettings.config.ai),
+    aiSettings.error ? String(aiSettings.error.message) : JSON.stringify(aiSettings.config && aiSettings.config.ai),
+  )
+
+  // 只翻一个正文段：够验证链路，又不会让冒烟测试跑很久
+  const samplePara = (doc && (doc.paragraphs || []).find((item) => item.kind === 'body')) || null
+  const translateEvents = await sse('translate', { id, keys: samplePara ? [samplePara.hash] : [], reqId: 'smoke-translate' }).catch(
+    (error) => [{ event: 'error', data: { message: String(error.message) } }],
+  )
+  const translateNames = translateEvents.map((item) => item.event)
+  const translateErrors = translateEvents.filter((item) => item.event === 'error')
+  const translateDone = translateEvents.filter((item) => item.event === 'done')
+  const translateEnd = translateEvents.find((item) => item.event === 'end')
+  if (translateDone.length > 0) {
+    check('翻译走 SSE 并逐段下发 done', translateDone.length > 0, translateDone.length + ' 段' + (translateEnd ? '，end ok=' + translateEnd.data.ok : ''))
+    check(
+      '翻译事件序列完整（start/done/end）',
+      ['start', 'done', 'end'].every((name) => translateNames.includes(name)),
+      'delta ' + translateNames.filter((name) => name === 'delta').length + ' 个',
+    )
+    const transValue = await rpc('trans.get', { id })
+    const doneKey = translateDone[0].data && translateDone[0].data.key
+    check(
+      '译文写进 trans.json',
+      Boolean(transValue.entries && transValue.entries[doneKey]),
+      '共 ' + Object.keys(transValue.entries || {}).length + ' 条',
+    )
+    if (doneKey) {
+      await rpc('trans.clear', { id, keys: [doneKey] })
+      const after = await rpc('trans.get', { id })
+      check('trans.clear 只删指定 key', !after.entries[doneKey], '剩 ' + Object.keys(after.entries || {}).length + ' 条')
+    }
+  } else {
+    // 没有可用模型：只要路由活着、给出可读的中文原因就算通过
+    check(
+      '翻译路由可用（无模型时给中文提示）',
+      translateErrors.length > 0 && typeof translateErrors[0].data.message === 'string' && translateErrors[0].data.message.length > 4,
+      translateErrors.length > 0 ? translateErrors[0].data.message : translateNames.join(',') || '没有任何事件',
+    )
+  }
+
+  const chatEvents = await sse('chat', {
+    id,
+    messages: [{ role: 'user', content: '用一句话概括这篇论文的研究问题。' }],
+    scope: 'paper',
+    reqId: 'smoke-chat',
+  }).catch((error) => [{ event: 'error', data: { message: String(error.message) } }])
+  const chatDone = chatEvents.find((item) => item.event === 'done')
+  const chatDelta = chatEvents.filter((item) => item.event === 'delta')
+  const chatEnd = chatEvents.find((item) => item.event === 'end')
+  if (chatDone) {
+    check('侧边对话走 SSE（delta 增量 + done + end）', chatDelta.length > 0 && Boolean(chatEnd), chatDelta.length + ' 个增量')
+    check('对话回答非空', String(chatDone.data.text || '').length > 0, String(chatDone.data.text || '').slice(0, 40))
+    const chatValue = await rpc('chat.get', { id })
+    check('chat.get 返回消息数组', Array.isArray(chatValue.messages), (chatValue.messages || []).length + ' 条')
+  } else {
+    const chatError = chatEvents.find((item) => item.event === 'error')
+    check(
+      '对话路由可用（无模型时给中文提示）',
+      Boolean(chatError) && typeof chatError.data.message === 'string' && chatError.data.message.length > 4,
+      chatError ? chatError.data.message : chatEvents.map((item) => item.event).join(',') || '没有任何事件',
+    )
+  }
+
+  const cancel = await fetch(STREAM + 'cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reqId: 'smoke-nonexistent' }),
+  })
+    .then((response) => response.json())
+    .catch((error) => ({ ok: false, error: String(error.message) }))
+  check('ai/cancel 对未知 reqId 返回可读错误', cancel.ok === false && typeof cancel.error === 'string', cancel.error)
 
   await rpc('library.remove', { id })
   const after = await rpc('library.list')

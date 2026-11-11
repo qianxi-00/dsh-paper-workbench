@@ -37,7 +37,7 @@ function body(result) {
 }
 
 async function main() {
-  check('注册了 8 个工具', tools.size === 8, [...tools.keys()].join(', '))
+  check('注册了 9 个工具', tools.size === 9 && tools.has('paper_doc'), [...tools.keys()].join(', '))
   check('parsePages "1-3,5"', JSON.stringify(parsePages('1-3,5', 10)) === '[1,2,3,5]')
   check('parsePages all 上限', parsePages('all', 10).length === 10)
 
@@ -59,6 +59,14 @@ async function main() {
 
   const bad = await call('paper_read', { id: 'no-such-paper-000' })
   check('错误 id 返回 isError', bad.isError === true && body(bad).includes('失败'))
+
+  const docText = await call('paper_doc', { id, maxChars: 4000 })
+  const docBody = body(docText)
+  check(
+    'paper_doc 返回按节的段落文本',
+    docText.isError === false && docBody.includes('节清单') && docBody.includes('[p.'),
+    docBody.split('\n')[0],
+  )
 
   const online = await call('paper_search_online', { query: 'prompt tuning', limit: 3 })
   check('paper_search_online', online.isError === false && JSON.parse(body(online)).length > 0)
