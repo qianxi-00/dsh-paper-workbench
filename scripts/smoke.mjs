@@ -178,6 +178,34 @@ async function main() {
     aiSettings.error ? String(aiSettings.error.message) : JSON.stringify(aiSettings.config && aiSettings.config.ai),
   )
 
+  // 划词翻译（ad-hoc）：只翻传进去的这一小段，且不写 trans.json、不进 chat.json
+  const healthValue = await rpc('health').catch(() => ({}))
+  check(
+    'health 声明支持 ad-hoc 划词翻译',
+    Boolean(healthValue && healthValue.ai && healthValue.ai.adhoc === true),
+    healthValue && healthValue.ai ? 'adhoc=' + String(healthValue.ai.adhoc) : '没有 ai 段',
+  )
+  const transBefore = await rpc('trans.get', { id }).catch(() => ({ entries: {} }))
+  const adhocEvents = await sse('translate', { id, text: 'Smoke test sentence about prompt tuning.', reqId: 'smoke-adhoc' }).catch(
+    (error) => [{ event: 'error', data: { message: String(error.message) } }],
+  )
+  const adhocDone = adhocEvents.find((item) => item.event === 'done')
+  const adhocEnd = [...adhocEvents].reverse().find((item) => item.event === 'end')
+  check(
+    '划词翻译走一次性通道并返回译文',
+    Boolean(adhocDone && adhocDone.data.key === 'selection' && String(adhocDone.data.text || '').length > 0),
+    adhocDone
+      ? 'key=' + adhocDone.data.key + ' 长度 ' + String(adhocDone.data.text || '').length
+      : JSON.stringify(adhocEvents[0] && adhocEvents[0].data),
+  )
+  check('划词翻译 end.ok', Boolean(adhocEnd && adhocEnd.data && adhocEnd.data.ok === true), adhocEnd ? JSON.stringify(adhocEnd.data) : '没有 end')
+  const transAfter = await rpc('trans.get', { id }).catch(() => ({ entries: {} }))
+  check(
+    '划词翻译不写 trans.json',
+    Object.keys(transAfter.entries || {}).length === Object.keys(transBefore.entries || {}).length,
+    Object.keys(transBefore.entries || {}).length + ' → ' + Object.keys(transAfter.entries || {}).length,
+  )
+
   // 只翻一个正文段：够验证链路，又不会让冒烟测试跑很久
   const samplePara = (doc && (doc.paragraphs || []).find((item) => item.kind === 'body')) || null
   const translateEvents = await sse('translate', { id, keys: samplePara ? [samplePara.hash] : [], reqId: 'smoke-translate' }).catch(

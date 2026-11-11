@@ -383,6 +383,26 @@ body.dragging * { cursor: col-resize !important; }
   font-size: 12px;
 }
 .zh-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* 原文页/无段落模型时的划词译文小卡片：贴在选区附近，可关掉，不进对话 */
+.sel-trans {
+  margin: 8px 0 12px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-size: 13.5px;
+  line-height: 1.8;
+}
+.sel-trans-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.sel-trans-head .link { margin-left: auto; }
 .compare.only-zh .para-orig { display: none; }
 .compare.only-zh .para-zh { display: block; }
 

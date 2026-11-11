@@ -20,6 +20,9 @@ const toastEl = document.getElementById('toast')
 const LAYOUT_KEY = 'pb.layout.v1'
 const TREE_KEY = 'pb.tree.v1'
 const AI_KEY = 'pb.ai.v1'
+// 面板每次重新挂载（关掉再打开 / 切走切回）都等于重开一个页面：
+// 当前论文、页签、页码、滚动位置都记在这儿，回来时还原成离开时的样子。
+const SESSION_KEY = 'pb.session.v1'
 const LAYOUT_DEFAULT = { side: 272, outline: 200, chat: 340, sideOpen: true, outlineOpen: true, chatOpen: true }
 // 三条分隔条：min/max 与默认值（与 CSS 的视觉宽度一致，拖到 <120 松手即收起）
 const LAYOUT_LIMITS = {
@@ -298,6 +301,50 @@ function saveTree() {
   } catch {
     /* 同上 */
   }
+}
+
+// ---------------------------------------------------------------- 会话（界面状态）记忆
+
+let sessionRestoring = false
+
+function loadSession() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SESSION_KEY) || '{}')
+    return raw && typeof raw === 'object' ? raw : {}
+  } catch {
+    return {}
+  }
+}
+
+let sessionSaveTimer = 0
+function saveSession(patch = {}) {
+  if (sessionRestoring) return
+  const meta = state.current && state.current.meta
+  const scroller = document.querySelector('.compare-scroll')
+  const existing = loadSession()
+  // 没打开论文时（刚启动）不要把上次的 paperId 抹成 null，否则下次进来就回到空态
+  const next = {
+    paperId: (meta && meta.id) || existing.paperId || null,
+    tab: state.tab,
+    page: state.page,
+    sectionId: state.sectionId || null,
+    scrollTop: scroller ? scroller.scrollTop : existing.scrollTop,
+    ...patch,
+  }
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ ...existing, ...next, at: new Date().toISOString() }))
+  } catch {
+    /* 隐私模式下忽略 */
+  }
+}
+
+/** 滚动很密，别每帧写 localStorage。 */
+function saveSessionSoon(extra) {
+  if (sessionSaveTimer) return
+  sessionSaveTimer = setTimeout(() => {
+    sessionSaveTimer = 0
+    saveSession(extra)
+  }, 400)
 }
 
 function loadAiState() {
@@ -872,6 +919,12 @@ function paintTranslation(key) {
   const text = state.trans[key] && state.trans[key].zh
   const stream = state.streams.get(key)
   for (const node of nodes) node.replaceChildren(...zhContent(key, text, stream))
+  // 译文是在 render 之后才到的：.compare 的 show-zh 是渲染时算的，
+  // 不补这一步，划词/单段翻译完成后段落下面的中文会被 display:none 藏起来。
+  if (text || stream) {
+    const compare = document.querySelector('.compare')
+    if (compare && !compare.classList.contains('show-zh')) compare.classList.add('show-zh')
+  }
 }
 
 function zhContent(key, text, stream) {
@@ -1095,30 +1148,33 @@ async function loadHealth() {
   }
 }
 
-async function openPaper(id) {
+async function openPaper(id, options = {}) {
+  // 从会话记忆恢复时：页签、页码、当前节都按离开时的样子来，不重置成「对照 / 上次阅读页」
+  const restore = options.session && options.session.paperId === id ? options.session : null
   try {
     state.busy = 'open'
     render()
     const value = await rpc('library.get', { id })
     state.current = value
-    state.page = Math.max(1, Math.min(value.meta.lastReadPage || 1, value.meta.pageCount || 1))
+    const wantedPage = restore && Number(restore.page) > 0 ? Number(restore.page) : value.meta.lastReadPage || 1
+    state.page = Math.max(1, Math.min(wantedPage, value.meta.pageCount || 1))
     state.pageInfo = null
     state.blocks = []
     state.card = null
     state.ocr = value.ocr || null
     state.ocrPages = []
-    state.tab = 'compare'
+    state.tab = (restore && restore.tab) || 'compare'
     state.doc = null
     state.docError = ''
     state.trans = {}
     state.streams = new Map()
     state.job = null
     state.translateError = ''
-    state.sectionId = null
+    state.sectionId = (restore && restore.sectionId) || null
     state.chat.messages = []
     state.chat.error = ''
     state.chat.busy = false
-    pendingScrollReset = true
+    pendingScrollReset = !restore
     await Promise.all([loadPage(state.page), loadDoc(id), loadChat(id), loadAi()])
     if (value.meta.status === 'unread') {
       await rpc('library.update', { id, patch: { status: 'reading' } }).catch(() => {})
@@ -1129,6 +1185,11 @@ async function openPaper(id) {
   } finally {
     state.busy = ''
     render()
+    if (restore && Number.isFinite(Number(restore.scrollTop))) {
+      const scroller = document.querySelector('.compare-scroll')
+      if (scroller) scroller.scrollTop = Number(restore.scrollTop)
+    }
+    saveSession({ paperId: id, tab: state.tab, page: state.page, sectionId: state.sectionId })
   }
 }
 
@@ -1154,6 +1215,7 @@ async function loadPage(page) {
       state.page = Math.min(state.page, info.pages)
     }
     await rpc('library.update', { id: meta.id, patch: { lastReadPage: state.page } }).catch(() => {})
+    saveSessionSoon({ page: state.page })
   } catch (error) {
     state.blocks = []
     state.pageInfo = null
@@ -1310,7 +1372,11 @@ function render() {
   // 目录标题/节标题的译文节点渲染时是空的（只能按 data-zh 后填），这里统一补一遍缓存译文
   paintAllTranslations()
   const scroller = document.querySelector('.compare-scroll')
-  if (scroller && previousScroll) scroller.scrollTop = previousScroll
+  if (scroller) {
+    if (previousScroll) scroller.scrollTop = previousScroll
+    // 位置变化就记一下，退出再进来能回到同一处
+    scroller.addEventListener('scroll', () => saveSessionSoon(), { passive: true })
+  }
   const outline = document.querySelector('.outline')
   if (outline && previousOutline) outline.scrollTop = previousOutline
   const chatList = document.querySelector('.chat-messages')
@@ -1587,6 +1653,7 @@ function switchTab(key) {
     loadPage(state.page).then(() => render())
   }
   render()
+  saveSession({ tab: key, page: state.page })
 }
 
 function renderEmpty() {
@@ -2569,7 +2636,7 @@ function showFloating(x, y, text) {
     'div',
     { class: 'floating-menu', style: { left: Math.min(window.innerWidth - 340, x) + 'px', top: Math.max(8, y - 44) + 'px' } },
     h('button', { onclick: () => { const selected = text; hideFloating(); askSelection(selected) } }, '问 AI'),
-    h('button', { onclick: () => { const selected = text; hideFloating(); askTranslateSelection(selected) } }, '翻译'),
+    h('button', { onclick: () => { const selected = text; hideFloating(); translateSelection(selected) } }, '翻译'),
     h('button', { onclick: () => { addHighlight(text); hideFloating() } }, '高亮'),
     h('button', { onclick: () => { copyText(text); hideFloating() } }, '复制'),
     h('button', { onclick: () => { const selected = text; hideFloating(); insertPrompt(P.askSelection(meta, selected)) } }, '插入会话'),
@@ -2590,17 +2657,89 @@ function askSelection(text) {
   sendChat('讲解这段选中的原文：\n> ' + String(text).slice(0, 1200), chatContext({ selection: String(text).slice(0, 2000) }))
 }
 
-function askTranslateSelection(text) {
-  if (!state.current) return
-  if (String(text || '').trim().length < 2) {
-    toast('没拿到选中的正文，请重新划选一段再点')
+/** 划词翻译：只触发这几次模型请求，不进对话、不留对话历史；译文贴在原文段下面。 */
+function translateSelection(text) {
+  const keys = selectionParagraphKeys()
+  if (keys.length) {
+    translateKeys(keys)
     return
   }
-  if (!state.layout.chatOpen) {
-    state.layout.chatOpen = true
-    saveLayout()
+  // 没有段落模型（原文页 / 纯文本块）时退化成一次性小工具：结果贴在选区附近，不进对话
+  translateSelectionCard(String(text || ''))
+}
+
+/** 选区覆盖到的段落 key（对照视图才有；跨段拖选会命中多段）。 */
+function selectionParagraphKeys() {
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0) return []
+  const range = selection.getRangeAt(0)
+  const keys = []
+  for (const para of document.querySelectorAll('.para[data-key]')) {
+    const key = para.getAttribute('data-key')
+    if (!key) continue
+    try {
+      if (!range.intersectsNode(para)) continue
+    } catch {
+      continue
+    }
+    keys.push(key)
   }
-  sendChat('把这段原文翻译成中文（保留术语与公式）：\n> ' + String(text).slice(0, 1200), chatContext({ selection: String(text).slice(0, 2000) }))
+  return keys
+}
+
+/**
+ * 一次性划词翻译（原文页 / 无段落模型时用）：/ai/translate 的 ad-hoc 分支，
+ * 宿主不读缓存、不写 trans.json、不碰 chat.json，每次都是全新请求。
+ */
+async function translateSelectionCard(text) {
+  const value = text.trim()
+  if (value.length < 2 || !state.current) return
+  // 老宿主没有 ad-hoc 通道：带 text 但没 keys 的请求会被当成「整篇翻译」，绝不能发。
+  if (!(state.health && state.health.ai && state.health.ai.adhoc)) {
+    toast('原文页划词翻译要重启桌面端后才生效；对照页的划词翻译现在就能用')
+    return
+  }
+  let host = null
+  const selection = window.getSelection()
+  const anchor = selection && selection.anchorNode
+  const start = anchor && (anchor.nodeType === 1 ? anchor : anchor.parentElement)
+  if (start && start.closest) host = start.closest('.blocks > *, .page-pane p, .markdown p, .para')
+  const old = document.querySelector('.sel-trans')
+  if (old) old.remove()
+  const body = h('div', { class: 'zh-text' }, '翻译中…')
+  const card = h(
+    'div',
+    { class: 'sel-trans' },
+    h('div', { class: 'sel-trans-head' }, '划词译文', h('button', { class: 'link', onclick: () => card.remove() }, '关闭')),
+    body,
+  )
+  if (host && host.parentElement) host.parentElement.insertBefore(card, host.nextSibling)
+  else (document.querySelector('.content') || document.body).append(card)
+  let accumulated = ''
+  try {
+    await streamSse(
+      TRANSLATE_URL,
+      { id: state.current.meta.id, text: value, reqId: genId() },
+      {
+        start() {},
+        delta(data) {
+          accumulated += String((data && data.text) || '')
+          body.textContent = accumulated
+        },
+        done(data) {
+          const final = String((data && data.text) || accumulated || '').trim()
+          body.textContent = final || '（模型没有返回译文）'
+        },
+        error(data) {
+          body.textContent = '翻译失败：' + String((data && data.message) || '未知错误')
+        },
+        end() {},
+      },
+      new AbortController().signal,
+    )
+  } catch (error) {
+    body.textContent = '翻译失败：' + error.message
+  }
 }
 
 async function addHighlight(text) {
@@ -2686,9 +2825,39 @@ async function boot() {
   await Promise.all([loadHealth(), loadAi()])
   await loadLibrary()
   render()
+  // 面板关掉再打开等于重开页面：把上次看到哪儿、停在哪个页签还原回去
+  const session = loadSession()
+  if (session && session.paperId && state.papers.some((paper) => paper.id === session.paperId)) {
+    sessionRestoring = true
+    try {
+      await openPaper(session.paperId, { session })
+    } finally {
+      sessionRestoring = false
+    }
+    saveSession()
+  }
 }
 
+// 关闭 / 切走时把当前位置记下来（pagehide 比 beforeunload 在嵌入场景更可靠）
+window.addEventListener('pagehide', () => saveSession())
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') saveSession()
+})
+
 // 调试/自测钩子：浏览器控制台里可以直接读 state、注入 mock、手动触发渲染。
-window.__pb = { state, rpc, render, loadDoc, openPaper, translateSection, translateAll, sendChat, sectionsOf }
+window.__pb = {
+  state,
+  rpc,
+  render,
+  loadDoc,
+  openPaper,
+  translateSection,
+  translateAll,
+  translateSelection,
+  sendChat,
+  sectionsOf,
+  saveSession,
+  loadSession,
+}
 
 boot()

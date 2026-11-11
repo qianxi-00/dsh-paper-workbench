@@ -576,6 +576,33 @@ async function main() {
     eq(trans.entries[paragraphs[0].hash], undefined)
   })
 
+  // ---------------------------------------------------------------- 划词翻译（ad-hoc）
+
+  await check('translate 带 text：只翻这一段、一次请求、不写 trans.json、不需要 doc', async () => {
+    const llm = fakeLlm(() => textChunks('这是译文。'))
+    const events = await collect(
+      ai.createAi({ store, ...fakeServices(llm) }).translate({ id: 'adhoc-probe', text: 'A selected sentence.' }),
+    )
+    eq(llm.calls.length, 1)
+    eq(llm.calls[0].messages[0].content[0].text, 'A selected sentence.')
+    eq(events.map((event) => event.event), ['start', 'delta', 'done', 'end'])
+    eq(events[2].data.key, 'selection')
+    eq(events[2].data.text, '这是译文。')
+    eq(events[3].data.ok, true)
+    const trans = await store.readTrans('adhoc-probe')
+    eq(Object.keys(trans.entries || {}).length, 0)
+  })
+
+  await check('translate 带 text：连续两次都是全新请求，不复用上一次的上下文', async () => {
+    const llm = fakeLlm((options) => textChunks('译文:' + options.messages[0].content[0].text))
+    const engine = ai.createAi({ store, ...fakeServices(llm) })
+    await collect(engine.translate({ id: 'adhoc-probe', text: 'first sentence' }))
+    await collect(engine.translate({ id: 'adhoc-probe', text: 'second sentence' }))
+    eq(llm.calls.length, 2)
+    eq(llm.calls[1].messages.length, 1, '每次只发一条消息，不带历史')
+    eq(llm.calls[1].messages[0].content[0].text, 'second sentence')
+  })
+
   // ---------------------------------------------------------------- chat
 
   await check('chat：delta 聚合、done、chat.json 落盘与历史接续', async () => {
