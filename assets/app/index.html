@@ -4,103 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>论文工作台</title>
-    <style>
-      :root {
-        color-scheme: light dark;
-        --bg: #f7f7f8;
-        --fg: #1d1f23;
-        --muted: #6b7280;
-        --card: #ffffff;
-        --line: #e5e7eb;
-        --accent: #3b82f6;
-      }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #14161a;
-          --fg: #e6e8ec;
-          --muted: #98a2b3;
-          --card: #1b1e24;
-          --line: #2a2f37;
-          --accent: #60a5fa;
-        }
-      }
-      * { box-sizing: border-box; }
-      html, body { height: 100%; margin: 0; }
-      body {
-        background: var(--bg);
-        color: var(--fg);
-        font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 24px;
-      }
-      .card {
-        width: min(680px, 100%);
-        background: var(--card);
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        padding: 28px 30px;
-      }
-      h1 { font-size: 20px; margin: 0 0 6px; letter-spacing: 0.2px; }
-      .sub { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
-      .row { display: flex; gap: 10px; align-items: center; margin: 8px 0; }
-      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
-      .dot.ok { background: #22c55e; }
-      .dot.err { background: #ef4444; }
-      code, pre {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 12px;
-      }
-      pre {
-        background: color-mix(in srgb, var(--bg) 70%, transparent);
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 12px;
-        overflow: auto;
-        max-height: 220px;
-        margin: 14px 0 0;
-      }
-      .hint { color: var(--muted); font-size: 12px; margin-top: 18px; }
-      a { color: var(--accent); }
-    </style>
+    <link rel="stylesheet" href="/paper-workbench/app/style.css" />
   </head>
   <body>
-    <div class="card">
-      <h1>论文工作台</h1>
-      <p class="sub">骨架已就位。文献库、PDF 阅读器与 Obsidian 联动将在这里展开。</p>
-
-      <div class="row"><span class="dot" id="dot"></span><span id="status">正在检查宿主接口…</span></div>
-      <pre id="health">GET /paper-workbench/api/health</pre>
-
-      <p class="hint">
-        该页面由插件宿主从 <code>assets/app</code> 静态提供；如果你的改动没出现，刷新一下页面即可。
-      </p>
-    </div>
-
-    <script>
-      ;(async function () {
-        const dot = document.getElementById('dot')
-        const status = document.getElementById('status')
-        const pre = document.getElementById('health')
-        try {
-          const res = await fetch('/paper-workbench/api/health', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
-          const body = await res.json()
-          if (body && body.ok) {
-            dot.className = 'dot ok'
-            status.textContent = '宿主接口正常 · ' + (body.value.plugin || '') + ' · ' + (body.value.phase || '')
-            pre.textContent = JSON.stringify(body.value, null, 2)
-          } else {
-            dot.className = 'dot err'
-            status.textContent = '宿主返回错误'
-            pre.textContent = JSON.stringify(body, null, 2)
-          }
-        } catch (error) {
-          dot.className = 'dot err'
-          status.textContent = '无法连接宿主接口'
-          pre.textContent = String(error)
-        }
-      })()
-    </script>
+    <div id="app"></div>
+    <div id="toast" class="toast" hidden></div>
+    <script type="module" src="/paper-workbench/app/app.js"></script>
   </body>
 </html>
