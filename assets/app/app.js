@@ -226,6 +226,37 @@ function selectionText() {
   return selection ? String(selection).trim() : ''
 }
 
+/**
+ * 划词取文不能只信「此刻」的选择区：
+ * - 点按钮会把选择区塌成光标（鼠标按下处），String(selection) 变成空串或残余一两个字符；
+ * - 重渲染换掉正文节点时，Chrome 会把选择区挪到新节点上，留下一段「不是用户选的东西」。
+ * 所以拖选过程中（selectionchange）持续记住最后一次像样的选区文本，取文时优先用它。
+ */
+let selectionMemory = { text: '', at: 0 }
+const SELECTION_MEMORY_MS = 5 * 60 * 1000
+
+/** 用户此刻选中的正文（只在阅读区里算数，输入框/按钮里的选择不算）。 */
+function liveReaderSelection() {
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0) return ''
+  const text = String(selection).trim()
+  if (!text) return ''
+  const anchor = selection.anchorNode
+  const element = anchor && (anchor.nodeType === 1 ? anchor : anchor.parentElement)
+  if (!element || !element.closest) return ''
+  return element.closest('.compare, .page-pane, .markdown, .blocks') ? text : ''
+}
+
+/** 取「用户想讲解的那段」：优先当前选区，选区被塌掉/换掉时退回刚才记住的那段。 */
+function pickedText() {
+  const live = liveReaderSelection()
+  if (live.length >= 2) return live
+  const remembered = selectionMemory.text
+  const fresh = Date.now() - selectionMemory.at < SELECTION_MEMORY_MS
+  if (fresh && remembered.length >= 2) return remembered
+  return live
+}
+
 // ---------------------------------------------------------------- 持久化
 
 function loadLayout() {
@@ -1246,7 +1277,32 @@ async function runOcr() {
 
 // ---------------------------------------------------------------- 渲染入口
 
+let deferredRender = false
+let deferredSince = 0
+const RENDER_DEFER_MAX_MS = 1200
+
+/** 选区消失（或等太久）后补做被推迟的整页重绘。 */
+function flushDeferredRender() {
+  if (!deferredRender) return
+  if (liveReaderSelection().length >= 2 && Date.now() - deferredSince < RENDER_DEFER_MAX_MS) return
+  deferredRender = false
+  deferredSince = 0
+  render()
+}
+
 function render() {
+  // 用户正在正文里选字时别整页重绘：app.replaceChildren() 会把选区所在的节点一起换掉，
+  // 拖选到一半节点被换掉，Chrome 会把选区挪到新节点上，mouseup 时取到的就不是用户选的那段。
+  // 这里先记账，等选区空了（或最多等 RENDER_DEFER_MAX_MS）再补绘。
+  if (liveReaderSelection().length >= 2) {
+    if (!deferredSince) deferredSince = Date.now()
+    if (Date.now() - deferredSince < RENDER_DEFER_MAX_MS) {
+      deferredRender = true
+      return
+    }
+  }
+  deferredRender = false
+  deferredSince = 0
   const previousScroll = pendingScrollReset ? 0 : (document.querySelector('.compare-scroll') || {}).scrollTop || 0
   const previousOutline = (document.querySelector('.outline') || {}).scrollTop || 0
   pendingScrollReset = false
@@ -2086,7 +2142,7 @@ function renderChat() {
       'div',
       { class: 'chat-quick' },
       h('button', { class: 'ghost', onclick: () => sendQuick('讲解本节', { scope: 'section' }) }, '讲解本节'),
-      h('button', { class: 'ghost', onclick: () => { const text = selectionText(); if (!text) { toast('先在正文里选中一段文字'); return } sendQuick('讲解这段选中的原文：\n> ' + text.slice(0, 800), { scope: 'section', selection: text.slice(0, 2000) }) } }, '讲解选中段落'),
+      h('button', { class: 'ghost', onclick: () => { const text = pickedText(); if (text.length < 2) { toast('先在正文里选中一段文字'); return } sendQuick('讲解这段选中的原文：\n> ' + text.slice(0, 800), { scope: 'section', selection: text.slice(0, 2000) }) } }, '讲解选中段落'),
       h('button', { class: 'ghost', onclick: () => sendQuick('总结全文', { scope: 'paper' }) }, '总结全文'),
     ),
   )
@@ -2493,6 +2549,7 @@ async function importFromVault() {
 // ---------------------------------------------------------------- 划词菜单 / 高亮
 
 let floating = null
+let floatingShownAt = 0
 
 function hideFloating() {
   if (floating) {
@@ -2507,6 +2564,7 @@ function showFloating(x, y, text) {
   const meta = state.current && state.current.meta
   if (!meta) return
   state.selection = { text }
+  floatingShownAt = Date.now()
   floating = h(
     'div',
     { class: 'floating-menu', style: { left: Math.min(window.innerWidth - 340, x) + 'px', top: Math.max(8, y - 44) + 'px' } },
@@ -2521,6 +2579,10 @@ function showFloating(x, y, text) {
 
 function askSelection(text) {
   if (!state.current) return
+  if (String(text || '').trim().length < 2) {
+    toast('没拿到选中的正文，请重新划选一段再点')
+    return
+  }
   if (!state.layout.chatOpen) {
     state.layout.chatOpen = true
     saveLayout()
@@ -2530,6 +2592,10 @@ function askSelection(text) {
 
 function askTranslateSelection(text) {
   if (!state.current) return
+  if (String(text || '').trim().length < 2) {
+    toast('没拿到选中的正文，请重新划选一段再点')
+    return
+  }
   if (!state.layout.chatOpen) {
     state.layout.chatOpen = true
     saveLayout()
@@ -2579,6 +2645,12 @@ const P = {
 
 // ---------------------------------------------------------------- 全局事件
 
+document.addEventListener('selectionchange', () => {
+  const text = selectionText()
+  if (text.length >= 2) selectionMemory = { text, at: Date.now() }
+  flushDeferredRender()
+})
+
 document.addEventListener('mouseup', (event) => {
   if (floating && floating.contains(event.target)) return
   const text = selectionText()
@@ -2595,7 +2667,10 @@ document.addEventListener('mouseup', (event) => {
 })
 
 document.addEventListener('click', (event) => {
-  if (floating && !floating.contains(event.target)) hideFloating()
+  // 拖选结束时浏览器会在鼠标松开处补一个 click（跨段选择时它落在 .compare 上），
+  // 不能让它把刚弹出来的划词菜单立刻关掉——那会让「问 AI」永远点不到。
+  const justShown = floating && Date.now() - floatingShownAt < 300
+  if (floating && !floating.contains(event.target) && !justShown) hideFloating()
   const cite = event.target instanceof Element ? event.target.closest('.cite') : null
   if (cite) {
     event.preventDefault()
