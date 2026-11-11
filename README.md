@@ -146,8 +146,9 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 npm run dev       # 独立调试服务器 http://127.0.0.1:57571/paper-workbench/app
 npm run dev:mock  # 同上，但翻译/对话用假模型（不烧 token，验证界面用）
 npm run seed      # 塞几篇本机样例论文（幂等）
-npm test          # 工具层 + 段落模型 + AI（假 llm）+ Obsidian + arXiv + OCR + PDF 自检
+npm test          # store 并发 + 工具层 + 段落模型 + AI（假 llm）+ Obsidian + arXiv + OCR + PDF 自检
 npm run smoke -- http://127.0.0.1:57571   # 打一遍 HTTP 接口（含 SSE 翻译/对话）
+npm run fix:library                       # 干跑一次库体检（重复条目/文件名式标题），加 -- --apply 才动库
 ```
 
 `scripts/dev-server.mjs` 与宿主共用 `lib/server.js` + `createApi()`，因此这里调通的行为装进 DSH 后一致。
