@@ -37,7 +37,7 @@ function body(result) {
 }
 
 async function main() {
-  check('注册了 7 个工具', tools.size === 7, [...tools.keys()].join(', '))
+  check('注册了 8 个工具', tools.size === 8, [...tools.keys()].join(', '))
   check('parsePages "1-3,5"', JSON.stringify(parsePages('1-3,5', 10)) === '[1,2,3,5]')
   check('parsePages all 上限', parsePages('all', 10).length === 10)
 

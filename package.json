@@ -33,7 +33,7 @@
     "dev": "node scripts/dev-server.mjs",
     "seed": "node scripts/seed.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "test": "node scripts/test-tools.mjs && node scripts/test-obsidian.mjs && node scripts/test-arxiv.mjs && python assets/pdf_tool.py --self-test",
+    "test": "node scripts/test-tools.mjs && node scripts/test-obsidian.mjs && node scripts/test-arxiv.mjs && node scripts/test-ocr.mjs && python assets/pdf_tool.py --self-test",
     "selftest:pdf": "python assets/pdf_tool.py --self-test"
   },
   "keywords": [

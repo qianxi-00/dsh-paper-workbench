@@ -34,6 +34,12 @@ const state = {
   showSettings: false,
   settings: null,
   selection: null,
+  // 扫描件 OCR：ocr 是服务端状态（state/model/pages/error），ocrPages 是按页文本
+  ocr: null,
+  ocrPages: [],
+  ocrBusy: '',
+  ocrToken: '',
+  ocrClear: false,
 }
 
 // ---------------------------------------------------------------- 小工具
@@ -268,8 +274,11 @@ async function openPaper(id) {
     state.blocks = []
     state.zh = ''
     state.card = null
+    state.ocr = value.ocr || null
+    state.ocrPages = []
     state.tab = 'read'
     await loadPage(state.page)
+    if (state.ocr && state.ocr.pages > 0) await loadOcrText()
     if (value.meta.status === 'unread') {
       await rpc('library.update', { id, patch: { status: 'reading' } }).catch(() => {})
       await loadLibrary()
@@ -330,6 +339,61 @@ async function loadCard() {
     state.card = null
   }
   render()
+}
+
+// ---------------------------------------------------------------- OCR（扫描件）
+
+/** 拉全篇 OCR 文本，按页存起来，文本页按当前页取用。 */
+async function loadOcrText() {
+  if (!state.current) return
+  try {
+    const value = await rpc('ocr.text', { id: state.current.meta.id, pages: 'all' })
+    state.ocrPages = value.pages || []
+  } catch {
+    state.ocrPages = []
+  }
+}
+
+/** 提交 OCR 任务并轮询进度；完成后切到「文本」页显示结果。 */
+async function runOcr() {
+  if (!state.current || state.ocrBusy) return
+  const id = state.current.meta.id
+  const model = (state.settings && state.settings.config && state.settings.config.ocr && state.settings.config.ocr.model) || ''
+  const began = Date.now()
+  state.ocrBusy = '正在提交 OCR 任务…'
+  render()
+  try {
+    let status = await rpc('ocr.start', model ? { id, model } : { id })
+    state.ocr = status
+    // 最长等 40 分钟：PaddleOCR 高峰期排队会慢，但不想无限轮询下去
+    while ((status.state === 'pending' || status.state === 'running') && Date.now() - began < 40 * 60 * 1000) {
+      const waited = Math.round((Date.now() - began) / 1000)
+      state.ocrBusy =
+        'OCR 进行中：' +
+        (status.extractedPages || 0) +
+        ' / ' +
+        (status.totalPages || '?') +
+        ' 页（已等 ' +
+        waited +
+        ' 秒）'
+      render()
+      await new Promise((resolve) => setTimeout(resolve, 2500))
+      status = await rpc('ocr.status', { id })
+      state.ocr = status
+    }
+    if (status.state === 'pending' || status.state === 'running') {
+      throw new Error('等了 40 分钟还没完成，任务可能仍在云端跑；稍后回到这篇按「OCR 识别」查状态。')
+    }
+    if (status.state === 'failed') throw new Error(status.error || 'OCR 任务失败')
+    await loadOcrText()
+    state.tab = 'text'
+    toast('OCR 完成：' + (status.pages || state.ocrPages.length) + ' 页')
+  } catch (error) {
+    toast('OCR 失败：' + error.message)
+  } finally {
+    state.ocrBusy = ''
+    render()
+  }
 }
 
 async function saveNotes(highlights) {
@@ -484,6 +548,11 @@ function renderSide() {
       { class: 'statusbar' },
       h('span', {}, state.health && state.health.pdf && state.health.pdf.ok ? 'PDF ✓' : 'PDF ✗'),
       h('span', {}, state.health && state.health.vault && state.health.vault.ok ? 'Obsidian ✓' : 'Obsidian ✗'),
+      h(
+        'span',
+        { title: 'PaddleOCR 云端接口（扫描件）' },
+        'OCR ' + (state.health && state.health.ocr && state.health.ocr.configured ? '✓' : '✗'),
+      ),
       h('span', { class: 'spacer' }),
       h('button', { class: 'ghost', onclick: openSettings, title: '设置' }, '⚙'),
     ),
@@ -552,6 +621,13 @@ function renderTopbar() {
     h('button', { onclick: () => insertPrompt(P.translateAll(meta)) }, '整本翻译'),
     h('button', { onclick: () => insertPrompt(P.askPaper(meta)) }, '导读'),
     h('button', { onclick: () => insertPrompt(P.syncCard(meta)) }, '写入卡片'),
+    meta.hasText === false || state.ocr
+      ? h(
+          'button',
+          { class: 'ghost', onclick: runOcr, disabled: !!state.ocrBusy, title: '扫描件：调用 PaddleOCR 识别全文' },
+          state.ocrBusy ? 'OCR 中…' : state.ocr && state.ocr.pages > 0 ? '重新 OCR' : 'OCR 识别',
+        )
+      : null,
     h(
       'button',
       {
@@ -748,6 +824,11 @@ function renderTextPane() {
   const meta = state.current.meta
   const pane = h('div', { class: 'pane' })
   const body = h('div', { class: 'blocks' })
+  const ocrPage = (state.ocrPages || []).find((item) => Number(item.n) === Number(state.page))
+  if (state.blocks.length === 0 && ocrPage) {
+    // 扫描件：没有文本层，用 OCR 结果顶替本页文本
+    body.append(h('div', { class: 'markdown', html: renderMarkdown(ocrPage.text) }))
+  }
   for (const block of state.blocks) {
     const node = h(
       'div',
@@ -764,7 +845,40 @@ function renderTextPane() {
     )
     body.append(node)
   }
-  if (state.blocks.length === 0) body.append(h('div', { class: 'hint' }, '这一页没有可提取的文本（可能是扫描件）；页图仍可阅读。'))
+  const ocrState = state.ocr || {}
+  const ocrConfig = (state.health && state.health.ocr) || {}
+  const ocrConfigured = ocrConfig.configured !== false && ocrState.configured !== false
+  let ocrBar = null
+  if (state.ocrBusy) {
+    ocrBar = h('div', { class: 'ocr-bar' }, h('span', {}, state.ocrBusy))
+  } else if (state.blocks.length === 0 && ocrPage) {
+    ocrBar = h(
+      'div',
+      { class: 'ocr-bar' },
+      h('span', { class: 'hint' }, '本页文本来自 PaddleOCR 识别（页码与原 PDF 对齐）'),
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'ghost', onclick: runOcr }, '重新识别'),
+    )
+  } else if (state.blocks.length === 0) {
+    const failed = ocrState.state === 'failed'
+    ocrBar = h(
+      'div',
+      { class: 'ocr-bar' },
+      h(
+        'span',
+        {},
+        failed
+          ? 'OCR 失败：' + (ocrState.error || '未知错误')
+          : ocrConfigured
+            ? '扫描件：这一页没有文本层，可调用 PaddleOCR 识别整篇'
+            : '扫描件：还没配置 PaddleOCR API Key（设置 → 扫描件 OCR）',
+      ),
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'primary', onclick: runOcr, disabled: !ocrConfigured }, 'OCR 识别整篇'),
+    )
+  } else if (ocrState.pages > 0) {
+    ocrBar = h('div', { class: 'ocr-bar' }, h('span', { class: 'hint' }, '已 OCR ' + ocrState.pages + ' 页，可用于核对与问答'))
+  }
   pane.append(
     h(
       'div',
@@ -775,6 +889,7 @@ function renderTextPane() {
       h('span', { class: 'spacer' }),
       h('span', { class: 'hint' }, '选中文字可译/可问；双击段落直接提问'),
     ),
+    ocrBar || h('div', {}),
     body,
   )
   return pane
@@ -1094,6 +1209,66 @@ function renderSettings() {
         h('option', { value: 'copy', selected: config.storage === 'copy' }, 'copy：复制进库（移动原文件也不怕）'),
       ),
     ),
+    h('div', { class: 'divider' }, '扫描件 OCR（PaddleOCR 云端接口）'),
+    h(
+      'div',
+      { class: 'field' },
+      h(
+        'label',
+        {},
+        (config.ocr && config.ocr.configured)
+          ? 'PaddleOCR API Key（已保存 ' + (config.ocr.hint || '') + '，留空表示不修改）'
+          : 'PaddleOCR API Key（去 ai.baidu.com 的 AI Studio 创建）',
+      ),
+      h('input', {
+        type: 'password',
+        autocomplete: 'off',
+        placeholder: (config.ocr && config.ocr.configured) ? '已配置，留空不修改' : '粘贴 API Key',
+        oninput: (event) => {
+          state.ocrToken = event.target.value
+          state.ocrClear = false
+        },
+      }),
+    ),
+    h(
+      'div',
+      { class: 'field' },
+      h('label', {}, 'OCR 模型'),
+      h(
+        'select',
+        {
+          onchange: (event) => {
+            config.ocr = Object.assign({}, config.ocr || {}, { model: event.target.value })
+          },
+        },
+        ['PaddleOCR-VL-1.6', 'PP-StructureV3', 'PP-OCRv6'].map((model) =>
+          h(
+            'option',
+            { value: model, selected: ((config.ocr || {}).model || 'PaddleOCR-VL-1.6') === model },
+            model + (model === 'PaddleOCR-VL-1.6' ? '（版面 Markdown，推荐）' : model === 'PP-OCRv6' ? '（纯文字，最快）' : '（结构化版面）'),
+          ),
+        ),
+      ),
+    ),
+    h(
+      'div',
+      { class: 'field-row' },
+      h('span', { class: 'hint' }, 'Key 只存在本机 ' + ((settings.dataRoot || '') + '\\config.json') + '（权限 0600），不写进仓库、不进日志、不回传浏览器明文。'),
+      h('span', { class: 'spacer' }),
+      h(
+        'button',
+        {
+          class: 'ghost',
+          disabled: !(config.ocr && config.ocr.configured),
+          onclick: () => {
+            state.ocrToken = ''
+            state.ocrClear = true
+            toast('已标记为「清除」（保存后生效）')
+          },
+        },
+        '清除 Key',
+      ),
+    ),
     h(
       'div',
       { class: 'foot' },
@@ -1103,9 +1278,16 @@ function renderSettings() {
         {
           class: 'primary',
           onclick: async () => {
+            const patch = Object.assign({}, config)
+            const token = (state.ocrToken || '').trim()
+            patch.ocr = Object.assign({}, config.ocr || {}, {
+              token: token ? token : state.ocrClear ? null : '',
+            })
             try {
-              await rpc('settings.set', { patch: config })
+              await rpc('settings.set', { patch })
               state.showSettings = false
+              state.ocrToken = ''
+              state.ocrClear = false
               await loadHealth()
               render()
               toast('设置已保存')
