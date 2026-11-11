@@ -62,6 +62,25 @@ def open_doc(args):
     return doc
 
 
+def _join_lines(lines):
+    """把同一块里的多行拼成一段。
+
+    PDF 在行尾断词，用空格硬拼会得到 `text- only` / `lin- guistic` 这种夹空格的写法。
+    行尾是连字符时去掉空格、保留连字符：`text-only` 正好是对的，`lin-guistic` 虽然还
+    差一个字母，但一眼还能认出是 linguistic（去掉连字符会得到 `textonly`，更糟）。
+    """
+    out = ""
+    for line in lines:
+        if not out:
+            out = line
+            continue
+        if out.endswith("-") and re.match(r"[A-Za-z0-9]", line):
+            out = out + line
+        else:
+            out = out + " " + line
+    return out
+
+
 def _span_meta(span):
     """返回 (原始文本, 字号, 小写字体名)。"""
     return (str(span.get("text") or "").replace("\u00a0", " "),
@@ -85,7 +104,7 @@ def _block_record(block):
         text = re.sub(r"\s+", " ", "".join(pieces)).strip()
         if text:
             lines.append(text)
-    text = " ".join(lines).strip()          # 行与行之间用空格拼成一段
+    text = _join_lines(lines).strip()       # 行与行之间用空格拼成一段（行尾断词先合上）
     if not text or not any(ch.isalnum() for ch in text):  # 后者：纯线条/符号装饰块
         return None
     x, y, x2, y2 = (round(float(v), 2) for v in block.get("bbox") or (0, 0, 0, 0))

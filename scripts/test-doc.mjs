@@ -514,6 +514,39 @@ async function main() {
     }
   }
 
+  // ============================================================== 9.5 没 text.json 也要能建模
+  // 2026-11-11：text.json 只在打开「文本」页时才生成，于是 102 篇论文的对照视图只有一行占位。
+  // getDoc 现在会自己抽 PDF 文本层并写回 text.json。
+  await check('text.json 缺失时 getDoc 自己抽 PDF 文本层', async () => {
+    const realPdf = 'G:\\笔记\\LLM知识体系论文\\加速训练\\FlashAttention.pdf'
+    try {
+      await fsp.access(realPdf)
+    } catch {
+      throw new Error('样例 PDF 不在本机：' + realPdf)
+    }
+    // 复制一份再入库：直接引用真实 PDF 会命中真实库样例的同路径去重，拿不到新建的记录
+    const copy = path.join(tmpRoot, 'autoextract.pdf')
+    await fsp.copyFile(realPdf, copy)
+    const added = await store.addPaper({
+      id: 'autoextract-1',
+      title: '自动抽文',
+      srcPath: copy,
+      pageCount: 34,
+      hasText: true,
+    })
+    ok(added.existed === false, '应新建一条记录，实际命中了已有记录 ' + added.meta.id)
+    try {
+      const result = await getDoc(added.meta.id)
+      ok(result.built === true, '应该现场建模')
+      ok(result.doc.paragraphs.length > 50, '段落数应远多于占位一段，实际 ' + result.doc.paragraphs.length)
+      const cached = await store.readTextCache(added.meta.id)
+      ok(Boolean(cached && Array.isArray(cached.pages) && cached.pages.length), '抽出的文本层应写回 text.json')
+    } finally {
+      await store.removePaper(added.meta.id).catch(() => {})
+      await fsp.rm(copy, { force: true })
+    }
+  })
+
   // ============================================================== 收尾
   console.log('')
   console.log('PASS ' + passed + ' / FAIL ' + failed + ' / SKIP ' + skipped)

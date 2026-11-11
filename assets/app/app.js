@@ -1784,11 +1784,13 @@ function jumpToPage(page) {
 }
 
 function renderDocMissing() {
+  // 打开论文 / 重建时后端要抽 PDF 文本层（几十页要几秒），别在这期间说「没有文档模型」
+  const working = state.docBusy || state.busy === 'open'
   return h(
     'div',
     { class: 'empty doc-missing' },
-    h('h2', {}, state.docBusy ? '正在重建文档模型…' : '还没有可对照的文档模型'),
-    h('p', {}, state.docError ? '原因：' + state.docError : '后端没有返回 doc（sections / paragraphs）。'),
+    h('h2', {}, working ? '正在解析文档模型…' : '还没有可对照的文档模型'),
+    h('p', {}, working ? '首次打开会从 PDF 文本层抽出段落，之后有缓存。' : state.docError ? '原因：' + state.docError : '后端没有返回 doc（sections / paragraphs）。'),
     h('p', { class: 'hint' }, '对照阅读需要 doc.json（每篇论文的节与段落结构）。旧版宿主只提供页图与文本块，所以这里先给你原文页。'),
     h(
       'div',
