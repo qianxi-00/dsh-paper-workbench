@@ -1,0 +1,5 @@
+# dsh-paper-workbench bundle patch：向 profile 的插件名册追加一个宿主行。
+# 行名从 profile 自身的 node_modules 解析（安装本包后生效）。
+- insert:
+    - id: paper-workbench
+      name: dsh-paper-workbench

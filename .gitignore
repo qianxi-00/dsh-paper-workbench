@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+dist/
+*.log
+*.tmp
+
+# 本地数据与测试产物（绝不入库）
+data/
+.pages/
+*.pdf
+!assets/fixtures/*.pdf
+.env
+.env.*
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 个人配置
+config.local.json

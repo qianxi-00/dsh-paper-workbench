@@ -1,0 +1,56 @@
+{
+  "name": "dsh-paper-workbench",
+  "version": "0.1.0",
+  "description": "DSH 论文工作台：文献库 + PDF 阅读器 + 整本翻译 + Obsidian 论文知识库联动",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "peerDependencies": {
+    "react": "^18.2.0"
+  },
+  "files": [
+    "lib/**/*.js",
+    "assets/**/*",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "smoke": "node scripts/smoke.mjs",
+    "selftest:pdf": "python assets/pdf_tool.py --self-test"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "paper",
+    "pdf-reader",
+    "arxiv",
+    "obsidian",
+    "translation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qianxi-00/dsh-paper-workbench.git"
+  },
+  "homepage": "https://github.com/qianxi-00/dsh-paper-workbench#readme",
+  "license": "MIT",
+  "author": "Qian Xi"
+}
