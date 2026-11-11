@@ -34,7 +34,8 @@
     "dev:mock": "node scripts/dev-server.mjs 57571 --mock-llm",
     "seed": "node scripts/seed.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "test": "node scripts/test-tools.mjs && node scripts/test-doc.mjs && node scripts/test-ai.mjs && node scripts/test-obsidian.mjs && node scripts/test-arxiv.mjs && node scripts/test-ocr.mjs && python assets/pdf_tool.py --self-test",
+    "test": "node scripts/test-store.mjs && node scripts/test-tools.mjs && node scripts/test-doc.mjs && node scripts/test-ai.mjs && node scripts/test-obsidian.mjs && node scripts/test-arxiv.mjs && node scripts/test-ocr.mjs && python assets/pdf_tool.py --self-test",
+    "fix:library": "node scripts/fix-library.mjs",
     "selftest:pdf": "python assets/pdf_tool.py --self-test"
   },
   "keywords": [
