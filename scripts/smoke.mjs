@@ -311,6 +311,21 @@ async function main() {
   const sessionStat = await rpc('session.status', { id })
   check('原生会话状态可查', typeof sessionStat.available === 'boolean', JSON.stringify(sessionStat))
 
+  // v3.1：一个对话 = 一条宿主会话，可挂多篇论文 + 附件
+  const convList = await rpc('conv.list', {})
+  check('对话列表可用', Array.isArray(convList.items), (convList.items || []).length + ' 条')
+  const conv = await rpc('conv.create', { title: '冒烟对话', paperIds: [id] })
+  check('新建对话返回 id 与 sessionId', !!conv.id && conv.sessionId === 'pb-conv-' + conv.id, conv.id)
+  const convUpdated = await rpc('conv.update', { id: conv.id, title: '冒烟对话（改）', paperIds: [id] })
+  check('对话可改标题与论文范围', convUpdated.title === '冒烟对话（改）' && convUpdated.paperIds.length === 1)
+  const attached = await rpc('conv.attach', { id: conv.id, name: 'smoke.txt', dataBase64: Buffer.from('smoke attachment').toString('base64') })
+  check('附件落到对话目录并记进清单', !!attached.attachment && attached.attachment.size === 16, attached.attachment && attached.attachment.name)
+  const detached = await rpc('conv.detach', { id: conv.id, path: attached.attachment.path })
+  check('附件可移除', (detached.conversation.attachments || []).length === 0)
+  await rpc('conv.remove', { id: conv.id })
+  const convAfter = await rpc('conv.list', {})
+  check('对话可删除', !(convAfter.items || []).some((item) => item.id === conv.id))
+
   await rpc('library.remove', { id })
   const after = await rpc('library.list')
   check('删除后列表不再包含', !after.items.some((item) => item.id === id))

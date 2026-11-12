@@ -47,6 +47,11 @@ const state = {
   tab: 'compare', // compare | page | notes | card | online
   page: 1,
   pageInfo: null,
+  pageDims: {}, // 每页的 pt 尺寸（用于占位比例，避免滚动时页面高度乱跳）
+  pageScrollTop: 0, // 原文连续滚动的位置（重绘后还原）
+  pendingPage: 0, // 重绘后要滚到的页码（跳转/缩放时用）
+  pageObserver: null,
+  pageSpy: null,
   blocks: [],
   zoom: 1,
   fitScale: 2,
@@ -88,6 +93,11 @@ const state = {
   figuresByKey: {},
   chatMode: 'session', // session = 落进真正的 DSH 会话；local = 插件自绘（老宿主兜底）
   session: { available: false, frames: [], streaming: false, abort: null, error: '', started: '' },
+  // v3.1：一个「对话」= 一条 DSH 会话，可挂多篇论文 + 附件，多轮持久
+  chats: { items: [], activeId: '', loading: false, error: '' },
+  convMenu: false,
+  convPicker: { open: false, q: '' },
+  attachBusy: false,
 }
 
 let pendingScrollReset = false
@@ -1260,6 +1270,7 @@ async function loadPage(page) {
     const pageData = (text.pages || [])[0]
     if (pageData) {
       state.pageInfo = { w: pageData.w, h: pageData.h }
+      state.pageDims[state.page] = { w: pageData.w, h: pageData.h }
       state.blocks = pageData.blocks || []
     } else {
       state.pageInfo = null
@@ -1272,6 +1283,8 @@ async function loadPage(page) {
     }
     await rpc('library.update', { id: meta.id, patch: { lastReadPage: state.page } }).catch(() => {})
     saveSessionSoon({ page: state.page })
+    // 连续滚动视图：重绘后滚到这一页（打开论文、跳转、搜索命中都靠它定位）
+    state.pendingPage = state.page
   } catch (error) {
     state.blocks = []
     state.pageInfo = null
@@ -1422,6 +1435,7 @@ function render() {
   deferredRender = false
   deferredSince = 0
   const previousScroll = pendingScrollReset ? 0 : (document.querySelector('.compare-scroll') || {}).scrollTop || 0
+  const previousPageScroll = (document.querySelector('.page-scroll') || {}).scrollTop || state.pageScrollTop || 0
   const previousOutline = (document.querySelector('.outline') || {}).scrollTop || 0
   pendingScrollReset = false
   app.replaceChildren(renderShell())
@@ -1435,6 +1449,19 @@ function render() {
   }
   const outline = document.querySelector('.outline')
   if (outline && previousOutline) outline.scrollTop = previousOutline
+  const pageScroller = document.querySelector('.page-scroll')
+  if (pageScroller) {
+    // 跳转/缩放：滚到目标页顶部；普通重绘：回到原来的滚动位置
+    if (state.pendingPage) {
+      const target = pageScroller.querySelector('[data-page="' + state.pendingPage + '"]')
+      if (target) pageScroller.scrollTop = target.offsetTop
+      state.pageScrollTop = pageScroller.scrollTop
+      state.pendingPage = 0
+    } else if (previousPageScroll) {
+      pageScroller.scrollTop = previousPageScroll
+    }
+    setupPageScroll(pageScroller)
+  }
   const chatList = document.querySelector('.chat-messages')
   if (chatList) chatList.scrollTop = chatList.scrollHeight
   setupSectionObserver()
@@ -1624,6 +1651,7 @@ function renderMain() {
   const overlays = []
   if (state.search.open) overlays.push(renderSearchOverlay())
   if (state.trash.open) overlays.push(renderTrashModal())
+  if (state.convPicker.open) overlays.push(renderConvPicker())
   if (state.showSettings) return h('section', { class: 'main' }, renderTopbar(), h('div', { class: 'content' }, renderSettings()), ...overlays)
   const content = state.tab === 'online' || (!state.current && state.online.items.length > 0) ? renderOnline() : !state.current ? renderEmpty() : renderReader()
   return h('section', { class: 'main' }, renderTopbar(), content, ...overlays)
@@ -1972,8 +2000,13 @@ function renderParagraph(paragraph) {
 }
 
 function jumpToPage(page) {
+  // 引用 [p.N]、目录跳转、搜索命中都走这里：切到原文页并滚到那一页
+  const total = (state.current && state.current.meta && state.current.meta.pageCount) || 0
+  const target = Math.max(1, Math.min(Number(page) || 1, total || Number(page) || 1))
   state.tab = 'page'
-  loadPage(page).then(() => render())
+  state.page = target
+  state.pendingPage = target
+  loadPage(target).then(() => render())
 }
 
 function renderDocMissing() {
@@ -2040,36 +2073,112 @@ function renderCompareToolbar() {
 
 // ---------------------------------------------------------------- 原文页（页图 / 缩放 / 高亮）
 
+// ---------------------------------------------------------------- 原文：上下滚动连续阅读
+const PAGE_DEFAULT_RATIO = '0.7727' // Letter 8.5×11；A4 是 0.7071，只影响首屏占位高度
+
+function pageRatio(page) {
+  const dims = state.pageDims && state.pageDims[page]
+  if (dims && dims.w > 0 && dims.h > 0) return dims.w + ' / ' + dims.h
+  if (state.pageInfo && state.pageInfo.w > 0 && state.pageInfo.h > 0) return state.pageInfo.w + ' / ' + state.pageInfo.h
+  return PAGE_DEFAULT_RATIO
+}
+
+function pageImageSrc(meta, page) {
+  const scale = Math.max(1, Math.round(state.fitScale * state.zoom * 10) / 10)
+  return API + 'page?id=' + encodeURIComponent(meta.id) + '&page=' + page + '&scale=' + scale
+}
+
+function renderPageBlock(meta, page) {
+  const wrap = h('div', { class: 'page-wrap', 'data-page': String(page) })
+  const image = h('img', { 'data-src': pageImageSrc(meta, page), alt: 'p.' + page, draggable: false })
+  image.style.aspectRatio = pageRatio(page)
+  image.addEventListener('load', () => {
+    image.style.aspectRatio = ''
+    wrap.classList.add('loaded')
+  })
+  image.addEventListener('error', () => {
+    image.remove()
+    wrap.append(
+      h('div', { class: 'page-missing' }, '第 ' + page + ' 页渲染失败。若 PDF 未复制进库且原路径已移动，请重新导入；也可能是本机 Python/PyMuPDF 不可用（看左下角 PDF 状态）。'),
+    )
+  })
+  const layer = h('div', { class: 'hl-layer' })
+  const highlights = ((state.current && state.current.notes && state.current.notes.highlights) || []).filter(
+    (item) => Number(item.page) === page,
+  )
+  for (const highlight of highlights) {
+    for (const rect of highlight.rects || []) {
+      layer.append(
+        h('div', {
+          class: 'hl' + (highlight.color === 'note' ? ' note' : ''),
+          style: { left: rect.x * 100 + '%', top: rect.y * 100 + '%', width: rect.w * 100 + '%', height: rect.h * 100 + '%' },
+          title: highlight.text,
+        }),
+      )
+    }
+  }
+  wrap.append(image, layer, h('span', { class: 'page-no' }, String(page)))
+  return wrap
+}
+
+/** 只给视口附近的页发图片请求；同时用「中间那条线」判断当前在读第几页。 */
+function setupPageScroll(stage) {
+  if (!stage) return
+  if (state.pageObserver) state.pageObserver.disconnect()
+  if (state.pageSpy) state.pageSpy.disconnect()
+  const loader = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        const img = entry.target.querySelector('img[data-src]')
+        if (img) {
+          img.src = img.getAttribute('data-src')
+          img.removeAttribute('data-src')
+        }
+      }
+    },
+    { root: stage, rootMargin: '900px 0px' },
+  )
+  const spy = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        const page = Number(entry.target.getAttribute('data-page'))
+        if (!page || page === state.page) continue
+        state.page = page
+        const input = document.querySelector('.pager input')
+        if (input) input.value = String(page)
+        const label = document.querySelector('.statusbar .cur-page')
+        if (label) label.textContent = '第 ' + page + ' 页'
+        saveSessionSoon({ page })
+      }
+    },
+    { root: stage, rootMargin: '-45% 0px -45% 0px' },
+  )
+  for (const wrap of stage.querySelectorAll('.page-wrap')) {
+    loader.observe(wrap)
+    spy.observe(wrap)
+  }
+  state.pageObserver = loader
+  state.pageSpy = spy
+  stage.addEventListener(
+    'scroll',
+    () => {
+      state.pageScrollTop = stage.scrollTop
+      saveSessionSoon()
+    },
+    { passive: true },
+  )
+}
+
 function renderPagePane() {
   const meta = state.current.meta
   const total = meta.pageCount || 0
-  const stage = h('div', { class: 'stage' })
-  const wrap = h('div', { class: 'page-wrap' })
-  if (state.pageInfo) wrap.style.aspectRatio = state.pageInfo.w + ' / ' + state.pageInfo.h
-  const src = API + 'page?id=' + encodeURIComponent(meta.id) + '&page=' + state.page + '&scale=' + Math.max(1, Math.round(state.fitScale * state.zoom * 10) / 10)
-  const image = h('img', { src, alt: 'p.' + state.page, draggable: false })
-  image.addEventListener('load', () => prefetch(state.page + 1))
-  image.addEventListener('error', () => {
-    image.remove()
-    wrap.append(h('div', { class: 'page-missing' }, '这一页渲染失败。若 PDF 未复制进库且原路径已移动，请重新导入；也可能是本机 Python/PyMuPDF 不可用（看左下角 PDF 状态）。'))
-  })
-  const layer = h('div', { class: 'hl-layer' })
-  const highlights = ((state.current.notes && state.current.notes.highlights) || []).filter((item) => item.page === state.page)
-  if (state.pageInfo) {
-    for (const highlight of highlights) {
-      for (const rect of highlight.rects || []) {
-        layer.append(
-          h('div', {
-            class: 'hl' + (highlight.color === 'note' ? ' note' : ''),
-            style: { left: rect.x * 100 + '%', top: rect.y * 100 + '%', width: rect.w * 100 + '%', height: rect.h * 100 + '%' },
-            title: highlight.text,
-          }),
-        )
-      }
-    }
-  }
-  wrap.append(image, layer)
-  stage.append(wrap)
+  const stage = h('div', { class: 'stage page-scroll' })
+  // 连续滚动：所有页一次排好（占位用页面比例），只给视口附近的页真正发图片请求，
+  // 否则 70 页论文一打开就会一次拉 20MB 图。
+  const totalPages = total > 0 ? total : 1
+  for (let page = 1; page <= totalPages; page += 1) stage.append(renderPageBlock(meta, page))
 
   return h(
     'div',
@@ -2080,10 +2189,15 @@ function renderPagePane() {
       h(
         'div',
         { class: 'pager' },
-        h('button', { onclick: () => loadPage(state.page - 1).then(() => render()), disabled: state.page <= 1 }, '‹'),
-        h('input', { type: 'text', value: state.page, onchange: (event) => loadPage(Number(event.target.value) || 1).then(() => render()) }),
+        h('button', { onclick: () => jumpToPage(state.page - 1), disabled: state.page <= 1, title: '上一页' }, '‹'),
+        h('input', {
+          type: 'text',
+          value: state.page,
+          title: '输入页码跳到该页',
+          onchange: (event) => jumpToPage(Number(event.target.value) || 1),
+        }),
         h('span', { class: 'muted' }, '/ ' + (total || '?')),
-        h('button', { onclick: () => loadPage(state.page + 1).then(() => render()), disabled: total > 0 && state.page >= total }, '›'),
+        h('button', { onclick: () => jumpToPage(state.page + 1), disabled: total > 0 && state.page >= total, title: '下一页' }, '›'),
       ),
       h('span', { class: 'sep' }),
       h('button', { onclick: () => setZoom(state.zoom - 0.15) }, '－'),
@@ -2103,21 +2217,18 @@ function renderPagePane() {
     h(
       'div',
       { class: 'statusbar' },
-      h('span', {}, state.pageInfo ? Math.round(state.pageInfo.w) + '×' + Math.round(state.pageInfo.h) + ' pt' : '无文本层'),
+      h('span', { class: 'cur-page' }, '第 ' + state.page + ' 页'),
       h('span', {}, state.blocks.length + ' 个文本块'),
       h('span', { class: 'spacer' }),
-      h('span', {}, '共 ' + (total || '?') + ' 页'),
+      h('span', {}, '共 ' + (total || '?') + ' 页 · 上下滚动连续阅读'),
     ),
   )
 
   function setZoom(value) {
     state.zoom = Math.max(0.4, Math.min(3, value))
+    // 缩放后每页高度都变了，用「当前页」重新锚定滚动位置，别让读者飘到别处
+    state.pendingPage = state.page
     render()
-  }
-  function prefetch(page) {
-    if (!page || (total && page > total)) return
-    const img = new Image()
-    img.src = API + 'page?id=' + encodeURIComponent(meta.id) + '&page=' + page + '&scale=2'
   }
   function openSearch() {
     const query = window.prompt('全文检索关键词：')
@@ -2293,7 +2404,7 @@ function renderChat() {
     h('button', { class: 'ghost', title: '收起对话', onclick: () => togglePane('chat') }, '×'),
   )
   aside.append(header)
-  if (!state.current) {
+  if (!state.current && !sessionMode) {
     aside.append(h('div', { class: 'hint chat-hint' }, '打开一篇论文后在这里对话。'))
     return aside
   }
@@ -3445,6 +3556,17 @@ function renderTrashModal() {
 
 // --- 原生会话（对话落进真正的 DSH 会话）
 
+/** 宿主会话里存的是「范围前缀 + 用户原话」，气泡里只显示用户自己写的那句。 */
+function stripScopePrompt(text) {
+  const value = String(text || '')
+  const marker = '引用原文时用 [p.N] 标页码。'
+  if (value.startsWith('【本次对话的论文范围】') || value.startsWith('【用户上传的附件】')) {
+    const index = value.lastIndexOf(marker)
+    if (index >= 0) return value.slice(index + marker.length).replace(/^\s+/, '')
+  }
+  return value
+}
+
 function sessionMessages() {
   const out = []
   let live = null
@@ -3468,8 +3590,11 @@ function sessionMessages() {
 }
 
 async function startSessionStream(force = false) {
-  if (!state.current || !state.session.available) return
-  const id = state.current.meta.id
+  if (!state.session.available) return
+  const conv = activeConv()
+  // 没有对话就先不建：用户发出第一条消息（或点了「＋ 新建」）才创建，避免每开一次面板就多一个空对话
+  if (!conv) return
+  const id = conv.id
   if (!force && state.session.started === id && state.session.streaming) return
   stopSessionStream()
   state.session.started = id
@@ -3481,7 +3606,7 @@ async function startSessionStream(force = false) {
   render()
   try {
     await streamSseGet(
-      '/paper-workbench/session/follow?id=' + encodeURIComponent(id),
+      '/paper-workbench/session/follow?conv=' + encodeURIComponent(id),
       {
         frame: (frame) => {
           state.session.frames.push(frame)
@@ -3512,19 +3637,383 @@ function stopSessionStream() {
 
 async function sendSessionMessage(text) {
   const content = String(text || '').trim()
-  if (!content || !state.current) return
+  if (!content) return
+  const conv = await ensureConversation().catch((error) => {
+    state.session.error = error.message
+    return null
+  })
+  if (!conv) {
+    render()
+    return
+  }
   state.session.frames.push({ kind: 'message', role: 'user', text: content })
   state.session.error = ''
   render()
   try {
-    await rpc('session.ask', { id: state.current.meta.id, text: content })
+    await rpc('session.ask', { conversationId: conv.id, text: content })
+    await loadConversations().catch(() => {})
+    // 先发出去再连流：宿主 follow 会补发最近消息，不会漏掉刚发的问题
+    startSessionStream(true)
   } catch (error) {
     state.session.error = error.message
     render()
   }
 }
 
+// ---------------------------------------------------------------- 对话（多篇论文 + 附件，落进 DSH 会话）
+function activeConv() {
+  return state.chats.items.find((item) => item.id === state.chats.activeId) || null
+}
+
+function paperLabel(id) {
+  const paper = state.papers.find((item) => item.id === id)
+  const meta = (state.current && state.current.meta && state.current.meta.id === id ? state.current.meta : null) || (paper && paper.meta) || paper || {}
+  return String(meta.title || id)
+}
+
+async function loadConversations() {
+  if (!state.session.available) return
+  state.chats.loading = true
+  try {
+    const data = await rpc('conv.list')
+    state.chats.items = Array.isArray(data.items) ? data.items : []
+    state.chats.activeId = data.activeId || (state.chats.items[0] ? state.chats.items[0].id : '')
+    state.chats.error = ''
+  } catch (error) {
+    state.chats.error = error.message
+  }
+  state.chats.loading = false
+}
+
+async function ensureConversation() {
+  if (activeConv()) return activeConv()
+  if (state.chats.items.length > 0) {
+    state.chats.activeId = state.chats.items[0].id
+    return state.chats.items[0]
+  }
+  const paperIds = state.current ? [state.current.meta.id] : []
+  const title = state.current && state.current.meta ? '关于《' + state.current.meta.title + '》' : '新对话'
+  const conv = await rpc('conv.create', { title: String(title).slice(0, 60), paperIds })
+  await loadConversations()
+  state.chats.activeId = conv.id
+  return conv
+}
+
+async function newConversation() {
+  state.convMenu = false
+  try {
+    const paperIds = state.current ? [state.current.meta.id] : []
+    const conv = await rpc('conv.create', { title: '新对话', paperIds })
+    await loadConversations()
+    state.chats.activeId = conv.id
+    switchConversationStream(conv.id)
+  } catch (error) {
+    toast('新建对话失败：' + error.message)
+  }
+  render()
+}
+
+function switchConversationStream(id) {
+  stopSessionStream()
+  state.session.started = ''
+  state.session.frames = []
+  state.session.error = ''
+  state.chat.draft = ''
+  state.chats.activeId = id
+  startSessionStream(true)
+}
+
+async function switchConversation(id) {
+  state.convMenu = false
+  try {
+    await rpc('conv.active', { id })
+  } catch (error) {
+    toast('切换对话失败：' + error.message)
+  }
+  switchConversationStream(id)
+  render()
+}
+
+async function renameConversation() {
+  const conv = activeConv()
+  if (!conv) return
+  const title = window.prompt('对话标题', conv.title || '新对话')
+  if (title === null) return
+  state.convMenu = false
+  try {
+    await rpc('conv.update', { id: conv.id, title })
+    await loadConversations()
+  } catch (error) {
+    toast('改名失败：' + error.message)
+  }
+  render()
+}
+
+async function removeConversation() {
+  const conv = activeConv()
+  if (!conv) return
+  if (!window.confirm('删除这个对话？DSH 里的会话记录不会被删，只是从这里移除。')) return
+  state.convMenu = false
+  try {
+    await rpc('conv.remove', { id: conv.id })
+    await loadConversations()
+    const next = activeConv()
+    if (next) switchConversationStream(next.id)
+    else state.session.frames = []
+  } catch (error) {
+    toast('删除失败：' + error.message)
+  }
+  render()
+}
+
+async function addPaperToConversation(paperId) {
+  const conv = activeConv()
+  if (!conv) return
+  const paperIds = Array.from(new Set([...(conv.paperIds || []), paperId])).slice(0, 30)
+  try {
+    await rpc('conv.update', { id: conv.id, paperIds })
+    await loadConversations()
+    toast('已加入：' + paperLabel(paperId))
+  } catch (error) {
+    toast('加入失败：' + error.message)
+  }
+  render()
+}
+
+async function removePaperFromConversation(paperId) {
+  const conv = activeConv()
+  if (!conv) return
+  const paperIds = (conv.paperIds || []).filter((id) => id !== paperId)
+  try {
+    await rpc('conv.update', { id: conv.id, paperIds })
+    await loadConversations()
+  } catch (error) {
+    toast('移除失败：' + error.message)
+  }
+  render()
+}
+
+function readFileBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const text = String(reader.result || '')
+      const comma = text.indexOf(',')
+      resolve(comma >= 0 ? text.slice(comma + 1) : '')
+    }
+    reader.onerror = () => reject(reader.error || new Error('读取文件失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function attachFiles(files) {
+  const conv = await ensureConversation().catch(() => null)
+  if (!conv) return
+  const list = Array.from(files || [])
+  if (list.length === 0) return
+  state.attachBusy = true
+  render()
+  let ok = 0
+  for (const file of list) {
+    if (file.size > 40 * 1024 * 1024) {
+      toast('跳过（超过 40MB）：' + file.name)
+      continue
+    }
+    try {
+      const dataBase64 = await readFileBase64(file)
+      await rpc('conv.attach', { id: conv.id, name: file.name, dataBase64 })
+      ok += 1
+    } catch (error) {
+      toast('上传失败：' + file.name + ' · ' + error.message)
+    }
+  }
+  state.attachBusy = false
+  try {
+    await loadConversations()
+  } catch (error) {
+    /* 忽略 */
+  }
+  if (ok > 0) toast('已添加 ' + ok + ' 个附件（提问时会把路径告诉 agent）')
+  render()
+}
+
+async function detachAttachment(filePath) {
+  const conv = activeConv()
+  if (!conv) return
+  try {
+    await rpc('conv.detach', { id: conv.id, path: filePath })
+    await loadConversations()
+  } catch (error) {
+    toast('移除附件失败：' + error.message)
+  }
+  render()
+}
+
+function pickFiles() {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.multiple = true
+  input.style.display = 'none'
+  input.onchange = () => attachFiles(input.files)
+  document.body.append(input)
+  input.click()
+  setTimeout(() => input.remove(), 1000)
+}
+
+function renderConvMenu() {
+  const conv = activeConv()
+  const menu = h('div', { class: 'conv-menu' })
+  if (state.chats.items.length === 0) menu.append(h('div', { class: 'hint' }, '还没有对话'))
+  for (const item of state.chats.items) {
+    const count = (item.paperIds || []).length
+    menu.append(
+      h(
+        'button',
+        {
+          class: 'conv-item' + (conv && item.id === conv.id ? ' active' : ''),
+          onclick: () => switchConversation(item.id),
+        },
+        h('span', { class: 'conv-item-title' }, item.title || '新对话'),
+        h('span', { class: 'conv-item-meta' }, count > 0 ? count + ' 篇' : '未挂论文'),
+      ),
+    )
+  }
+  menu.append(
+    h(
+      'div',
+      { class: 'conv-menu-foot' },
+      h('button', { class: 'ghost', onclick: newConversation }, '＋ 新建'),
+      h('button', { class: 'ghost', onclick: renameConversation, disabled: !conv }, '改名'),
+      h('button', { class: 'ghost danger', onclick: removeConversation, disabled: !conv }, '删除'),
+    ),
+  )
+  return menu
+}
+
+function renderConvBar() {
+  const conv = activeConv()
+  const bar = h('div', { class: 'conv-bar' })
+  bar.append(
+    h(
+      'div',
+      { class: 'conv-row' },
+      h(
+        'button',
+        {
+          class: 'conv-name',
+          title: '切换 / 新建 / 改名 / 删除对话',
+          onclick: () => {
+            state.convMenu = !state.convMenu
+            render()
+          },
+        },
+        h('span', { class: 'conv-name-text' }, conv ? conv.title || '新对话' : '新建对话'),
+        h('span', { class: 'conv-caret' }, '▾'),
+      ),
+      h('span', { class: 'spacer' }),
+      state.attachBusy ? h('span', { class: 'hint' }, '上传中…') : null,
+      h('button', { class: 'ghost', title: '上传附件（把本地文件路径告诉 agent）', onclick: pickFiles }, '📎'),
+    ),
+  )
+  if (state.convMenu) bar.append(renderConvMenu())
+  const chips = h('div', { class: 'conv-chips' })
+  for (const paperId of conv ? conv.paperIds || [] : []) {
+    chips.append(
+      h(
+        'span',
+        { class: 'conv-chip', title: paperId },
+        h('span', { class: 'conv-chip-text' }, paperLabel(paperId)),
+        h('button', { class: 'conv-chip-x', title: '从对话范围里移除', onclick: () => removePaperFromConversation(paperId) }, '×'),
+      ),
+    )
+  }
+  for (const file of conv ? conv.attachments || [] : []) {
+    chips.append(
+      h(
+        'span',
+        { class: 'conv-chip attach', title: file.path },
+        h('span', { class: 'conv-chip-text' }, file.name),
+        h('button', { class: 'conv-chip-x', title: '移除附件', onclick: () => detachAttachment(file.path) }, '×'),
+      ),
+    )
+  }
+  chips.append(
+    h(
+      'button',
+      {
+        class: 'conv-add',
+        title: '把另一篇论文加进这个对话（一次问多篇）',
+        onclick: () => {
+          state.convPicker.open = true
+          state.convPicker.q = ''
+          state.convMenu = false
+          render()
+        },
+      },
+      '＋ 论文',
+    ),
+  )
+  bar.append(chips)
+  return bar
+}
+
+function renderConvPicker() {
+  const q = state.convPicker.q.trim().toLowerCase()
+  const conv = activeConv()
+  const picked = new Set(conv ? conv.paperIds || [] : [])
+  const items = state.papers.filter((paper) => {
+    if (picked.has(paper.id)) return false
+    if (!q) return true
+    const title = String((paper.meta && paper.meta.title) || '')
+    return title.toLowerCase().includes(q) || paper.id.includes(q)
+  })
+  const list = h('div', { class: 'picker-list' })
+  if (items.length === 0) list.append(h('div', { class: 'hint' }, picked.size > 0 ? '所有论文都已经在这个对话里了' : '没有匹配的论文'))
+  for (const paper of items.slice(0, 200)) {
+    list.append(
+      h(
+        'button',
+        {
+          class: 'picker-item',
+          onclick: async () => {
+            state.convPicker.open = false
+            await addPaperToConversation(paper.id)
+          },
+        },
+        h('span', { class: 'picker-title' }, String((paper.meta && paper.meta.title) || paper.id)),
+        h('span', { class: 'picker-meta' }, (paper.meta && paper.meta.pages ? paper.meta.pages + ' 页' : '') + ' · ' + paper.id),
+      ),
+    )
+  }
+  return h(
+    'div',
+    { class: 'overlay', onclick: (event) => { if (event.target.classList.contains('overlay')) { state.convPicker.open = false; render() } } },
+    h(
+      'div',
+      { class: 'modal picker-modal', role: 'dialog', 'aria-label': '选择论文' },
+      h(
+        'div',
+        { class: 'modal-head' },
+        h('strong', null, '加入对话的论文'),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'ghost', onclick: () => { state.convPicker.open = false; render() } }, '×'),
+      ),
+      h('input', {
+        class: 'picker-search',
+        placeholder: '按标题或 id 过滤…',
+        value: state.convPicker.q,
+        oninput: (event) => {
+          state.convPicker.q = event.target.value
+          render()
+        },
+      }),
+      list,
+    ),
+  )
+}
+
 function renderSessionChat(aside) {
+  aside.append(renderConvBar())
   aside.append(
     h(
       'div',
@@ -3556,7 +4045,7 @@ function renderSessionChat(aside) {
   }
   for (const message of messages) {
     if (message.role === 'user') {
-      list.append(h('div', { class: 'msg user' }, h('div', { class: 'msg-body' }, message.text)))
+      list.append(h('div', { class: 'msg user' }, h('div', { class: 'msg-body' }, stripScopePrompt(message.text))))
       continue
     }
     const body = h('div', { class: 'msg-body' + (message.streaming ? ' streaming' : '') })
@@ -3609,9 +4098,10 @@ function renderSessionChat(aside) {
       ),
     ),
   )
-  if (state.session.started !== state.current.meta.id && !state.session.streaming) {
-    startSessionStream()
-  }
+  // 面板打开时自动接上会话流：有对话按对话，没有论文也没有对话就先不连（等第一条消息）
+  const conv = activeConv()
+  const key = conv ? conv.id : state.current ? state.current.meta.id : ''
+  if (key && state.session.started !== key && !state.session.streaming) startSessionStream()
 }
 
 function retryFailedSegments() {
@@ -3623,7 +4113,19 @@ function retryFailedSegments() {
   translateKeys(failed)
 }
 
+// 启动失败不能静默：以前 boot 里任何一步抛错，界面就停在「还没有论文」而没有任何提示。
 async function boot() {
+  try {
+    await bootInner()
+  } catch (error) {
+    console.error('[paper-workbench] 启动失败', error)
+    // 留在 DOM 上，方便用户/支持时一眼看到（控制台不是每个人都开）
+    document.documentElement.dataset.pbBootError = String((error && error.message) || error)
+    toast('工作台启动失败：' + (error && error.message ? error.message : error))
+  }
+}
+
+async function bootInner() {
   applyDark()
   document.addEventListener('keydown', (event) => {
     if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === 'f' && state.current) {
@@ -3635,6 +4137,7 @@ async function boot() {
   await Promise.all([loadHealth(), loadAi()])
   state.session.available = !!(state.health && state.health.session && state.health.session.available)
   if (!state.session.available) state.chatMode = 'local'
+  else await loadConversations().catch(() => {})
   await loadLibrary()
   render()
   // 面板关掉再打开等于重开页面：把上次看到哪儿、停在哪个页签还原回去。

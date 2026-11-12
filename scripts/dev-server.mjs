@@ -28,7 +28,7 @@ if (MOCK_LLM && !process.env.DSH_PAPER_WORKBENCH_DATA) {
   process.env.DSH_PAPER_WORKBENCH_DATA = path.join(os.tmpdir(), 'pb-dev-mock')
 }
 
-const { createApi, createStreams, setAiRuntime } = await import('../lib/index.js')
+const { createApi, createStreams, setAiRuntime, setSessionRuntime } = await import('../lib/index.js')
 const { createHandler } = await import('../lib/server.js')
 const PORT = Number(args.find((item) => /^\d+$/.test(item)) || 57571)
 
@@ -88,12 +88,65 @@ function mockReply(prompt) {
   return '（假模型回答）这是一段用于验证侧边对话流式输出的示例回答，引用页码 [p.1]，并说明当前节在讲什么。'
 }
 
+/**
+ * 假 sessionController：让「对话 = 一条 DSH 会话」这条链路在 dev-server 上也能走通。
+ * 帧形状照真实宿主（message / assistant-delta / finish），前端渲染与真机一致。
+ */
+function mockSessionController() {
+  const prompts = new Map()
+  const sessions = new Set()
+  return {
+    async create(options) {
+      const sessionId = String((options && options.sessionId) || '')
+      if (!sessionId) throw new Error('缺少 sessionId')
+      if (sessions.has(sessionId)) {
+        const error = new Error('session already exists: ' + sessionId)
+        error.code = 'EEXIST'
+        throw error
+      }
+      sessions.add(sessionId)
+      prompts.set(sessionId, [])
+      return { sessionId }
+    },
+    async prompt(request, signal) {
+      if (signal) signal.throwIfAborted()
+      const sessionId = String((request && request.sessionId) || '')
+      const text = ((request && request.content) || []).map((part) => part.text || '').join('')
+      const list = prompts.get(sessionId) || []
+      list.push({ role: 'user', text })
+      prompts.set(sessionId, list)
+    },
+    follow(options) {
+      const sessionId = String((options && options.address && options.address.sessionId) || '')
+      const signal = options && options.signal
+      return (async function* frames() {
+        const list = prompts.get(sessionId) || []
+        for (const item of list) yield { kind: 'message', message: { role: item.role, content: [{ type: 'text', text: item.text }] } }
+        const last = list[list.length - 1]
+        if (!last || last.role !== 'user') return
+        const reply = '（假会话回答）收到「' + last.text.slice(0, 40) + '」。这条会话是假的，只用来验证多篇论文/附件/多轮在界面上的表现 [p.1]。'
+        for (const part of reply.match(/[\s\S]{1,10}/g) || []) {
+          if (signal && signal.aborted) return
+          await sleep(15)
+          yield { kind: 'assistant-delta', text: part }
+        }
+        // 记下回复，下次 follow 重放历史时才像真会话（多轮）
+        list.push({ role: 'assistant', text: reply })
+        prompts.set(sessionId, list)
+        yield { kind: 'finish', reason: { kind: 'stop' } }
+      })()
+    },
+  }
+}
+
 if (MOCK_LLM) {
   setAiRuntime({
     llm: mockLlm(),
     agentDefaultModel: { currentSelection: () => ({ provider: 'mock', model: 'mock-translate' }) },
   })
+  setSessionRuntime({ sessionController: mockSessionController() })
   console.log('[dev] 已启用假模型（--mock-llm）：翻译/对话不会发真实请求')
+  console.log('[dev] 已启用假 sessionController：对话走真实链路（多篇论文 / 附件 / 多轮）')
 }
 
 const streams = createStreams()

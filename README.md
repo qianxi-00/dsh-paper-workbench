@@ -24,7 +24,8 @@ PDF 页图、笔记与 Obsidian 卡片，最右侧是**面板内对话**。
 - **面板内对话**：右侧抽屉，流式回答，回答里的 `[p.N]` 点开原文页；`讲解本节` / `讲解选中段落` / `总结全文` 一键追问。默认落进**真实 DSH 会话**（标题显示「对话 · DSH 会话」），也可切回「本地」自绘（按论文存历史）。
 - **任务日志**：`日志` 抽屉记录翻译 / OCR / 自检的进度与失败原因，2.5 秒轮询刷新，可清空。
 - **模型可选**：设置 → AI 里给「翻译」和「对话」分别指定 DSH 模型（默认跟随当前模型），温度可调。
-- **原文页**：整页渲染（按需渲染 + 预取下一页）、翻页/缩放、PDF 书签目录（没有则按字号启发式）。
+- **原文页**：整篇**上下滚动连续阅读**（页与页首尾相接，只加载视口附近的页图，页码随滚动更新，输入页码可跳转）、缩放；PDF 书签目录（没有则按字号启发式）。
+- **对话（多篇论文 + 附件）**：对话抽屉顶部可以新建 / 切换 / 改名 / 删除对话；一个对话可以挂多篇论文（`＋ 论文`）和多个附件（`📎`，单个上限 40MB），多轮问答天然持久，关掉面板回主界面还能接着聊。
 - **正文配图**：把 PDF 里的位图按「图 N / Figure N」挂到提到它的段落下方（矢量图抽不到，见已知限制）。
 - **在线检索**：arXiv / OpenAlex，支持关键词、arXiv ID、DOI；一键下载开放 PDF 入库。
 - **理解与整理**：划词问 agent、双击段落解释、精读报告（摘要 / 方法 / 贡献 / 局限 / 可复现要点）、多篇勾选后生成对比综述（这些仍走会话，结果落回本地库与 Obsidian）。
@@ -80,12 +81,25 @@ dsh plugin --profile desktop add /absolute/path/to/dsh-paper-workbench
 
 对话抽屉右上角有 `会话 / 本地` 切换：
 
-- **会话**（默认，需要宿主提供 `sessionController`）：每个论文一个稳定的会话 id（`pb-<论文id>`），
-  第一次提问时 `sessionController.create`，之后 `prompt` 发送、`follow` 拉流式帧，前端只负责渲染。
-  这条对话就是 DSH 里的真实会话——关掉工作台面板，回主界面能接着聊，agent 也看得到论文上下文。
+- **会话**（默认，需要宿主提供 `sessionController`）：**一个对话 = 一条真实 DSH 会话**。
+  对话可以同时挂多篇论文（`＋ 论文`）、上传附件（`📎`），多轮问答天然持久——关掉工作台面板，
+  回主界面也能接着聊，agent 看得到整个对话的范围。
 - **本地**：插件自绘对话，按论文存 `chat.json`，不写进任何会话。老宿主（没有 `sessionController`）会自动退回这一档。
 
-工作目录取 PDF 所在目录，所以会话里的 agent 能直接读同一批文件。
+### 对话（多篇论文 + 附件）
+
+- 对话列表在对话抽屉顶部（点标题展开）：切换、新建、改名、删除；对话正文不复制到插件里，
+  它就在 DSH 会话里。
+- **论文范围**：每个对话挂若干篇论文，标题下的一排 chip 就是这次对话的上下文。提问时插件会在
+  你输入的话前面加一段「本次对话的论文范围」（标题 / id / 页数 / PDF 路径），并提示 agent
+  用 `paper_read` / `paper_doc` 取正文，不要凭空猜。
+- **附件**：`📎` 选本地文件（单个上限 40MB），文件复制到 `~/.dsh/paper-workbench/chats/<对话id>/files/`，
+  提问时把**绝对路径**告诉 agent，让它用文件工具读。注意：宿主 `sessionController.prompt` 只接受文本，
+  所以图片不能直接"看"，只能以文件形式交给 agent 读。
+- 会话 id 是 `pb-conv-<对话id>`；对话元数据（标题、论文清单、附件清单）存在 `chats.json`，
+  对话内容本身在 DSH 会话库里。
+
+工作目录取对话里第一篇论文所在目录（没有论文时取数据根），所以会话里的 agent 能直接读同一批文件。
 
 ## 存储（SQLite）
 
@@ -142,11 +156,11 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 | 路由 | 说明 |
 | --- | --- |
 | `GET  /paper-workbench/app` | 工作台页面（主区 iframe 的内容） |
-| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`doc.get`、`ai.models`、`trans.get`、`chat.get`、`search.doc`、`figures.list`、`logs.list`、`review.run`、`trash.list`、`session.status`、`vault.upsert` |
+| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`doc.get`、`ai.models`、`trans.get`、`chat.get`、`search.doc`、`figures.list`、`logs.list`、`review.run`、`trash.list`、`session.status`、`conv.list`、`vault.upsert` |
 | `POST /paper-workbench/ai/translate` | SSE 逐段翻译（事件 `start/delta/done/error/end`） |
 | `POST /paper-workbench/ai/chat` | SSE 对话（事件 `delta/done/error/end`） |
 | `POST /paper-workbench/ai/cancel` | 取消正在跑的流式请求（`{reqId}`） |
-| `GET  /paper-workbench/session/follow?id=` | 原生 DSH 会话的事件流（SSE，事件 `frame`） |
+| `GET  /paper-workbench/session/follow?conv=` | 原生 DSH 会话的事件流（SSE，事件 `frame`；`conv` 是对话 id，兼容旧的 `id=`） |
 | `GET  /paper-workbench/api/page?id=&page=&scale=` | 页图 PNG（按需渲染，带磁盘缓存） |
 | `GET  /paper-workbench/api/figure?id=&index=` | 正文配图 PNG（`figures.json` 的数组下标） |
 | `GET  /paper-workbench/api/raw?id=` | 原始 PDF（支持单段 Range，供浏览器查看器） |
@@ -161,6 +175,8 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
   config.json            # 设置（python 路径、vault/kb、存储方式、OCR、AI 模型）
   workbench.db           # SQLite：译文 / 任务日志 / 自检结果（WAL，旁边有 -wal/-shm）
   index.json             # 文献索引（原子写，保留 .bak）
+  chats.json             # 对话清单（标题 / 论文范围 / 附件清单；对话正文在 DSH 会话里）
+  chats/<对话id>/files/  # 对话附件（提问时把绝对路径告诉 agent）
   ui.json                # 界面记忆（服务端副本，跨端口不丢）
   papers/<id>/           # 每篇一个目录
     meta.json
@@ -189,7 +205,7 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 npm run dev       # 独立调试服务器 http://127.0.0.1:57571/paper-workbench/app（读真实库）
 npm run dev:mock  # 同上，但翻译/对话用假模型，数据目录也换到 %TEMP%\pb-dev-mock（不污染真实库）
 npm run seed      # 塞几篇本机样例论文（幂等）
-npm test          # store 并发 + SQLite + 工具层 + 段落模型 + AI + 自检 + 日志 + 配图 + 会话桥 + Obsidian + arXiv + OCR + PDF 自检
+npm test          # store 并发 + SQLite + 对话 + 工具层 + 段落模型 + AI + 自检 + 日志 + 配图 + 会话桥 + Obsidian + arXiv + OCR + PDF 自检
 npm run smoke -- http://127.0.0.1:57571   # 打一遍 HTTP 接口（含 SSE 翻译/对话、搜索、配图、日志、自检、回收站）
 npm run fix:library                       # 干跑一次库体检（重复条目/文件名式标题），加 -- --apply 才动库
 ```
@@ -208,6 +224,7 @@ lib/doc.js      段落模型（块合并、分节、hash、按 sha1 + 目录指�
 lib/ai.js       翻译与对话（批量、JSON 解析、退化重试、标题、公式卫生、SSE 事件）
 lib/sse.js      SSE 输出（心跳、客户端断开即 abort）
 lib/session.js  原生 DSH 会话桥（create/prompt/follow + 帧归一化）
+lib/conv.js     对话形状与「本次对话的论文范围」提示词（纯逻辑）
 lib/jobs.js     任务日志（开始/进度/结束/失败，纯依赖注入）
 lib/review.js   译文自检（静态规则 + 模型批检）
 lib/figures.js  正文配图（抽位图、按「图 N」挂段落、缓存 PNG）
@@ -232,6 +249,8 @@ docs/v3-contracts.md  v3 新增模块（db / jobs / review / figures / session�
 - PDF 深色是**反相滤镜**，不是重新排版；彩色图会跟着变色，想要原色就切回「关」。
 - 翻译自检是启发式：静态规则会误报（短标题、刻意省略），模型批检也可能漏；它只提示，不改你的译文。
 - 原生会话依赖宿主的 `sessionController`；没有就自动退回「本地」自绘对话，功能不受影响，只是不落进主会话。
+- 对话里的附件是以**文件路径**交给 agent 的：宿主 `sessionController.prompt` 只收文本，所以图片不能被"直接看见"，只能由 agent 用文件工具读（能读文字类文件；图片取决于 agent 有没有读图工具）。
+- 一个对话对应一条 DSH 会话，对话删掉只从工作台移除，DSH 里的会话记录仍在（要清理请去会话列表删）。
 - `精读整篇` / `整本翻译` / `对比综述` 这类整本活在主会话里跑（依赖 agent 与 `paper_*` 工具），且仍会往会话输入框写指令。
 - 只下载公开 PDF（arXiv / OpenAlex 开放获取），不绕过任何付费墙。
 - 宿主代码改动不会热重载：改完需在插件页重新启用或重启桌面端；`assets/app/` 是静态文件，刷新页面即可。

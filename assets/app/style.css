@@ -446,6 +446,20 @@ body.dragging * { cursor: col-resize !important; }
   max-width: 980px;
 }
 .page-wrap img { width: 100%; height: auto; display: block; }
+/* 连续滚动：页与页之间留出"纸缝"，右下角标页码 */
+.page-scroll { gap: 14px; }
+.page-no {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.55);
+  color: #fff;
+  font-size: 10.5px;
+  line-height: 1.5;
+  pointer-events: none;
+}
 .page-missing {
   padding: 30px;
   background: var(--bg-raised);
@@ -829,3 +843,70 @@ body.pdf-dark-strong .inline-fig img { filter: invert(1) hue-rotate(180deg) cont
 .msg-actions { display: flex; gap: 6px; margin-top: 2px; }
 .caret { display: inline-block; width: 6px; height: 12px; margin-left: 2px; background: var(--accent); animation: pb-caret 1s steps(2) infinite; vertical-align: text-bottom; }
 @keyframes pb-caret { 50% { opacity: 0; } }
+
+/* v3.1：一个对话 = 一条 DSH 会话，可挂多篇论文 + 附件 */
+.conv-bar { position: relative; padding: 6px 8px; border-bottom: 1px solid var(--line); background: var(--bg-soft); }
+.conv-row { display: flex; align-items: center; gap: 6px; }
+.conv-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 78%;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  font-size: 12px;
+  font-weight: 600;
+}
+.conv-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv-caret { color: var(--muted); font-size: 10px; flex: none; }
+.conv-menu {
+  position: absolute;
+  top: calc(100% - 4px);
+  left: 8px;
+  z-index: 35;
+  width: min(320px, 92%);
+  max-height: 320px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.conv-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border: 0; border-radius: 7px; background: transparent; text-align: left; }
+.conv-item:hover { background: var(--bg-soft); }
+.conv-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.conv-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.conv-item-meta { color: var(--muted); font-size: 11px; flex: none; }
+.conv-menu-foot { display: flex; gap: 4px; padding: 4px 2px 2px; border-top: 1px solid var(--line); margin-top: 2px; }
+.conv-menu-foot button { font-size: 11.5px; padding: 2px 7px; }
+.conv-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.conv-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 1px 2px 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  font-size: 11.5px;
+}
+.conv-chip.attach { border-style: dashed; }
+.conv-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
+.conv-chip-x { border: 0; background: transparent; color: var(--muted); padding: 0 5px; font-size: 13px; line-height: 1; cursor: pointer; }
+.conv-chip-x:hover { color: var(--danger); }
+.conv-add { font-size: 11.5px; padding: 1px 8px; border: 1px dashed var(--line-strong); border-radius: 999px; background: transparent; color: var(--muted); }
+.conv-add:hover { color: var(--text); border-color: var(--accent); }
+.picker-modal { max-width: 620px; display: flex; flex-direction: column; gap: 8px; }
+.picker-search { width: 100%; }
+.picker-list { display: flex; flex-direction: column; gap: 3px; overflow: auto; max-height: 56vh; }
+.picker-item { display: flex; align-items: baseline; gap: 8px; padding: 5px 8px; border: 1px solid transparent; border-radius: 7px; background: transparent; text-align: left; }
+.picker-item:hover { background: var(--bg-soft); border-color: var(--line); }
+.picker-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.picker-meta { color: var(--muted); font-size: 11px; flex: none; }
