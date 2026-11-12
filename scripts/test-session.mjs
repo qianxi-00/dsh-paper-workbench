@@ -8,6 +8,9 @@
  * 运行：node scripts/test-session.mjs
  */
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 import { sessionIdFor, createSessionBridge, normalizeFrame } from '../lib/session.js'
 
@@ -75,10 +78,20 @@ function makeFakes(options = {}) {
   const services = {}
   if (sessionController) services.sessionController = sessionController
   if (workspaceController) services.workspaceController = workspaceController
+  // 「论文」工作区走 workspaceRegistry（有 list/create）；不传就没有，退回 workspaceController。
+  if (options.registry) services.workspaceRegistry = options.registry
   return { services, calls }
 }
 
-function bridgeFor(services, dataRoot = 'C:/tmp/pb-data') {
+/** 桥会真的 mkdir 工作区目录，所以测试用临时目录，跑完删掉。 */
+const tempRoots = []
+function tempRoot() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-session-'))
+  tempRoots.push(dir)
+  return dir
+}
+
+function bridgeFor(services, dataRoot = tempRoot()) {
   return createSessionBridge({ getServices: () => services, dataRoot })
 }
 
@@ -130,13 +143,71 @@ async function run() {
     assert.ok(sessionIdFor('a'.repeat(60) + '/' + 'b'.repeat(20)).length <= 64)
   })
 
-  await check('ensure：先建工作区，再用 workspaceId 建会话', async () => {
+  await check('ensure：所有会话共用一个「论文」工作区，不再按 PDF 目录建', async () => {
+    const root = tempRoot()
+    const workspaceDir = path.join(root, '论文')
     const fakes = makeFakes()
-    const bridge = bridgeFor(fakes.services)
+    const bridge = bridgeFor(fakes.services, root)
     const out = await bridge.ensure('2504.12345', { cwd: 'C:/papers/2504.12345' })
     assert.deepEqual(out, { sessionId: 'pb-2504.12345' })
-    assert.deepEqual(fakes.calls.workspace, [{ path: 'C:/papers/2504.12345' }])
-    assert.deepEqual(fakes.calls.create, [{ sessionId: 'pb-2504.12345', workspaceId: 'ws-1' }])
+    // 工作区按 dataRoot/论文 建，不是按 PDF 所在目录。
+    assert.deepEqual(fakes.calls.workspace, [{ path: workspaceDir }])
+    assert.deepEqual(fakes.calls.create, [
+      { sessionId: 'pb-2504.12345', workspaceId: 'ws-1', cwd: workspaceDir },
+    ])
+    // 第二篇论文复用同一个工作区，不再解析一次。
+    await bridge.ensure('2601.00001', { cwd: 'C:/papers/2601.00001' })
+    assert.equal(fakes.calls.workspace.length, 1)
+    assert.deepEqual(fakes.calls.create[1], {
+      sessionId: 'pb-2601.00001',
+      workspaceId: 'ws-1',
+      cwd: workspaceDir,
+    })
+    assert.ok(fs.existsSync(workspaceDir))
+  })
+
+  await check('ensure：已经有叫「论文」的工作区就直接用，不新建', async () => {
+    const fakes = makeFakes({
+      registry: {
+        list: () => [{ id: 'ws-existing', title: '论文', path: 'D:/papers/论文' }],
+        create: async () => {
+          throw new Error('不该新建')
+        },
+      },
+    })
+    await bridgeFor(fakes.services).ensure('p9')
+    assert.deepEqual(fakes.calls.workspace, [])
+    assert.deepEqual(fakes.calls.create, [
+      { sessionId: 'pb-p9', workspaceId: 'ws-existing', cwd: 'D:/papers/论文' },
+    ])
+  })
+
+  await check('ensure：registry 建的标题不对时补一次 setTitle("论文")', async () => {
+    const titled = []
+    const created = []
+    const fakes = makeFakes({
+      registry: {
+        list: () => [],
+        create: async (dir, title) => {
+          created.push({ dir, title })
+          return {
+            id: 'ws-new',
+            title: '旧标题',
+            path: dir,
+            async setTitle(next) {
+              titled.push(next)
+            },
+          }
+        },
+      },
+    })
+    const root = tempRoot()
+    await bridgeFor(fakes.services, root).ensure('p10')
+    assert.deepEqual(created, [{ dir: path.join(root, '论文'), title: '论文' }])
+    assert.deepEqual(titled, ['论文'])
+    assert.deepEqual(fakes.calls.create, [
+      { sessionId: 'pb-p10', workspaceId: 'ws-new', cwd: path.join(root, '论文') },
+    ])
   })
 
   await check('ensure：工作区失败回退 create({sessionId, cwd})', async () => {
@@ -147,10 +218,11 @@ async function run() {
   })
 
   await check('ensure：没有 cwd 时用 dataRoot 兜底', async () => {
+    const root = tempRoot()
     const fakes = makeFakes({ workspaceController: null })
-    const bridge = bridgeFor(fakes.services, 'C:/data-root')
+    const bridge = bridgeFor(fakes.services, root)
     await bridge.ensure('p2')
-    assert.deepEqual(fakes.calls.create, [{ sessionId: 'pb-p2', cwd: 'C:/data-root' }])
+    assert.deepEqual(fakes.calls.create, [{ sessionId: 'pb-p2', cwd: root }])
   })
 
   await check('ensure：不支持的模型式参数不出现；「已存在」当复用，其它错误上抛', async () => {
@@ -399,6 +471,14 @@ try {
 } catch (error) {
   failed += 1
   console.log('FAIL  测试脚本异常终止 -> ' + (error && error.stack ? error.stack : String(error)))
+} finally {
+  for (const dir of tempRoots) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true })
+    } catch {
+      /* 临时目录删不掉不影响测试结论 */
+    }
+  }
 }
 
 console.log('')

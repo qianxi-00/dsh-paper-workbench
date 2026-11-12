@@ -99,7 +99,18 @@ dsh plugin --profile desktop add /absolute/path/to/dsh-paper-workbench
 - 会话 id 是 `pb-conv-<对话id>`；对话元数据（标题、论文清单、附件清单）存在 `chats.json`，
   对话内容本身在 DSH 会话库里。
 
-工作目录取对话里第一篇论文所在目录（没有论文时取数据根），所以会话里的 agent 能直接读同一批文件。
+### 工作区：所有会话都在「论文」下
+
+DSH 侧栏按会话的工作目录分组。插件不再按每篇 PDF 所在目录各建一个工作区，而是把所有
+会话都挂到同一个**「论文」工作区**（默认目录 `<数据根>/论文`，即
+`~/.dsh/paper-workbench/论文`）。想换位置或改标题，在 `config.json` 里加：
+
+```json
+{ "workspace": { "title": "论文", "path": "G:\\笔记\\LLM知识体系论文" } }
+```
+
+改完重开插件生效。注意：**改动前已经建好的会话**其工作目录是旧的，仍会留在原来的分组里
+（宿主的会话头不可改写）；之后新开的对话都会落到「论文」下。
 
 ## 存储（SQLite）
 
@@ -178,6 +189,7 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
   chats.json             # 对话清单（标题 / 论文范围 / 附件清单；对话正文在 DSH 会话里）
   chats/<对话id>/files/  # 对话附件（提问时把绝对路径告诉 agent）
   ui.json                # 界面记忆（服务端副本，跨端口不丢）
+  论文/                  # 原生会话的「论文」工作区目录（可在 config.workspace.path 改）
   papers/<id>/           # 每篇一个目录
     meta.json
     paper.pdf            # storage=copy 时的库内副本
