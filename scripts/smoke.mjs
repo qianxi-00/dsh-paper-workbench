@@ -285,9 +285,39 @@ async function main() {
     .catch((error) => ({ ok: false, error: String(error.message) }))
   check('ai/cancel 对未知 reqId 返回可读错误', cancel.ok === false && typeof cancel.error === 'string', cancel.error)
 
+  // ---- v3：SQLite 持久化 / 文内搜索 / 配图 / 任务日志 / 自检 / 回收站 / 原生会话
+
+  const v3Health = await rpc('health', {})
+  check('译文落在 SQLite（health.db 有引擎信息）', Boolean(v3Health.db) && typeof v3Health.db.engine === 'string', JSON.stringify(v3Health.db || null))
+  check('health 声明原生会话桥', Boolean(v3Health.session) && typeof v3Health.session.available === 'boolean', JSON.stringify(v3Health.session || null))
+
+  const searchDoc = await rpc('search.doc', { id, query: 'prompt', limit: 20 })
+  const searchHits = Array.isArray(searchDoc.hits) ? searchDoc.hits : []
+  check('文内搜索命中段落', searchHits.length > 0 && typeof searchHits[0].key === 'string', searchHits.length + ' 处')
+  check('搜索命中带前后文', searchHits.length > 0 && typeof searchHits[0].before === 'string' && typeof searchHits[0].after === 'string')
+
+  const figureList = await rpc('figures.list', { id })
+  check('配图列表可用（raster 才抽得到）', Array.isArray(figureList.figures), (figureList.figures || []).length + ' 张')
+
+  const logList = await rpc('logs.list', { id, after: 0, limit: 50 })
+  check('任务日志记录了刚才的翻译', Array.isArray(logList.events) && logList.events.length > 0, (logList.events || []).length + ' 条')
+
+  const reviewRun = await rpc('review.run', { id, mode: 'static' })
+  check('自检返回 issues 与统计', Boolean(reviewRun.review) && Array.isArray(reviewRun.review.issues), JSON.stringify((reviewRun.review && reviewRun.review.stats) || null))
+
+  const trashList = await rpc('trash.list', {})
+  check('回收站列表可用', Array.isArray(trashList.items), (trashList.items || []).length + ' 项')
+
+  const sessionStat = await rpc('session.status', { id })
+  check('原生会话状态可查', typeof sessionStat.available === 'boolean', JSON.stringify(sessionStat))
+
   await rpc('library.remove', { id })
   const after = await rpc('library.list')
   check('删除后列表不再包含', !after.items.some((item) => item.id === id))
+  // 冒烟导入的是临时条目：移进回收站后顺手彻底删掉，不在用户回收站里留垃圾
+  const trashed = await rpc('trash.list', {})
+  const mine = (trashed.items || []).find((item) => item.id === id)
+  if (mine) await rpc('trash.purge', { name: mine.name }).catch(() => {})
 
   console.log('')
   console.log('结果：PASS ' + pass + ' / FAIL ' + fail)

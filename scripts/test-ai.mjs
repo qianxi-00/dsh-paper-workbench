@@ -790,6 +790,7 @@ async function main() {
   console.log('')
   console.log('检查 ' + (passed + failed) + ' 项：通过 ' + passed + '，失败 ' + failed)
   if (failed === 0) {
+    await store.closeDb()
     await fsp.rm(tmpRoot, { recursive: true, force: true })
     console.log('ALL PASS')
   } else {

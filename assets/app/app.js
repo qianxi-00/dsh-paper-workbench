@@ -77,6 +77,17 @@ const state = {
   ocrBusy: '',
   ocrToken: '',
   ocrClear: false,
+  // v3：文内搜索 / PDF 深色 / 回收站 / 任务日志 / 自检 / 配图 / 原生会话
+  search: { open: false, q: '', hits: [], active: 0, busy: false, error: '' },
+  dark: loadDark(),
+  trash: { open: false, items: [], busy: false, error: '' },
+  logs: { open: false, events: [], lastSeq: 0, timer: null, busy: false },
+  review: null,
+  reviewBusy: false,
+  figures: [],
+  figuresByKey: {},
+  chatMode: 'session', // session = 落进真正的 DSH 会话；local = 插件自绘（老宿主兜底）
+  session: { available: false, frames: [], streaming: false, abort: null, error: '', started: '' },
 }
 
 let pendingScrollReset = false
@@ -515,12 +526,25 @@ function makeSplitter(kind) {
 // ---------------------------------------------------------------- SSE（fetch + getReader，EventSource 不支持 POST）
 
 async function streamSse(url, body, handlers, signal) {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+  return streamSseRequest(
+    url,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+    handlers,
     signal,
-  })
+  )
+}
+
+/** 原生会话的 SSE 是 GET（事件流里带 query 参数），和 POST 版共用同一套解析。 */
+async function streamSseGet(url, handlers, signal) {
+  return streamSseRequest(url, { method: 'GET' }, handlers, signal)
+}
+
+async function streamSseRequest(url, init, handlers, signal) {
+  const response = await fetch(url, { ...init, signal })
   if (!response.ok) {
     const data = await response.json().catch(() => null)
     throw new Error((data && data.error) || '接口返回 HTTP ' + response.status)
@@ -1199,7 +1223,14 @@ async function openPaper(id, options = {}) {
     state.chat.error = ''
     state.chat.busy = false
     pendingScrollReset = !restore
-    await Promise.all([loadPage(state.page), loadDoc(id), loadChat(id), loadAi()])
+    state.figures = []
+    state.figuresByKey = {}
+    state.review = null
+    state.search = { open: false, q: '', hits: [], active: 0, busy: false, error: '' }
+    state.logs.events = []
+    state.logs.lastSeq = 0
+    await Promise.all([loadPage(state.page), loadDoc(id), loadChat(id), loadAi(), loadFigures()])
+    buildFiguresByKey()
     if (value.meta.status === 'unread') {
       await rpc('library.update', { id, patch: { status: 'reading' } }).catch(() => {})
       await loadLibrary()
@@ -1214,6 +1245,7 @@ async function openPaper(id, options = {}) {
       if (scroller) scroller.scrollTop = Number(restore.scrollTop)
     }
     saveSession({ paperId: id, tab: state.tab, page: state.page, sectionId: state.sectionId })
+    if (state.session.available && state.layout.chatOpen) startSessionStream(true)
   }
 }
 
@@ -1589,9 +1621,12 @@ function toggleOnline() {
 }
 
 function renderMain() {
-  if (state.showSettings) return h('section', { class: 'main' }, renderTopbar(), h('div', { class: 'content' }, renderSettings()))
+  const overlays = []
+  if (state.search.open) overlays.push(renderSearchOverlay())
+  if (state.trash.open) overlays.push(renderTrashModal())
+  if (state.showSettings) return h('section', { class: 'main' }, renderTopbar(), h('div', { class: 'content' }, renderSettings()), ...overlays)
   const content = state.tab === 'online' || (!state.current && state.online.items.length > 0) ? renderOnline() : !state.current ? renderEmpty() : renderReader()
-  return h('section', { class: 'main' }, renderTopbar(), content)
+  return h('section', { class: 'main' }, renderTopbar(), content, ...overlays)
 }
 
 function paneButton(kind, label) {
@@ -1646,6 +1681,9 @@ function renderTopbar() {
       paneButton('side', '文献库'),
     h('button', { class: 'ghost' + (state.layout.outlineOpen ? ' active' : ''), disabled: sections.length === 0, 'data-pane': 'outline', onclick: () => togglePane('outline'), title: '目录（与拖动目录分隔条是同一个开关）' }, '目录'),
     paneButton('chat', '对话'),
+    meta ? h('button', { class: 'ghost', 'data-act': 'search', title: '文内搜索（Ctrl+F）', onclick: openSearch }, '🔍') : null,
+    h('button', { class: 'ghost', 'data-act': 'dark', title: 'PDF 深色（三档：关/柔和/强）', onclick: cycleDark }, state.dark === 0 ? '◐' : state.dark === 1 ? '◑' : '◒'),
+    h('button', { class: 'ghost', 'data-act': 'trash', title: '回收站', onclick: openTrash }, '🗑'),
     meta
       ? h(
           'button',
@@ -1706,7 +1744,12 @@ function renderReader() {
   const children = []
   if (outlineOpen) children.push(renderOutline(sections), makeSplitter('outline'))
   children.push(renderTabBody())
-  return h('div', { class: 'content' }, h('div', { class: 'reader', style: { gridTemplateColumns: outlineColumns({ ...state.layout, outlineOpen }) } }, ...children))
+  return h(
+    'div',
+    { class: 'content' },
+    h('div', { class: 'reader', style: { gridTemplateColumns: outlineColumns({ ...state.layout, outlineOpen }) } }, ...children),
+    renderLogDrawer(),
+  )
 }
 
 function renderTabBody() {
@@ -1831,6 +1874,7 @@ function paintOutlineActive() {
 function renderCompare() {
   const pane = h('div', { class: 'compare-pane' })
   pane.append(renderCompareToolbar())
+  if (state.review) pane.append(renderReviewPanel())
   if (!state.doc || !Array.isArray(state.doc.paragraphs) || state.doc.paragraphs.length === 0) {
     pane.append(renderDocMissing())
     return pane
@@ -1922,6 +1966,8 @@ function renderParagraph(paragraph) {
     return para
   }
   if (key) para.append(h('div', { class: 'para-zh', 'data-zh': key }, ...zhContent(key, entry && entry.zh, state.streams.get(key))))
+  const figures = key && state.figuresByKey ? state.figuresByKey[key] : null
+  if (Array.isArray(figures)) for (const figure of figures) para.append(renderInlineFigure(figure))
   return para
 }
 
@@ -1984,6 +2030,11 @@ function renderCompareToolbar() {
       '只看译文',
     ),
     h('button', { id: 'translate-titles', disabled: !docReady || state.translateBusy, title: '批量翻译节标题，目录显示英文/中文两行', onclick: translateTitles }, '目录翻译'),
+    state.job && state.job.failed && state.job.failed.size
+      ? h('button', { id: 'retry-failed', title: '重新请求这些翻译失败的段落', onclick: retryFailedSegments }, '重试失败 ' + state.job.failed.size)
+      : null,
+    h('button', { id: 'review-run', disabled: !docReady || state.reviewBusy, title: '检查空译文、截断、残留英文、公式残留等可疑段落', onclick: () => runReview('static') }, state.reviewBusy ? '自检中…' : '自检'),
+    h('button', { id: 'logs-toggle', class: 'ghost' + (state.logs.open ? ' active' : ''), title: '任务日志（翻译 / OCR / 自检）', onclick: toggleLogs }, '日志'),
   )
 }
 
@@ -2210,22 +2261,44 @@ function renderCardPane() {
 
 function renderChat() {
   const aside = h('aside', { class: 'chat', 'aria-label': '论文对话' })
+  const sessionMode = state.chatMode === 'session' && state.session.available
   const header = h(
     'div',
     { class: 'chat-head' },
-    h('span', { class: 'chat-title' }, '对话'),
+    h('span', { class: 'chat-title' }, sessionMode ? '对话 · DSH 会话' : '对话'),
     h('span', { class: 'spacer' }),
-    h(
-      'select',
-      { class: 'chat-model', title: '对话模型（保存到 AI 设置）', onchange: (event) => saveModel('chatModel', event.target.value) },
-      ...modelOptions(state.aiConfig && state.aiConfig.chatModel),
-    ),
-    h('button', { class: 'ghost', title: '清空对话历史', onclick: clearChat }, '清空'),
+    sessionMode
+      ? null
+      : h(
+          'select',
+          { class: 'chat-model', title: '对话模型（保存到 AI 设置）', onchange: (event) => saveModel('chatModel', event.target.value) },
+          ...modelOptions(state.aiConfig && state.aiConfig.chatModel),
+        ),
+    sessionMode ? null : h('button', { class: 'ghost', title: '清空对话历史', onclick: clearChat }, '清空'),
+    state.session.available
+      ? h(
+          'button',
+          {
+            class: 'ghost' + (sessionMode ? ' active' : ''),
+            title: sessionMode ? '切回插件内自绘对话（不写进 DSH 会话）' : '把对话落进真正的 DSH 会话（主界面能接着聊）',
+            onclick: () => {
+              state.chatMode = sessionMode ? 'local' : 'session'
+              state.session.started = ''
+              render()
+            },
+          },
+          sessionMode ? '本地' : '会话',
+        )
+      : null,
     h('button', { class: 'ghost', title: '收起对话', onclick: () => togglePane('chat') }, '×'),
   )
   aside.append(header)
   if (!state.current) {
     aside.append(h('div', { class: 'hint chat-hint' }, '打开一篇论文后在这里对话。'))
+    return aside
+  }
+  if (sessionMode) {
+    renderSessionChat(aside)
     return aside
   }
   aside.append(
@@ -2844,9 +2917,699 @@ document.addEventListener('click', (event) => {
 
 // ---------------------------------------------------------------- 启动
 
+// ---------------------------------------------------------------- v3：搜索 / 深色 / 回收站 / 日志 / 自检 / 配图 / 原生会话
+
+const DARK_KEY = 'paper-workbench.dark'
+
+function loadDark() {
+  try {
+    const value = Number(localStorage.getItem(DARK_KEY) || 0)
+    return Number.isFinite(value) ? Math.min(2, Math.max(0, value)) : 0
+  } catch {
+    return 0
+  }
+}
+
+function applyDark() {
+  document.body.classList.toggle('pdf-dark', state.dark >= 1)
+  document.body.classList.toggle('pdf-dark-strong', state.dark >= 2)
+}
+
+function cycleDark() {
+  state.dark = (state.dark + 1) % 3
+  try {
+    localStorage.setItem(DARK_KEY, String(state.dark))
+  } catch {
+    /* 隐私模式下 localStorage 可能不可写，忽略 */
+  }
+  applyDark()
+  toast(state.dark === 0 ? 'PDF 深色：关' : state.dark === 1 ? 'PDF 深色：柔和' : 'PDF 深色：强')
+  render()
+}
+
+function cssKey(value) {
+  const text = String(value || '')
+  if (typeof CSS !== 'undefined' && CSS.escape) return CSS.escape(text)
+  return text.replace(/["\\]/g, '\\$&')
+}
+
+// --- 文内搜索（搜文档模型，不重新解析 PDF）
+
+function openSearch() {
+  if (!state.current) {
+    toast('先打开一篇论文')
+    return
+  }
+  state.search.open = true
+  render()
+  setTimeout(() => {
+    const input = document.querySelector('#search-input')
+    if (input) {
+      input.focus()
+      input.select()
+    }
+  }, 30)
+}
+
+function closeSearch() {
+  state.search.open = false
+  state.search.error = ''
+  render()
+}
+
+async function runSearch(query) {
+  const q = String(query || '').trim()
+  state.search.q = q
+  state.search.error = ''
+  if (!q) {
+    state.search.hits = []
+    render()
+    return
+  }
+  state.search.busy = true
+  render()
+  try {
+    const value = await rpc('search.doc', { id: state.current.meta.id, query: q, limit: 120 })
+    state.search.hits = Array.isArray(value.hits) ? value.hits : []
+    state.search.active = 0
+    if (state.search.hits.length === 0) state.search.error = '没有命中'
+  } catch (error) {
+    state.search.hits = []
+    state.search.error = error.message
+  }
+  state.search.busy = false
+  render()
+  if (state.search.hits.length) gotoSearchHit(0)
+}
+
+function gotoSearchHit(index) {
+  const hit = state.search.hits[index]
+  if (!hit) return
+  state.search.active = index
+  if (hit.kind === 'title' && hit.sectionId) {
+    const section = sectionsOf().find((item) => item.id === hit.sectionId)
+    if (section) {
+      state.search.open = false
+      jumpToSection(section)
+      return
+    }
+  }
+  if (state.tab === 'page') {
+    state.search.open = false
+    jumpToPage(hit.page || 1)
+    return
+  }
+  if (state.tab !== 'compare') {
+    state.tab = 'compare'
+    state.search.open = false
+    render()
+  }
+  const node = document.querySelector('.para[data-key="' + cssKey(hit.key) + '"]')
+  if (node) {
+    node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    node.classList.add('flash')
+    setTimeout(() => node.classList.remove('flash'), 1600)
+    render()
+  } else {
+    state.search.open = false
+    jumpToPage(hit.page || 1)
+  }
+}
+
+function renderSearchOverlay() {
+  const s = state.search
+  return h(
+    'div',
+    {
+      class: 'overlay',
+      onclick: (event) => {
+        if (event.target === event.currentTarget) closeSearch()
+      },
+    },
+    h(
+      'div',
+      { class: 'search-box' },
+      h(
+        'div',
+        { class: 'search-head' },
+        h('input', {
+          id: 'search-input',
+          class: 'search-input',
+          placeholder: '在全文里搜（段落 / 标题）…',
+          value: s.q,
+          oninput: (event) => {
+            s.q = event.target.value
+          },
+          onkeydown: (event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              runSearch(s.q)
+            } else if (event.key === 'Escape') {
+              closeSearch()
+            }
+          },
+        }),
+        h('button', { class: 'primary', onclick: () => runSearch(s.q) }, s.busy ? '搜索中…' : '搜索'),
+        h('button', { class: 'ghost', onclick: closeSearch }, '关闭'),
+      ),
+      h(
+        'div',
+        { class: 'search-meta' },
+        h('span', { class: 'hint' }, s.hits.length ? s.active + 1 + ' / ' + s.hits.length + ' 处命中（点条目跳转，Esc 关闭）' : s.error || '回车搜索；搜索范围是当前文档模型的段落与标题'),
+        h('span', { class: 'spacer' }),
+        s.hits.length
+          ? h('button', { class: 'ghost', onclick: () => gotoSearchHit((s.active + s.hits.length - 1) % s.hits.length) }, '上一处')
+          : null,
+        s.hits.length ? h('button', { class: 'ghost', onclick: () => gotoSearchHit((s.active + 1) % s.hits.length) }, '下一处') : null,
+      ),
+      h(
+        'div',
+        { class: 'search-list' },
+        ...s.hits.map((hit, index) =>
+          h(
+            'button',
+            { class: 'search-hit' + (index === s.active ? ' active' : ''), onclick: () => gotoSearchHit(index) },
+            h('span', { class: 'search-page' }, 'p.' + (hit.page || '?')),
+            h(
+              'span',
+              { class: 'search-snippet' },
+              hit.before,
+              h('mark', {}, hit.text.slice(hit.at, hit.at + s.q.length)),
+              hit.after,
+            ),
+          ),
+        ),
+      ),
+    ),
+  )
+}
+
+// --- 配图（正文里按「图 N」插入）
+
+async function loadFigures() {
+  if (!state.current) {
+    state.figures = []
+    state.figuresByKey = {}
+    return
+  }
+  try {
+    const value = await rpc('figures.list', { id: state.current.meta.id })
+    state.figures = Array.isArray(value.figures) ? value.figures : []
+  } catch {
+    state.figures = []
+  }
+  buildFiguresByKey()
+}
+
+/** 把配图按「正文里提到 图 N / Figure N 的段落」分组；与 lib/figures.js 的 assignFigures 同一套规则。 */
+function buildFiguresByKey() {
+  const map = {}
+  state.figuresByKey = map
+  const paragraphs = (state.doc && state.doc.paragraphs) || []
+  const labelOf = (text) => {
+    const match = /(?:图|圖|Figure|Fig\.?)\s*([0-9]+|[IVXLC]+)/i.exec(String(text || ''))
+    if (!match) return null
+    const raw = match[1].toUpperCase()
+    if (/^[0-9]+$/.test(raw)) return Number(raw)
+    const roman = { I: 1, V: 5, X: 10, L: 50, C: 100 }
+    let total = 0
+    for (let i = 0; i < raw.length; i += 1) {
+      const cur = roman[raw[i]] || 0
+      const next = roman[raw[i + 1]] || 0
+      total += cur < next ? -cur : cur
+    }
+    return total || null
+  }
+  const used = new Set()
+  for (const paragraph of paragraphs) {
+    if ((paragraph.kind || 'body') !== 'body') continue
+    const label = labelOf(paragraph.text)
+    if (!label) continue
+    const key = paragraphKey(paragraph)
+    if (!key) continue
+    const hits = state.figures
+      .map((figure, position) => ({ figure, position }))
+      .filter(({ figure }) => Number(figure.label) === label && !used.has(figure.position ?? -1))
+    for (const { figure, position } of hits) {
+      if (used.has(position)) continue
+      used.add(position)
+      if (!map[key]) map[key] = []
+      map[key].push({ ...figure, position })
+    }
+  }
+  // 没有 label 的图：按同页最近段落兜底，至少让读者能看到
+  for (let position = 0; position < state.figures.length; position += 1) {
+    if (used.has(position)) continue
+    const figure = state.figures[position]
+    if (figure.label) continue
+    const samePage = paragraphs.find((paragraph) => Number(paragraph.page) === Number(figure.page))
+    if (!samePage) continue
+    const key = paragraphKey(samePage)
+    if (!key) continue
+    if (!map[key]) map[key] = []
+    map[key].push({ ...figure, position })
+    used.add(position)
+  }
+}
+
+function renderInlineFigure(figure) {
+  const src = API + 'figure?id=' + encodeURIComponent(state.current.meta.id) + '&index=' + figure.position
+  const caption = figure.caption || '图 ' + (figure.label || figure.position + 1)
+  return h(
+    'figure',
+    { class: 'inline-fig' },
+    h('img', {
+      src,
+      alt: caption,
+      loading: 'lazy',
+      title: '点击看大图',
+      onclick: () => window.open(src, '_blank', 'noopener'),
+    }),
+    h('figcaption', {}, caption),
+  )
+}
+
+// --- 翻译自检
+
+async function runReview(mode = 'static') {
+  if (!state.current) return
+  state.reviewBusy = true
+  render()
+  try {
+    const value = await rpc('review.run', { id: state.current.meta.id, mode })
+    state.review = value.review || null
+    const count = (state.review && state.review.issues ? state.review.issues.length : 0)
+    toast(count ? '自检发现 ' + count + ' 处可疑译文' : '自检通过：没发现明显问题')
+  } catch (error) {
+    toast('自检失败：' + error.message)
+  }
+  state.reviewBusy = false
+  render()
+}
+
+function renderReviewPanel() {
+  const review = state.review
+  if (!review) return null
+  const issues = Array.isArray(review.issues) ? review.issues : []
+  const stats = review.stats || {}
+  return h(
+    'div',
+    { class: 'review-panel' },
+    h(
+      'div',
+      { class: 'review-head' },
+      h('span', {}, '自检：' + issues.length + ' 处可疑（检查 ' + (stats.checked || 0) + ' 段）'),
+      stats.llmError ? h('span', { class: 'muted' }, '模型检查降级：' + stats.llmError) : null,
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'link', onclick: () => { state.review = null; render() } }, '收起'),
+    ),
+    issues.length
+      ? h(
+          'div',
+          { class: 'review-list' },
+          ...issues.slice(0, 200).map((issue) =>
+            h(
+              'div',
+              { class: 'review-item ' + (issue.severity || 'warn') },
+              h('span', { class: 'review-code' }, issue.code || 'issue'),
+              h('span', { class: 'review-msg' }, issue.message || issue.issue || ''),
+              issue.key ? h('button', { class: 'link', onclick: () => gotoParagraphKey(issue.key) }, '定位') : null,
+            ),
+          ),
+        )
+      : h('div', { class: 'hint' }, '没发现明显问题。'),
+  )
+}
+
+function gotoParagraphKey(key) {
+  const node = document.querySelector('.para[data-key="' + cssKey(key) + '"]')
+  if (!node) {
+    toast('这一段不在当前视图里（可能已重新分节）')
+    return
+  }
+  node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  node.classList.add('flash')
+  setTimeout(() => node.classList.remove('flash'), 1600)
+}
+
+// --- 任务日志抽屉
+
+function toggleLogs() {
+  state.logs.open = !state.logs.open
+  if (state.logs.open) {
+    loadLogs()
+    startLogPoll()
+  } else {
+    stopLogPoll()
+  }
+  render()
+}
+
+async function loadLogs(silent = false) {
+  if (!state.current) return
+  try {
+    const value = await rpc('logs.list', { id: state.current.meta.id, after: 0, limit: 300 })
+    const events = Array.isArray(value.events) ? value.events : []
+    const changed = events.length !== state.logs.events.length
+    state.logs.events = events
+    state.logs.lastSeq = value.lastSeq || 0
+    if (changed && !silent) render()
+    else if (changed && silent && state.logs.open) render()
+  } catch {
+    /* 日志读失败不打扰用户 */
+  }
+}
+
+function startLogPoll() {
+  stopLogPoll()
+  state.logs.timer = setInterval(() => loadLogs(true), 2500)
+}
+
+function stopLogPoll() {
+  if (state.logs.timer) clearInterval(state.logs.timer)
+  state.logs.timer = null
+}
+
+async function clearLogs() {
+  if (!state.current) return
+  await rpc('logs.clear', { id: state.current.meta.id }).catch((error) => toast(error.message))
+  state.logs.events = []
+  render()
+}
+
+function renderLogDrawer() {
+  if (!state.logs.open) return null
+  const events = state.logs.events.slice(-200)
+  return h(
+    'div',
+    { class: 'log-drawer' },
+    h(
+      'div',
+      { class: 'log-head' },
+      h('span', {}, '任务日志（' + state.logs.events.length + ' 条）'),
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'ghost', onclick: clearLogs }, '清空'),
+      h('button', { class: 'ghost', onclick: toggleLogs }, '收起'),
+    ),
+    h(
+      'div',
+      { class: 'log-list' },
+      events.length === 0
+        ? h('div', { class: 'hint' }, '还没有日志。翻译、OCR、自检都会在这里留下记录。')
+        : events.map((event) =>
+            h(
+              'div',
+              { class: 'log-item ' + (event.level || 'info') },
+              h('span', { class: 'log-time' }, String(event.at || '').replace('T', ' ').slice(11, 19)),
+              h('span', { class: 'log-kind' }, event.kind || 'log'),
+              h('span', { class: 'log-msg' }, event.message || ''),
+            ),
+          ),
+    ),
+  )
+}
+
+// --- 回收站
+
+async function openTrash() {
+  state.trash.open = true
+  state.trash.busy = true
+  state.trash.error = ''
+  render()
+  try {
+    const value = await rpc('trash.list')
+    state.trash.items = Array.isArray(value.items) ? value.items : []
+  } catch (error) {
+    state.trash.error = error.message
+  }
+  state.trash.busy = false
+  render()
+}
+
+function closeTrash() {
+  state.trash.open = false
+  render()
+}
+
+async function restoreTrashItem(name) {
+  try {
+    await rpc('trash.restore', { name })
+    toast('已恢复到文献库')
+    await loadLibrary()
+    await openTrash()
+  } catch (error) {
+    toast('恢复失败：' + error.message)
+  }
+}
+
+async function purgeTrashItem(name) {
+  if (!window.confirm('彻底删除这一项？回收站里的文件会被真的删掉，无法恢复。')) return
+  try {
+    await rpc('trash.purge', { name })
+    toast('已彻底删除')
+    await openTrash()
+  } catch (error) {
+    toast('删除失败：' + error.message)
+  }
+}
+
+function renderTrashModal() {
+  const t = state.trash
+  return h(
+    'div',
+    {
+      class: 'overlay',
+      onclick: (event) => {
+        if (event.target === event.currentTarget) closeTrash()
+      },
+    },
+    h(
+      'div',
+      { class: 'search-box trash-box' },
+      h(
+        'div',
+        { class: 'search-head' },
+        h('span', { class: 'search-title' }, '回收站'),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'ghost', onclick: closeTrash }, '关闭'),
+      ),
+      h('div', { class: 'hint' }, '删除论文只是移到这里，PDF 原件不动；恢复后回到文献库原来的分组。'),
+      t.error ? h('div', { class: 'error' }, t.error) : null,
+      t.busy
+        ? h('div', { class: 'hint' }, '读取中…')
+        : t.items.length === 0
+          ? h('div', { class: 'hint' }, '回收站是空的。')
+          : h(
+              'div',
+              { class: 'trash-list' },
+              ...t.items.map((item) =>
+                h(
+                  'div',
+                  { class: 'trash-item' },
+                  h('div', { class: 'trash-title' }, item.title || item.id),
+                  h('div', { class: 'muted' }, item.id + ' · ' + String(item.trashedAt || '').slice(0, 19).replace('T', ' ')),
+                  h('span', { class: 'spacer' }),
+                  h('button', { onclick: () => restoreTrashItem(item.name) }, '恢复'),
+                  h('button', { class: 'danger', onclick: () => purgeTrashItem(item.name) }, '彻底删除'),
+                ),
+              ),
+            ),
+    ),
+  )
+}
+
+// --- 原生会话（对话落进真正的 DSH 会话）
+
+function sessionMessages() {
+  const out = []
+  let live = null
+  for (const frame of state.session.frames) {
+    if (!frame) continue
+    if (frame.kind === 'message') {
+      out.push({ role: frame.role || 'assistant', text: frame.text || '' })
+      live = null
+    } else if (frame.kind === 'delta') {
+      if (!live) {
+        live = { role: 'assistant', text: '', streaming: true }
+        out.push(live)
+      }
+      live.text += frame.text || ''
+    } else if (frame.kind === 'done') {
+      if (live) live.streaming = false
+      live = null
+    }
+  }
+  return out
+}
+
+async function startSessionStream(force = false) {
+  if (!state.current || !state.session.available) return
+  const id = state.current.meta.id
+  if (!force && state.session.started === id && state.session.streaming) return
+  stopSessionStream()
+  state.session.started = id
+  state.session.frames = []
+  state.session.error = ''
+  state.session.streaming = true
+  const controller = new AbortController()
+  state.session.abort = controller
+  render()
+  try {
+    await streamSseGet(
+      '/paper-workbench/session/follow?id=' + encodeURIComponent(id),
+      {
+        frame: (frame) => {
+          state.session.frames.push(frame)
+          if (state.session.frames.length > 400) state.session.frames = state.session.frames.slice(-400)
+          render()
+        },
+        error: (data) => {
+          state.session.error = (data && data.error) || '会话流出错'
+          render()
+        },
+      },
+      controller.signal,
+    )
+  } catch (error) {
+    if (!controller.signal.aborted) state.session.error = error.message
+  }
+  state.session.streaming = false
+  render()
+}
+
+function stopSessionStream() {
+  if (state.session.abort) {
+    state.session.abort.abort()
+    state.session.abort = null
+  }
+  state.session.streaming = false
+}
+
+async function sendSessionMessage(text) {
+  const content = String(text || '').trim()
+  if (!content || !state.current) return
+  state.session.frames.push({ kind: 'message', role: 'user', text: content })
+  state.session.error = ''
+  render()
+  try {
+    await rpc('session.ask', { id: state.current.meta.id, text: content })
+  } catch (error) {
+    state.session.error = error.message
+    render()
+  }
+}
+
+function renderSessionChat(aside) {
+  aside.append(
+    h(
+      'div',
+      { class: 'chat-quick' },
+      h('button', { class: 'ghost', onclick: () => sendSessionMessage('讲解这一节的核心贡献：' + (state.sectionId || '')) }, '讲解本节'),
+      h(
+        'button',
+        {
+          class: 'ghost',
+          onclick: () => {
+            const text = pickedText()
+            if (text.length < 2) {
+              toast('先在正文里选中一段文字')
+              return
+            }
+            sendSessionMessage('讲解这段选中的原文：\\n> ' + text.slice(0, 800))
+          },
+        },
+        '讲解选中段落',
+      ),
+      h('button', { class: 'ghost', onclick: () => sendSessionMessage('用三句话总结这篇论文') }, '总结全文'),
+    ),
+  )
+  if (state.session.error) aside.append(h('div', { class: 'chat-error error' }, state.session.error))
+  const list = h('div', { class: 'chat-messages' })
+  const messages = sessionMessages()
+  if (messages.length === 0) {
+    list.append(h('div', { class: 'hint chat-hint' }, state.session.streaming ? '正在接上会话…' : '这一段对话就是 DSH 里的真实会话，关掉面板也能在主界面继续。'))
+  }
+  for (const message of messages) {
+    if (message.role === 'user') {
+      list.append(h('div', { class: 'msg user' }, h('div', { class: 'msg-body' }, message.text)))
+      continue
+    }
+    const body = h('div', { class: 'msg-body' + (message.streaming ? ' streaming' : '') })
+    body.innerHTML = renderAssistantHtml(message.text)
+    if (message.streaming) body.append(h('span', { class: 'caret' }))
+    list.append(h('div', { class: 'msg assistant' }, body, h('div', { class: 'msg-actions' }, h('button', { class: 'link', onclick: () => copyText(message.text) }, '复制'))))
+  }
+  aside.append(list)
+  const input = h('textarea', {
+    id: 'chat-input',
+    class: 'chat-input',
+    rows: '2',
+    placeholder: '在这个真实会话里继续问…（Enter 发送）',
+    value: state.chat.draft || '',
+    oninput: (event) => {
+      state.chat.draft = event.target.value
+    },
+    onkeydown: (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault()
+        const text = state.chat.draft
+        state.chat.draft = ''
+        sendSessionMessage(text)
+      }
+    },
+  })
+  aside.append(
+    h(
+      'div',
+      { class: 'chat-composer' },
+      input,
+      h(
+        'div',
+        { class: 'chat-actions' },
+        h('span', { class: 'hint' }, state.session.streaming ? '会话流已连上' : '点「重连」可重新接上'),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'ghost', onclick: () => startSessionStream(true) }, '重连'),
+        h(
+          'button',
+          {
+            class: 'primary',
+            onclick: () => {
+              const text = state.chat.draft
+              state.chat.draft = ''
+              sendSessionMessage(text)
+            },
+          },
+          '发送',
+        ),
+      ),
+    ),
+  )
+  if (state.session.started !== state.current.meta.id && !state.session.streaming) {
+    startSessionStream()
+  }
+}
+
+function retryFailedSegments() {
+  const failed = state.job && state.job.failed ? [...state.job.failed] : []
+  if (failed.length === 0) {
+    toast('没有失败的段落')
+    return
+  }
+  translateKeys(failed)
+}
+
 async function boot() {
+  applyDark()
+  document.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === 'f' && state.current) {
+      event.preventDefault()
+      openSearch()
+    }
+  })
   render()
   await Promise.all([loadHealth(), loadAi()])
+  state.session.available = !!(state.health && state.health.session && state.health.session.available)
+  if (!state.session.available) state.chatMode = 'local'
   await loadLibrary()
   render()
   // 面板关掉再打开等于重开页面：把上次看到哪儿、停在哪个页签还原回去。
@@ -2861,6 +3624,7 @@ async function boot() {
     }
     saveSession()
   }
+  if (state.session.available && state.layout.chatOpen && state.current) startSessionStream()
 }
 
 // 关闭 / 切走时把当前位置记下来（pagehide 比 beforeunload 在嵌入场景更可靠）

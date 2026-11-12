@@ -3,6 +3,8 @@ node_modules/
 dist/
 *.log
 *.tmp
+__pycache__/
+*.pyc
 
 # 本地数据与测试产物（绝不入库）
 data/

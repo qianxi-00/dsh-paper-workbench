@@ -552,6 +552,7 @@ async function main() {
   console.log('PASS ' + passed + ' / FAIL ' + failed + ' / SKIP ' + skipped)
   console.log('RC ' + (failed === 0 ? 0 : 1))
   if (failed === 0) {
+    await store.closeDb()
     await fsp.rm(tmpRoot, { recursive: true, force: true })
   } else {
     console.log('临时目录保留：' + tmpRoot)

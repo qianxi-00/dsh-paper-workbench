@@ -12,16 +12,24 @@
  * 只用于调试 UI 与 SSE，不产生任何网络请求，也不消耗 token。
  */
 import http from 'node:http'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { createApi, getAiRuntime, setAiRuntime } from '../lib/index.js'
-import { createHandler } from '../lib/server.js'
-
+// store.js 在模块求值时就固定了数据目录，所以要先决定数据目录、再动态 import 插件入口
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
 const args = process.argv.slice(2)
 const MOCK_LLM = args.includes('--mock-llm')
+
+// --mock-llm 时默认把数据目录挪到临时目录：假模型写出来的译文 / 日志 / 对话不该进用户的真实文献库。
+// 想在假模型下看真实库，显式设 DSH_PAPER_WORKBENCH_DATA 即可。
+if (MOCK_LLM && !process.env.DSH_PAPER_WORKBENCH_DATA) {
+  process.env.DSH_PAPER_WORKBENCH_DATA = path.join(os.tmpdir(), 'pb-dev-mock')
+}
+
+const { createApi, createStreams, setAiRuntime } = await import('../lib/index.js')
+const { createHandler } = await import('../lib/server.js')
 const PORT = Number(args.find((item) => /^\d+$/.test(item)) || 57571)
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -88,30 +96,7 @@ if (MOCK_LLM) {
   console.log('[dev] 已启用假模型（--mock-llm）：翻译/对话不会发真实请求')
 }
 
-const streams = {
-  translate: async function* translateStream(body, options) {
-    const ai = await aiEngine()
-    yield* ai.translate(body, options)
-  },
-  chat: async function* chatStream(body, options) {
-    const ai = await aiEngine()
-    yield* ai.chat(body, options)
-  },
-}
-
-let aiPromise = null
-/** dev-server 里也走同一个 createAi：服务句柄来自 setAiRuntime（--mock-llm 时是假的）。 */
-async function aiEngine() {
-  if (aiPromise === null) {
-    aiPromise = (async () => {
-      const [{ createAi }, store] = await Promise.all([import('../lib/ai.js'), import('../lib/store.js')])
-      return createAi({ store, getServices: () => getAiRuntime() })
-    })()
-  }
-  const ai = await aiPromise
-  if (!getAiRuntime().llm) throw new Error('dev-server 没有接入模型：启动时加 --mock-llm 才能调试翻译与对话')
-  return ai
-}
+const streams = createStreams()
 
 const handler = createHandler({
   api: createApi(),

@@ -16,6 +16,10 @@ CHINESE_PAGE_RE = re.compile(r"^第\s*\d+\s*页(?:\s*[/／]\s*共?\s*\d+\s*页)?
 ROMAN_PAGE_RE = re.compile(r"^[ivxlcdm]{1,7}$", re.IGNORECASE)
 SAMPLE_PDF = Path(r"G:\笔记\LLM知识体系论文\高效微调\Prompt Tuning.pdf")
 HEURISTIC_RATIO, MAX_TITLE_LEN, SIZE_TOLERANCE, MAX_LEVELS = 1.12, 120, 0.94, 3
+FIGURE_MIN_SIDE = 60.0          # 宽或高小于 60pt 的图按 logo/图标丢弃
+FIGURE_MIN_AREA_RATIO = 0.015   # 面积小于页面 1.5% 的图同样丢弃
+FIGURE_CAPTION_RE = re.compile(r"^(?:图|圖|figure|fig\.?)\s*([0-9]+|[ivxlcdm]+)", re.IGNORECASE)
+_ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
 
 
 class ArgsError(Exception):
@@ -111,6 +115,109 @@ def _block_record(block):
     size = round(statistics.median(char_sizes), 2) if char_sizes else 0.0
     return {"x": x, "y": y, "x2": x2, "y2": y2, "size": size,
             "bold": bold, "text": text}
+
+
+def _roman_to_int(token):
+    """图注里的罗马数字（Figure IV）转阿拉伯数字；非法返回 None。"""
+    total, previous = 0, 0
+    for char in reversed(str(token).lower()):
+        value = _ROMAN_VALUES.get(char)
+        if value is None:
+            return None
+        if value < previous:
+            total -= value
+        else:
+            total += value
+            previous = value
+    return total or None
+
+
+def _figure_label(text):
+    """'图 3' / 'Figure IV' / 'Fig. 3: …' → 3 / 4 / 3；不是图注行返回 None。"""
+    match = FIGURE_CAPTION_RE.match(text)
+    if not match:
+        return None
+    token = match.group(1)
+    return int(token) if token.isdigit() else _roman_to_int(token)
+
+
+def _text_lines(page):
+    """取该页所有文本行 [(文本, bbox)]；图注匹配只需要行级数据。"""
+    lines = []
+    for block in page.get_text("dict").get("blocks") or []:
+        if block.get("type", 0) != 0:
+            continue
+        for line in block.get("lines") or []:
+            text = " ".join(str(span.get("text") or "")
+                            for span in line.get("spans") or []).strip()
+            text = re.sub(r"\s+", " ", text)
+            if text:
+                lines.append((text, fitz.Rect(line.get("bbox") or (0, 0, 0, 0))))
+    return lines
+
+
+def _rect_gap(first, second):
+    """两个矩形的最近距离平方；相交时为 0。"""
+    dx = max(0.0, max(first.x0 - second.x1, second.x0 - first.x1))
+    dy = max(0.0, max(first.y0 - second.y1, second.y0 - first.y1))
+    return dx * dx + dy * dy
+
+
+def cmd_figures(args):
+    """取每页图片 bbox（get_image_info），过滤 logo/小图，就近匹配图注。
+
+    图注只认行首的 图/圖/Figure/Fig.；取与图片矩形最近的一行（距离相同优先下方），
+    label 规范化成阿拉伯数字。index 是该页按 (y,x) 排序后的序号，从 1 开始。
+    """
+    doc = open_doc(args)
+    try:
+        figures = []
+        for index in range(int(doc.page_count)):
+            page = doc.load_page(index)
+            try:
+                infos = page.get_image_info() or []
+            except Exception:
+                infos = []                 # 个别页图片信息坏了不影响其它页
+            page_area = max(1.0, float(page.rect.width) * float(page.rect.height))
+            captions = [(text, rect, _figure_label(text))
+                        for text, rect in _text_lines(page)
+                        if FIGURE_CAPTION_RE.match(text)]
+            found, seen = [], set()
+            for info in infos:
+                try:
+                    rect = fitz.Rect(info.get("bbox")) & page.rect
+                except Exception:
+                    continue
+                if rect.width < FIGURE_MIN_SIDE or rect.height < FIGURE_MIN_SIDE:
+                    continue               # 小图标/logo
+                if rect.width * rect.height / page_area < FIGURE_MIN_AREA_RATIO:
+                    continue
+                key = (round(rect.x0, 1), round(rect.y0, 1),
+                       round(rect.x1, 1), round(rect.y1, 1))
+                if key in seen:            # 同一张图被多个对象引用时只留一条
+                    continue
+                seen.add(key)
+                caption, label = None, None
+                if captions:               # 最近的图注行；等距时优先图片下方那行
+                    best = min(captions, key=lambda item: (
+                        _rect_gap(rect, item[1]),
+                        0 if item[1].y0 >= rect.y1 - 1 else 1,
+                        item[1].y0))
+                    caption, label = best[0], best[2]
+                found.append((rect, caption, label))
+            found.sort(key=lambda item: (item[0].y0, item[0].x0))
+            for position, (rect, caption, label) in enumerate(found):
+                figures.append({
+                    "page": index + 1,
+                    "x": round(rect.x0, 2), "y": round(rect.y0, 2),
+                    "x2": round(rect.x1, 2), "y2": round(rect.y1, 2),
+                    "width": round(rect.width, 2), "height": round(rect.height, 2),
+                    "index": position + 1,
+                    "caption": caption, "label": label,
+                })
+        return {"ok": True, "figures": figures}
+    finally:
+        doc.close()
 
 
 def cmd_info(args):
@@ -272,13 +379,26 @@ def cmd_render(args):
         if number < 1 or number > page_count:
             raise ArgsError(f"页码超出范围：{number}（共 {page_count} 页）")
         scale = max(0.5, min(4.0, scale))   # 契约：限制在 [0.5, 4]
+        page = doc.load_page(number - 1)
+        clip_rect = None
+        clip_raw = args.get("clip")
+        if clip_raw is not None:            # 可选：只渲染页面坐标系里的这块区域
+            try:
+                x, y, width, height = (float(value) for value in clip_raw)
+            except (TypeError, ValueError):
+                raise ArgsError("clip 参数不合法（需要 [x, y, w, h]）") from None
+            if width <= 0 or height <= 0:
+                raise ArgsError("clip 参数不合法（宽高必须大于 0）")
+            clip_rect = fitz.Rect(x, y, x + width, y + height) & page.rect
+            if clip_rect.width < 1 or clip_rect.height < 1:
+                raise ArgsError("clip 区域不在页面范围内")
         out_raw = args.get("out")
         if not isinstance(out_raw, str) or not out_raw.strip():
             raise ArgsError("缺少 out 参数")
         out_path = Path(out_raw).expanduser()
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        pix = doc.load_page(number - 1).get_pixmap(
-            matrix=fitz.Matrix(scale, scale), alpha=False)
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False,
+                              clip=clip_rect)
         data = pix.tobytes("png")
         tmp_path = out_path.with_name(out_path.name + ".tmp")
         try:
@@ -318,15 +438,28 @@ def self_test():
     outline = cmd_outline({"path": str(SAMPLE_PDF)})
     if not outline.get("ok") or not isinstance(outline.get("items"), list):
         return fail(f"outline 检查失败：{outline.get('error')}")
+    figures = cmd_figures({"path": str(SAMPLE_PDF)})
+    if not figures.get("ok") or not isinstance(figures.get("figures"), list):
+        return fail(f"figures 检查失败：{figures.get('error') or 'figures 不是数组'}")
+    clip_png = Path(tempfile.gettempdir()) / "pb-selftest-clip.png"
+    clip = cmd_render({"path": str(SAMPLE_PDF), "page": 1, "scale": 1.0,
+                       "clip": [72, 72, 180, 120], "out": str(clip_png)})
+    clip_data = clip_png.read_bytes() if clip.get("ok") else b""
+    if (not clip.get("ok") or len(clip_data) <= 1000
+            or not clip_data.startswith(b"\x89PNG\r\n\x1a\n")):
+        return fail(f"render clip 检查失败：{clip.get('error') or f'产物异常 {len(clip_data)} 字节'}")
     checks = [f"info: pages={pages} hasText={info['hasText']} toc={len(info['toc'])}",
               f"text: page1 blocks={len(blocks)}",
               f"render: bytes={len(data)} {render['width']}x{render['height']}",
               f"outline: items={len(outline['items'])} outlineOk",
+              f"figures: {len(figures['figures'])} items",
+              f"render clip: bytes={len(clip_data)} {clip['width']}x{clip['height']}",
               f"sample={SAMPLE_PDF}"]
     return {"ok": True, "checks": checks, "ms": int((time.perf_counter() - started) * 1000)}
 
 
-HANDLERS = {"info": cmd_info, "text": cmd_text, "outline": cmd_outline, "render": cmd_render}
+HANDLERS = {"info": cmd_info, "text": cmd_text, "outline": cmd_outline,
+            "render": cmd_render, "figures": cmd_figures}
 
 
 def main(argv):
@@ -335,7 +468,7 @@ def main(argv):
         if "--self-test" in argv[1:]:
             payload = self_test()
         elif not command:
-            payload = fail("缺少命令（info | text | outline | render）")
+            payload = fail("缺少命令（info | text | outline | render | figures）")
         elif command not in HANDLERS:
             payload = fail(f"未知命令：{command}")
         else:

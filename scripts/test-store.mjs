@@ -13,7 +13,7 @@ import { createReadStream, promises as fsp } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { addPaper, listPapers, removePaper } from '../lib/store.js'
+import { addPaper, listPapers, listTrash, purgeTrash, removePaper } from '../lib/store.js'
 
 let pass = 0
 let fail = 0
@@ -67,6 +67,10 @@ async function main() {
   check('同一份 PDF 换个路径再导入仍算已存在', copied.existed === true && copied.meta.id === first.meta.id)
 
   await removePaper(first.meta.id)
+  // removePaper 只是移进回收站；测试数据要彻底删掉，别在用户的回收站里堆垃圾
+  for (const item of await listTrash()) {
+    if (item.id === first.meta.id) await purgeTrash(item.name).catch(() => {})
+  }
   await fsp.rm(tmp, { force: true })
   await fsp.rm(copy, { force: true })
   const after = await listPapers()
