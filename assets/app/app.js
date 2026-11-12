@@ -1681,9 +1681,9 @@ function renderTopbar() {
       paneButton('side', '文献库'),
     h('button', { class: 'ghost' + (state.layout.outlineOpen ? ' active' : ''), disabled: sections.length === 0, 'data-pane': 'outline', onclick: () => togglePane('outline'), title: '目录（与拖动目录分隔条是同一个开关）' }, '目录'),
     paneButton('chat', '对话'),
-    meta ? h('button', { class: 'ghost', 'data-act': 'search', title: '文内搜索（Ctrl+F）', onclick: openSearch }, '🔍') : null,
+    meta ? h('button', { class: 'ghost', 'data-act': 'search', disabled: !hostReady(), title: hostReady() ? '文内搜索（Ctrl+F）' : '重启桌面端后可用', onclick: openSearch }, '🔍') : null,
     h('button', { class: 'ghost', 'data-act': 'dark', title: 'PDF 深色（三档：关/柔和/强）', onclick: cycleDark }, state.dark === 0 ? '◐' : state.dark === 1 ? '◑' : '◒'),
-    h('button', { class: 'ghost', 'data-act': 'trash', title: '回收站', onclick: openTrash }, '🗑'),
+    h('button', { class: 'ghost', 'data-act': 'trash', disabled: !hostReady(), title: hostReady() ? '回收站' : '重启桌面端后可用', onclick: openTrash }, '🗑'),
     meta
       ? h(
           'button',
@@ -2033,8 +2033,8 @@ function renderCompareToolbar() {
     state.job && state.job.failed && state.job.failed.size
       ? h('button', { id: 'retry-failed', title: '重新请求这些翻译失败的段落', onclick: retryFailedSegments }, '重试失败 ' + state.job.failed.size)
       : null,
-    h('button', { id: 'review-run', disabled: !docReady || state.reviewBusy, title: '检查空译文、截断、残留英文、公式残留等可疑段落', onclick: () => runReview('static') }, state.reviewBusy ? '自检中…' : '自检'),
-    h('button', { id: 'logs-toggle', class: 'ghost' + (state.logs.open ? ' active' : ''), title: '任务日志（翻译 / OCR / 自检）', onclick: toggleLogs }, '日志'),
+    h('button', { id: 'review-run', disabled: !docReady || !hostReady() || state.reviewBusy, title: hostReady() ? '检查空译文、截断、残留英文、公式残留等可疑段落' : '重启桌面端后可用', onclick: () => runReview('static') }, state.reviewBusy ? '自检中…' : '自检'),
+    h('button', { id: 'logs-toggle', class: 'ghost' + (state.logs.open ? ' active' : ''), disabled: !hostReady(), title: hostReady() ? '任务日志（翻译 / OCR / 自检）' : '重启桌面端后可用', onclick: toggleLogs }, '日志'),
   )
 }
 
@@ -2953,9 +2953,22 @@ function cssKey(value) {
   return text.replace(/["\\]/g, '\\$&')
 }
 
+/** v3 的接口（搜索/日志/自检/回收站/配图/会话）只在 p3 宿主上存在；旧宿主给一句可操作的提示。 */
+function hostReady() {
+  return !!(state.health && state.health.phase === 'p3')
+}
+
+function needRestart() {
+  toast('这个功能要重启桌面端（宿主代码只在插件加载时执行一次）')
+}
+
 // --- 文内搜索（搜文档模型，不重新解析 PDF）
 
 function openSearch() {
+  if (!hostReady()) {
+    needRestart()
+    return
+  }
   if (!state.current) {
     toast('先打开一篇论文')
     return
@@ -3193,6 +3206,10 @@ function renderInlineFigure(figure) {
 
 async function runReview(mode = 'static') {
   if (!state.current) return
+  if (!hostReady()) {
+    needRestart()
+    return
+  }
   state.reviewBusy = true
   render()
   try {
@@ -3255,6 +3272,10 @@ function gotoParagraphKey(key) {
 // --- 任务日志抽屉
 
 function toggleLogs() {
+  if (!hostReady()) {
+    needRestart()
+    return
+  }
   state.logs.open = !state.logs.open
   if (state.logs.open) {
     loadLogs()
@@ -3332,6 +3353,10 @@ function renderLogDrawer() {
 // --- 回收站
 
 async function openTrash() {
+  if (!hostReady()) {
+    needRestart()
+    return
+  }
   state.trash.open = true
   state.trash.busy = true
   state.trash.error = ''
