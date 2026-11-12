@@ -238,6 +238,38 @@ async function run() {
     assert.equal(fakes.calls.follow[2].args.maxMessages, 200)
   })
 
+  // 真实宿主（DSH 的 sessionController）内部会直接 signal.throwIfAborted()，
+  // 传 undefined 会炸成 "Cannot read properties of undefined (reading 'throwIfAborted')"。
+  await check('没传 signal 时也要给宿主一个真的 AbortSignal（宿主会 signal.throwIfAborted）', async () => {
+    const seen = []
+    const services = {
+      sessionController: {
+        async create(args) {
+          return { sessionId: args.sessionId }
+        },
+        async prompt(args, signal) {
+          seen.push(signal)
+          signal.throwIfAborted()
+          return { ok: true }
+        },
+        follow(args, signal) {
+          seen.push(signal)
+          signal.throwIfAborted()
+          return (async function* () {})()
+        },
+      },
+    }
+    const bridge = bridgeFor(services)
+    const { sessionId } = await bridge.ask('p-signal', 'hi')
+    assert.equal(sessionId, 'pb-p-signal')
+    await collect(bridge.follow('p-signal'))
+    assert.equal(seen.length, 2, 'prompt / follow 都该收到 signal')
+    for (const signal of seen) {
+      assert.ok(signal instanceof AbortSignal, 'signal 必须是 AbortSignal，不能是 undefined')
+      assert.equal(signal.aborted, false, '兜底 signal 不该是已中止的')
+    }
+  })
+
   await check('follow：abort 由宿主流抛出并原样传上来', async () => {
     const controller = new AbortController()
     const fakes = makeFakes({
