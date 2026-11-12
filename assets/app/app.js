@@ -94,7 +94,7 @@ const state = {
   chatMode: 'session', // session = 落进真正的 DSH 会话；local = 插件自绘（老宿主兜底）
   session: { available: false, frames: [], streaming: false, abort: null, error: '', started: '' },
   // v3.1：一个「对话」= 一条 DSH 会话，可挂多篇论文 + 附件，多轮持久
-  chats: { items: [], activeId: '', loading: false, error: '' },
+  chats: { items: [], activeId: '', loading: false, error: '', available: true },
   convMenu: false,
   convPicker: { open: false, q: '' },
   attachBusy: false,
@@ -3638,6 +3638,10 @@ function stopSessionStream() {
 async function sendSessionMessage(text) {
   const content = String(text || '').trim()
   if (!content) return
+  if (!state.chats.available) {
+    toast('这个界面要重启桌面端后才生效（宿主代码只在插件加载时执行一次）')
+    return
+  }
   const conv = await ensureConversation().catch((error) => {
     state.session.error = error.message
     return null
@@ -3679,7 +3683,10 @@ async function loadConversations() {
     state.chats.items = Array.isArray(data.items) ? data.items : []
     state.chats.activeId = data.activeId || (state.chats.items[0] ? state.chats.items[0].id : '')
     state.chats.error = ''
+    state.chats.available = true
   } catch (error) {
+    // 旧宿主（还没有 conv.* 接口）上不要装作能用：给一句明确的话，别让人以为是数据丢了
+    state.chats.available = false
     state.chats.error = error.message
   }
   state.chats.loading = false
@@ -4013,6 +4020,15 @@ function renderConvPicker() {
 }
 
 function renderSessionChat(aside) {
+  if (!state.chats.available) {
+    aside.append(
+      h(
+        'div',
+        { class: 'chat-error' },
+        '多篇论文对话需要重启桌面端（宿主代码只在插件加载时执行一次）。现在可以先用「本地」模式，或重开插件后再回来。',
+      ),
+    )
+  }
   aside.append(renderConvBar())
   aside.append(
     h(
