@@ -336,6 +336,30 @@ function saveSession(patch = {}) {
   } catch {
     /* 隐私模式下忽略 */
   }
+  // 同时写一份到插件自己的数据目录：桌面端重启后端口会变，localStorage 按站点隔离会丢，
+  // 服务端这份能让「退出再进」跨重启也回到原处。
+  if (state.current || patch.paperId) {
+    rpc('ui.set', { state: { paperId: next.paperId, tab: next.tab, page: next.page, scrollTop: next.scrollTop, sectionId: next.sectionId } }).catch(
+      () => {},
+    )
+  }
+}
+
+/** 服务端记的界面状态（跨端口/重启有效），拿不到就当没有。 */
+async function loadSessionRemote() {
+  try {
+    const value = await rpc('ui.get')
+    const remote = value && value.state
+    return remote && typeof remote === 'object' ? remote : {}
+  } catch {
+    return {}
+  }
+}
+
+function pickSession(local, remote) {
+  if (!remote || !remote.paperId) return local || {}
+  if (!local || !local.paperId) return remote
+  return String(remote.at || '') > String(local.at || '') ? remote : local
 }
 
 /** 滚动很密，别每帧写 localStorage。 */
@@ -2825,8 +2849,9 @@ async function boot() {
   await Promise.all([loadHealth(), loadAi()])
   await loadLibrary()
   render()
-  // 面板关掉再打开等于重开页面：把上次看到哪儿、停在哪个页签还原回去
-  const session = loadSession()
+  // 面板关掉再打开等于重开页面：把上次看到哪儿、停在哪个页签还原回去。
+  // 本地一份（同端口刷新快）+ 服务端一份（桌面端重启换端口也不丢），取较新的。
+  const session = pickSession(loadSession(), await loadSessionRemote())
   if (session && session.paperId && state.papers.some((paper) => paper.id === session.paperId)) {
     sessionRestoring = true
     try {

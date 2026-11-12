@@ -206,6 +206,16 @@ async function main() {
     Object.keys(transBefore.entries || {}).length + ' → ' + Object.keys(transAfter.entries || {}).length,
   )
 
+  // 界面状态：存服务端，桌面端重启换端口也能回到原处
+  const uiSet = await rpc('ui.set', { state: { paperId: id, tab: 'compare', page: 2, scrollTop: 120 } }).catch((error) => ({ error }))
+  check('ui.set 写入界面状态', Boolean(!uiSet.error && uiSet.ok), uiSet.error ? String(uiSet.error.message) : JSON.stringify(uiSet.state))
+  const uiGet = await rpc('ui.get').catch((error) => ({ error }))
+  check(
+    'ui.get 读回同一份界面状态',
+    Boolean(!uiGet.error && uiGet.state && uiGet.state.paperId === id && uiGet.state.page === 2),
+    uiGet.error ? String(uiGet.error.message) : JSON.stringify(uiGet.state),
+  )
+
   // 只翻一个正文段：够验证链路，又不会让冒烟测试跑很久
   const samplePara = (doc && (doc.paragraphs || []).find((item) => item.kind === 'body')) || null
   const translateEvents = await sse('translate', { id, keys: samplePara ? [samplePara.hash] : [], reqId: 'smoke-translate' }).catch(
