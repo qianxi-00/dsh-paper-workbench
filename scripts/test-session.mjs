@@ -152,17 +152,12 @@ async function run() {
     assert.deepEqual(out, { sessionId: 'pb-2504.12345' })
     // 工作区按 dataRoot/论文 建，不是按 PDF 所在目录。
     assert.deepEqual(fakes.calls.workspace, [{ path: workspaceDir }])
-    assert.deepEqual(fakes.calls.create, [
-      { sessionId: 'pb-2504.12345', workspaceId: 'ws-1', cwd: workspaceDir },
-    ])
+    // 只给 workspaceId：宿主拒绝 workspaceId 与 cwd 同时出现，cwd 由工作区决定。
+    assert.deepEqual(fakes.calls.create, [{ sessionId: 'pb-2504.12345', workspaceId: 'ws-1' }])
     // 第二篇论文复用同一个工作区，不再解析一次。
     await bridge.ensure('2601.00001', { cwd: 'C:/papers/2601.00001' })
     assert.equal(fakes.calls.workspace.length, 1)
-    assert.deepEqual(fakes.calls.create[1], {
-      sessionId: 'pb-2601.00001',
-      workspaceId: 'ws-1',
-      cwd: workspaceDir,
-    })
+    assert.deepEqual(fakes.calls.create[1], { sessionId: 'pb-2601.00001', workspaceId: 'ws-1' })
     assert.ok(fs.existsSync(workspaceDir))
   })
 
@@ -177,9 +172,7 @@ async function run() {
     })
     await bridgeFor(fakes.services).ensure('p9')
     assert.deepEqual(fakes.calls.workspace, [])
-    assert.deepEqual(fakes.calls.create, [
-      { sessionId: 'pb-p9', workspaceId: 'ws-existing', cwd: 'D:/papers/论文' },
-    ])
+    assert.deepEqual(fakes.calls.create, [{ sessionId: 'pb-p9', workspaceId: 'ws-existing' }])
   })
 
   await check('ensure：registry 建的标题不对时补一次 setTitle("论文")', async () => {
@@ -205,9 +198,7 @@ async function run() {
     await bridgeFor(fakes.services, root).ensure('p10')
     assert.deepEqual(created, [{ dir: path.join(root, '论文'), title: '论文' }])
     assert.deepEqual(titled, ['论文'])
-    assert.deepEqual(fakes.calls.create, [
-      { sessionId: 'pb-p10', workspaceId: 'ws-new', cwd: path.join(root, '论文') },
-    ])
+    assert.deepEqual(fakes.calls.create, [{ sessionId: 'pb-p10', workspaceId: 'ws-new' }])
   })
 
   await check('ensure：工作区失败回退 create({sessionId, cwd})', async () => {
