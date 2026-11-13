@@ -2168,7 +2168,9 @@ function renderParagraph(paragraph) {
   }
   if (key) para.append(h('div', { class: 'para-zh', 'data-zh': key }, ...zhContent(key, entry && entry.zh, state.streams.get(key))))
   const figures = key && state.figuresByKey ? state.figuresByKey[key] : null
-  if (Array.isArray(figures)) for (const figure of figures) para.append(renderInlineFigure(figure))
+  // 图挂在自己的图注段落上时，段落正文就是图注，图里不必再重复一遍
+  const ownCaption = kind === 'caption'
+  if (Array.isArray(figures)) for (const figure of figures) para.append(renderInlineFigure(figure, ownCaption))
   return para
 }
 
@@ -3521,6 +3523,22 @@ function buildFiguresByKey() {
     return total || null
   }
   const used = new Set()
+  // ① 图注段落先认领自己的图（与 lib/figures.js 一致）：图与图注不能分家
+  for (const paragraph of paragraphs) {
+    if ((paragraph.kind || 'body') !== 'caption') continue
+    const label = labelOf(paragraph.text)
+    if (!label) continue
+    const key = paragraphKey(paragraph)
+    if (!key) continue
+    const position = state.figures.findIndex(
+      (figure, index) => !used.has(index) && Number(figure.label) === label &&
+        Number(figure.page) === Number(paragraph.page))
+    if (position < 0) continue
+    used.add(position)
+    if (!map[key]) map[key] = []
+    map[key].push({ ...state.figures[position], position })
+  }
+  // ② 正文提到「图 N / Figure N」的段落
   for (const paragraph of paragraphs) {
     if ((paragraph.kind || 'body') !== 'body') continue
     const label = labelOf(paragraph.text)
@@ -3552,10 +3570,10 @@ function buildFiguresByKey() {
   }
 }
 
-function renderInlineFigure(figure) {
+function renderInlineFigure(figure, ownCaption = false) {
   const src = API + 'figure?id=' + encodeURIComponent(state.current.meta.id) + '&index=' + figure.position
   const caption = figure.caption || '图 ' + (figure.label || figure.position + 1)
-  return h(
+  const node = h(
     'figure',
     { class: 'inline-fig' },
     h('img', {
@@ -3565,8 +3583,9 @@ function renderInlineFigure(figure) {
       title: '点击看大图',
       onclick: () => window.open(src, '_blank', 'noopener'),
     }),
-    h('figcaption', {}, caption),
   )
+  if (!ownCaption) node.append(h('figcaption', {}, caption))
+  return node
 }
 
 // --- 翻译自检

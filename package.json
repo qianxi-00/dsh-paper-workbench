@@ -1,6 +1,6 @@
 {
   "name": "dsh-paper-workbench",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "DSH 论文工作台：文献库 + 对照阅读器 + 面板内逐段翻译与侧边对话 + 多篇论文会话 + SQLite 持久化 + Obsidian 论文知识库联动",
   "type": "module",
   "main": "lib/index.js",
@@ -39,7 +39,7 @@
     "doctor": "node scripts/doctor.mjs",
     "seed": "node scripts/seed.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "test": "node scripts/test-store.mjs && node scripts/test-db.mjs && node scripts/test-conv.mjs && node scripts/test-safety.mjs && node scripts/test-doctor.mjs && node scripts/test-tools.mjs && node scripts/test-doc.mjs && node scripts/test-ai.mjs && node scripts/test-review.mjs && node scripts/test-jobs.mjs && node scripts/test-figures.mjs && node scripts/test-session.mjs && node scripts/test-obsidian.mjs && node scripts/test-arxiv.mjs && node scripts/test-ocr.mjs && python assets/pdf_tool.py --self-test",
+    "test": "node scripts/test-store.mjs && node scripts/test-db.mjs && node scripts/test-conv.mjs && node scripts/test-safety.mjs && node scripts/test-doctor.mjs && node scripts/test-tools.mjs && node scripts/test-doc.mjs && node scripts/test-layout.mjs && node scripts/test-ai.mjs && node scripts/test-review.mjs && node scripts/test-jobs.mjs && node scripts/test-figures.mjs && node scripts/test-session.mjs && node scripts/test-obsidian.mjs && node scripts/test-arxiv.mjs && node scripts/test-ocr.mjs && python assets/pdf_tool.py --self-test",
     "fix:library": "node scripts/fix-library.mjs",
     "selftest:pdf": "python assets/pdf_tool.py --self-test"
   },

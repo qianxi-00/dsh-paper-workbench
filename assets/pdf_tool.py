@@ -20,7 +20,9 @@ HEURISTIC_RATIO, MAX_TITLE_LEN, SIZE_TOLERANCE, MAX_LEVELS = 1.12, 120, 0.94, 3
 CJK_RE = re.compile(r"[\u3000-\u303f\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]")
 FIGURE_MIN_SIDE = 60.0          # 宽或高小于 60pt 的图按 logo/图标丢弃
 FIGURE_MIN_AREA_RATIO = 0.015   # 面积小于页面 1.5% 的图同样丢弃
-FIGURE_CAPTION_RE = re.compile(r"^(?:图|圖|figure|fig\.?)\s*([0-9]+|[ivxlcdm]+)", re.IGNORECASE)
+FIGURE_CAPTION_RE = re.compile(
+    r"^(?:图|圖|表|figure|fig\.?|table|algorithm|算法)\s*([0-9]+[a-z]?|[ivxlcdm]+)\b",
+    re.IGNORECASE)
 _ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
 # 宽度 ≥ 页宽这个比例的块算「全宽块」（标题/摘要/表格），用来把双栏页面切成带
 WIDE_BLOCK_RATIO = 0.6
@@ -169,63 +171,487 @@ def _rect_gap(first, second):
     return dx * dx + dy * dy
 
 
-def cmd_figures(args):
-    """取每页图片 bbox（get_image_info），过滤 logo/小图，就近匹配图注。
 
-    图注只认行首的 图/圖/Figure/Fig.；取与图片矩形最近的一行（距离相同优先下方），
-    label 规范化成阿拉伯数字。index 是该页按 (y,x) 排序后的序号，从 1 开始。
+# ---------------------------------------------------------------- 版面辅助
+
+CAPTION_START_RE = re.compile(
+    r"^(?:图|圖|表|figure|fig\.?|table|algorithm|算法)\s*([0-9]+[a-z]?|[ivxlcdm]+)\b", re.IGNORECASE)
+BULLET_RE = re.compile(r"^(?:[•●▪▸►◦‣·\-–—*]\s+|\d{1,2}[.)]\s+|\([a-z0-9]{1,3}\)\s+)", re.IGNORECASE)
+SENTENCE_END = (".", "!", "?", ":", "。", "！", "？", "：", ";", "；")
+
+
+def _clean_inline(text):
+    """压掉行内多余空白，全角空格留一个普通空格。"""
+    return re.sub(r"\s+", " ", str(text or "").replace("\u00a0", " ")).strip()
+
+
+def _line_records(block):
+    """把一个文本块的每一行拆成 {text, rect, size, bold}。"""
+    out = []
+    for line in block.get("lines") or []:
+        pieces, char_sizes, bold = [], [], False
+        for span in line.get("spans") or []:
+            raw = str(span.get("text") or "")
+            font = str(span.get("font") or "").lower()
+            size = float(span.get("size") or 0)
+            if raw.strip():
+                pieces.append(raw)
+                bold = bold or any(mark in font for mark in BOLD_MARKS)
+                if size > 0:
+                    char_sizes.extend([size] * len(raw.strip()))
+        text = _clean_inline("".join(pieces))
+        if not text:
+            continue
+        rect = fitz.Rect(line.get("bbox") or (0, 0, 0, 0))
+        out.append({
+            "text": text,
+            "rect": rect,
+            "size": round(statistics.median(char_sizes), 2) if char_sizes else 0.0,
+            "bold": bold,
+        })
+    return out
+
+
+def _page_body_size(info, fallback):
+    """该页自己的正文字号：附录/参考文献页往往比正文小一档，用全篇字号会把它们全判成脚注。"""
+    chars = []
+    for line in info["lines"]:
+        size = line["size"]
+        if 3.0 <= size <= 40.0 and len(line["text"]) >= 20:
+            chars.extend([size] * len(line["text"]))
+    size = round(statistics.median(chars), 2) if chars else 0.0
+    return size or fallback
+
+
+def _doc_body_size(pages):
+    """全篇正文字号：按字符数投票的中位数（跨页统计，避免被某一页的表格带偏）。"""
+    chars = []
+    for page in pages:
+        for line in page["lines"]:
+            size = line["size"]
+            if 3.0 <= size <= 40.0 and len(line["text"]) >= 20:
+                chars.extend([size] * len(line["text"]))
+    return round(statistics.median(chars), 2) if chars else 10.0
+
+
+def _caption_lines(page):
+    """行首是「图 N / Figure N / Table N」的图注行。"""
+    found = []
+    for line in page["lines"]:
+        if not _is_caption_line(line["text"]):
+            continue
+        lowered = line["text"][:8].lower().lstrip()
+        kind = "table" if lowered.startswith(("table", "表")) else "figure"
+        found.append({"line": line, "label": _figure_label(line["text"]), "kind": kind})
+    return found
+
+
+def _drawing_clusters(page):
+    """矢量图区域：PyMuPDF 的 cluster_drawings() 把相邻绘图合成矩形。
+
+    页眉那条分隔横线也会被合成一个又扁又宽的簇，留着它会让裁出来的图上多一条页眉：
+    宽度接近整页、高度不到 8pt 的细条直接丢掉。
+    """
+    try:
+        clusters = [fitz.Rect(rect) for rect in page.cluster_drawings()]
+    except Exception:
+        return []
+    width = float(page.rect.width)
+    kept = []
+    for rect in clusters:
+        if rect.height < 3 or rect.width < 3:
+            continue
+        if rect.height < 8 and rect.width > width * 0.6:
+            continue
+        kept.append(rect)
+    return kept
+
+
+def _image_boxes(page):
+    """页面上的位图 bbox（旋转页换成渲染坐标系），已过滤图标。"""
+    boxes = []
+    try:
+        infos = page.get_image_info() or []
+    except Exception:
+        return boxes
+    page_area = max(1.0, float(page.rect.width) * float(page.rect.height))
+    rotation = getattr(page, "rotation_matrix", None)
+    for info in infos:
+        try:
+            rect = fitz.Rect(info.get("bbox"))
+            if rotation is not None and getattr(page, "rotation", 0):
+                rect = rect * rotation
+            rect = rect & page.rect
+        except Exception:
+            continue
+        if rect.width < FIGURE_MIN_SIDE or rect.height < FIGURE_MIN_SIDE:
+            continue
+        if rect.width * rect.height / page_area < FIGURE_MIN_AREA_RATIO:
+            continue
+        boxes.append(rect)
+    return boxes
+
+
+def _merge_rects(rects):
+    """把相交/相邻的矩形并成一块（图里常有好几个绘图簇）。"""
+    out = []
+    for rect in rects:
+        merged = fitz.Rect(rect)
+        rest = []
+        for other in out:
+            if (merged & other).get_area() > 0 or _rect_touch(merged, other, 8.0):
+                merged |= other
+            else:
+                rest.append(other)
+        rest.append(merged)
+        out = rest
+    return out
+
+
+def _rect_touch(first, second, gap):
+    dx = max(0.0, max(first.x0 - second.x1, second.x0 - first.x1))
+    dy = max(0.0, max(first.y0 - second.y1, second.y0 - first.y1))
+    return dx <= gap and dy <= gap
+
+
+def _page_info(page):
+    """把一页压成后面各步都要用的小结构（文本行 + 配图区域）。"""
+    return {
+        "page": page,
+        "h": float(page.rect.height),
+        "lines": [line for block in (page.get_text("dict").get("blocks") or [])
+                  if block.get("type", 0) == 0
+                  for line in _line_records(block)],
+    }
+
+
+def _figure_regions(info, body_size=0.0, repeated=None):
+    """本页的配图区域：图注上/下方那一整条「没有正文」的带子。
+
+    只看绘图簇不够：图里的文字标签（"SRAM: 19 TB/s"、"Outer Loop"…）往往落在簇与簇之间，
+    按簇判定会漏掉它们、于是被当成正文段落塞进对照视图（真机上就是这么坏的）。
+    这里改为：以图注为界，往上/往下找到最近的正文行，中间那块就是图。
+    返回 [{rect, caption, label, kind}]。
+    """
+    page = info["page"]
+    lines = info["lines"]
+    height = info["h"] or float(page.rect.height)
+    width = float(page.rect.width)
+    captions = _caption_lines(info)
+    if not captions:
+        return []
+    # 找「最近的正文行」时要用真·正文字号：图里的坐标轴标签往往只小一档（8.9 vs 10.8），
+    # 用 0.82 会把它们当成正文，于是带子被切得只剩几 pt，整张图落空（RETRO 第 29 页 Figure 7）。
+    threshold = (body_size or 10.0) * 0.95
+    margin = height * 0.06
+    skip = repeated or set()
+    body_lines = [line for line in lines
+                  if (line["size"] or 0) >= threshold and not _is_caption_line(line["text"])
+                  and _repeat_key(line["text"]) not in skip
+                  and line["rect"].y0 > margin and line["rect"].y1 < height - margin]
+    clusters = list(_drawing_clusters(page)) + _image_boxes(page)
+    def band_ink(y0, y1):
+        if y1 - y0 < 36:
+            return []
+        found = [rect for rect in clusters if rect.y0 < y1 and rect.y1 > y0]
+        # 只算「图里的字」：正文大小的行不可能真在图里，多半是页眉/页脚（arxiv 论文每页都印标题），
+        # 把它算进 ink 会让裁出来的图顶上多一条页眉。
+        found += [item["rect"] for item in lines
+                  if item["rect"].y0 < y1 and item["rect"].y1 > y0
+                  and not _is_caption_line(item["text"])
+                  and _repeat_key(item["text"]) not in skip
+                  and (item["size"] or 0) < (body_size or 10.0) * 0.95]
+        return found
+
+    regions = []
+    for caption in captions:
+        line = caption["line"]
+        above = [item for item in body_lines if item["rect"].y1 <= line["rect"].y0 + 1]
+        bottom = max((item["rect"].y1 for item in above), default=height * 0.05) + 3
+        below = [item for item in body_lines if item["rect"].y0 >= line["rect"].y1 - 1]
+        top2 = line["rect"].y1 + 3
+        bottom2 = min((item["rect"].y0 for item in below), default=height * 0.95) - 3
+        # 图注可能在图下方（图在上）、也可能在表格上方（表在下）：两条带都试，取真有东西的那条。
+        # 只看「上方带」会让页顶的大表整页丢区域（Table 14 就是把 173 个单元格塞成了 footnote）。
+        candidates = []
+        for y0, y1 in ((bottom, line["rect"].y0 - 3), (top2, bottom2)):
+            inside = band_ink(y0, y1)
+            if not inside:
+                continue
+            ink_area = sum(max(1.0, rect.get_area()) for rect in inside)
+            candidates.append((ink_area, y1 - y0, y0, y1, inside))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: (-item[0], -item[1]))
+        _area, _tall, y0, y1, inside = candidates[0]
+        ink = fitz.Rect(inside[0])
+        for rect in inside[1:]:
+            ink |= rect
+        ink.y0 = max(y0, ink.y0 - 4)
+        ink.y1 = min(y1, ink.y1 + 4)
+        left = max(24.0, ink.x0 - 12)
+        right = min(width - 24, ink.x1 + 12)
+        rect = fitz.Rect(left, ink.y0, right, ink.y1) & page.rect
+        if rect.width < 60 or rect.height < 24:
+            continue
+        regions.append({"rect": rect, "caption": line["text"],
+                        "label": caption["label"], "kind": caption["kind"]})
+    return regions
+
+
+def _table_regions(info, body_size=0.0, repeated=None):
+    """整页/半页的表格：一簇字号明显小于正文、列很多的紧密行。
+
+    这类内容按正文段落输出会变成几百个「单元格就是一段」的垃圾（RETRO 的 Table 14 就是这样：
+    173 个 8.5pt 单元格被当成 173 段落）。这里按「小字密簇」整体框出来，交给配图管线裁成一张图。
+    """
+    page = info["page"]
+    height = info["h"] or float(page.rect.height)
+    width = float(page.rect.width)
+    threshold = (body_size or 10.0) * 0.95
+    margin = height * 0.05
+    skip = repeated or set()
+    small = [line for line in info["lines"]
+             if len(line["text"]) >= 1 and (line["size"] or 0) < threshold
+             and not _is_caption_line(line["text"]) and _repeat_key(line["text"]) not in skip
+             and line["rect"].y0 > margin and line["rect"].y1 < height - margin]
+    small.sort(key=lambda line: (line["rect"].y0, line["rect"].x0))
+    groups, current = [], []
+    for line in small:
+        if current and line["rect"].y0 - current[-1]["rect"].y1 > max(2.0, (line["size"] or 8.0) * 1.1):
+            groups.append(current)
+            current = []
+        current.append(line)
+    if current:
+        groups.append(current)
+    captions = _caption_lines(info)
+    regions = []
+    for group in groups:
+        if len(group) < 8:
+            continue
+        rect = fitz.Rect(group[0]["rect"])
+        for line in group[1:]:
+            rect |= line["rect"]
+        if rect.height < 40 or rect.width < width * 0.45:
+            continue
+        columns = len({round(line["rect"].x0 / 6.0) for line in group})
+        if columns < 3:
+            continue
+        caption, label, kind = None, None, "table"
+        if captions:
+            best = min(captions, key=lambda item: _rect_gap(rect, item["line"]["rect"]))
+            if _rect_gap(rect, best["line"]["rect"]) <= 72:
+                caption, label, kind = best["line"]["text"], best["label"], best["kind"]
+                cap_rect = best["line"]["rect"]
+                # 别把图注本身裁进图里：前端会在图下面单独显示图注，裁进去就会出现两遍。
+                if cap_rect.y1 <= rect.y0:
+                    rect = fitz.Rect(rect.x0, max(rect.y0, cap_rect.y1 + 2), rect.x1, rect.y1)
+                elif cap_rect.y0 >= rect.y1:
+                    rect = fitz.Rect(rect.x0, rect.y0, rect.x1, min(rect.y1, cap_rect.y0 - 2))
+        rect = fitz.Rect(max(24.0, rect.x0 - 10), max(12.0, rect.y0 - 4),
+                         min(width - 20, rect.x1 + 10), min(height - 12, rect.y1 + 4)) & page.rect
+        regions.append({"rect": rect, "caption": caption, "label": label, "kind": kind})
+    return regions
+
+
+def _inside(rect, regions, ratio=0.55):
+    """rect 是否大部分落在某个配图区域里。"""
+    area = max(1.0, rect.get_area())
+    for region in regions:
+        covered = (rect & region["rect"]).get_area()
+        if covered / area >= ratio:
+            return True
+    return False
+
+
+CJK_HEAD_RE = re.compile(r"[\u3400-\u9fff\uff00-\uffef]")
+CAPTION_SEP_RE = re.compile(r"^\s*(?:[|:：.—–\-)\]}」』]|$)")
+
+
+def _is_caption_line(text):
+    """像图注的行：以 Figure/Fig./Table/图/表/算法 开头，且标签后面接分隔符而不是一句话。
+
+    「Fig. 4 shows the relative improvement …」「Algorithm 1 and in Fig. 2. We next …」这类
+    正文句首也会命中前缀，一旦当成图注就会凭空造出一个配图区域、把下面的正文吞掉。
+    """
+    match = CAPTION_START_RE.match(text)
+    if not match:
+        return False
+    rest = text[match.end():]
+    if not rest.strip():
+        return True
+    if CAPTION_SEP_RE.match(rest):
+        return True
+    head = rest.lstrip()
+    return bool(head) and (head[0].isupper() or head[0].isdigit() or CJK_HEAD_RE.match(head))
+
+
+DATE_RE = re.compile(r"^(?:[A-Z][a-z]+ \d{1,2}, \d{4}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2} [A-Z][a-z]+ \d{4})$")
+
+
+def _looks_like_title(text, numbered=False):
+    """像标题的短行：不句末标点、不是列表项、不是作者/单位行、不是邮箱/URL、不是日期。"""
+    if len(text) > MAX_TITLE_LEN or text.endswith(SENTENCE_END):
+        return False
+    if DATE_RE.match(text) or "@" in text or "http" in text.lower():
+        return False
+    if not numbered and BULLET_RE.match(text):
+        return False
+    if "†" in text or "‡" in text:
+        return False
+    if text.count(",") >= 3:          # "Tri Dao†, Daniel Y. Fu†, Stefano Ermon†, …"
+        return False
+    return True
+
+
+def _paragraph_kind(text, size, body_size, rect, page_h, bold=False):
+    if _is_caption_line(text):
+        return "caption"
+    if size and body_size and size < body_size * 0.82:
+        return "footnote"
+    # 小节标题在不少论文里和正文同字号，只是加粗（subsection* 之类）；这种一定带编号，
+    # 或者整行就是编号（"2.1"，标题在同一个块的下一段/下一块里）。
+    big = bool(size and body_size and size >= body_size * 1.12)
+    numbered = bool(re.match(r"^\d+(?:\.\d+)*\.?$", text)) or bool(re.match(r"^\d+(?:\.\d+)*\.?\s+\S", text))
+    if _looks_like_title(text, numbered) and (big or (bold and numbered)):
+        return "heading"
+    if BULLET_RE.match(text):
+        return "list"
+    return "body"
+
+
+def _split_paragraphs(lines, body_size):
+    """把一个块的行按「段间距 / 缩进 / 字号跳变 / 列表符号」切成真正的段落。"""
+    groups, current = [], []
+    for line in lines:
+        if not current:
+            current = [line]
+            continue
+        prev = current[-1]
+        size = max(line["size"], prev["size"], body_size or 10.0, 1.0)
+        gap = line["rect"].y0 - prev["rect"].y1
+        indent = line["rect"].x0 - prev["rect"].x0
+        # 只在字号变大时切段：行内公式/上下标的字号会比正文小，那不是新段落
+        size_jump = (line["size"] or 0) > (prev["size"] or 0) * 1.15 + 0.3
+        bullet_start = bool(BULLET_RE.match(line["text"])) or _is_caption_line(line["text"])
+        # 段间距：正常的行距约 0.1~0.35×字号，超过 0.55×字号基本是新段落
+        # 段首缩进是 LaTeX 最可靠的段落信号（行距常常一样）：缩进约 1.5em，
+        # 判定阈值取 1.1 倍字号，正文里的两端对齐抖动只有 1pt 左右。
+        new_para = (
+            gap > size * 0.55
+            or size_jump
+            or indent > size * 1.1
+            or bullet_start
+            or (prev["text"].endswith(SENTENCE_END) and gap > size * 0.32)
+        )
+        if new_para and current:
+            groups.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _repeat_key(text):
+    return re.sub(r"\d+", "#", text.lower()).strip()
+
+
+def _repeated_keys(pages, page_h_default):
+    """跨页重复出现的短行（页眉/页脚/期刊名）：返回需要丢弃的规范化文本集合。"""
+    counts = {}
+    total = max(1, len(pages))
+    for page in pages:
+        height = page["h"] or page_h_default
+        seen = set()
+        for line in page["lines"]:
+            y_center = (line["rect"].y0 + line["rect"].y1) / 2
+            if 0.10 * height < y_center < 0.92 * height:
+                continue
+            key = re.sub(r"\d+", "#", line["text"].lower()).strip()
+            if len(key) < 6 or key in seen:
+                continue
+            seen.add(key)
+            counts[key] = counts.get(key, 0) + 1
+    threshold = max(3, int(total * 0.25))
+    return {key for key, count in counts.items() if count >= threshold}
+
+
+def _drop_header_footer(line, repeated, height, body_size):
+    """页眉/页脚/页码：跨页重复的短行、页面最上/最下且字号小于正文的行、页码样式行。"""
+    text = line["text"]
+    # arXiv/DOI 水印（首页右上，字号往往比标题还大，不能当标题）
+    if re.match(r"^(?:arxiv|doi|https?://|www\.)", text, re.IGNORECASE):
+        return True
+    y_center = (line["rect"].y0 + line["rect"].y1) / 2
+    key = re.sub(r"\d+", "#", text.lower()).strip()
+    if key in repeated:
+        return True
+    numeric = bool(NUMERIC_PAGE_RE.match(text) or CHINESE_PAGE_RE.match(text) or ROMAN_PAGE_RE.match(text))
+    small = not body_size or line["size"] < body_size * 0.95
+    if numeric and (y_center < 0.12 * height or y_center > 0.88 * height):
+        return True
+    if small and len(text) <= 120 and (y_center < 0.08 * height or y_center > 0.92 * height):
+        return True
+    return False
+
+
+def cmd_figures(args):
+    """抽取配图区域：位图 bbox + 图注相邻的矢量绘图簇（Figure 2 这类矢量图也能裁出来）。
+
+    返回的 {x,y,x2,y2} 是 PDF 坐标（渲染坐标系），figurePath 直接用它 render clip。
+    caption 取图注首行，label 规范化成阿拉伯数字。
     """
     doc = open_doc(args)
     try:
         figures = []
-        for index in range(int(doc.page_count)):
-            page = doc.load_page(index)
-            try:
-                infos = page.get_image_info() or []
-            except Exception:
-                infos = []                 # 个别页图片信息坏了不影响其它页
-            page_area = max(1.0, float(page.rect.width) * float(page.rect.height))
-            captions = [(text, rect, _figure_label(text))
-                        for text, rect in _text_lines(page)
-                        if FIGURE_CAPTION_RE.match(text)]
-            found, seen = [], set()
-            # get_image_info 的 bbox 在「未旋转」坐标系里，而 page.rect / 渲染 clip
-            # 用的是旋转后的坐标系；不转过来的话 /Rotate 90 的页面会裁出全白区域。
-            rotation = getattr(page, "rotation_matrix", None)
-            for info in infos:
-                try:
-                    rect = fitz.Rect(info.get("bbox"))
-                    if rotation is not None and getattr(page, "rotation", 0):
-                        rect = rect * rotation
-                    rect = rect & page.rect
-                except Exception:
+        infos = [_page_info(doc.load_page(index)) for index in range(int(doc.page_count))]
+        body_size = _doc_body_size(infos)
+        repeated = _repeated_keys(infos, 842.0)
+        for index, info in enumerate(infos):
+            page = info["page"]
+            page_h = float(page.rect.height)
+            regions = (_figure_regions(info, body_size, repeated)
+                       + _table_regions(info, body_size, repeated))
+            # 同一页上重复/相交的区域合并，避免一张图出好几条
+            entries, seen = [], set()
+            for region in regions:
+                rect = fitz.Rect(region["rect"]) & page.rect
+                if rect.width < 40 or rect.height < 25:
                     continue
-                if rect.width < FIGURE_MIN_SIDE or rect.height < FIGURE_MIN_SIDE:
-                    continue               # 小图标/logo
-                if rect.width * rect.height / page_area < FIGURE_MIN_AREA_RATIO:
-                    continue
-                key = (round(rect.x0, 1), round(rect.y0, 1),
-                       round(rect.x1, 1), round(rect.y1, 1))
-                if key in seen:            # 同一张图被多个对象引用时只留一条
+                key = (round(rect.x0), round(rect.y0), round(rect.x1), round(rect.y1))
+                if key in seen:
                     continue
                 seen.add(key)
-                caption, label = None, None
-                if captions:               # 最近的图注行；等距时优先图片下方那行
-                    best = min(captions, key=lambda item: (
-                        _rect_gap(rect, item[1]),
-                        0 if item[1].y0 >= rect.y1 - 1 else 1,
-                        item[1].y0))
-                    caption, label = best[0], best[2]
-                found.append((rect, caption, label))
-            found.sort(key=lambda item: (item[0].y0, item[0].x0))
-            for position, (rect, caption, label) in enumerate(found):
+                entries.append((rect, region))
+            # 位图套在绘图簇里时只留外框那条
+            entries.sort(key=lambda item: (-item[0].get_area(), item[0].y0, item[0].x0))
+            kept, kept_rects = [], []
+            for rect, region in entries:
+                if any((rect & other).get_area() / max(1.0, rect.get_area()) > 0.85 for other in kept_rects):
+                    continue
+                kept.append((rect, region))
+                kept_rects.append(rect)
+            kept.sort(key=lambda item: (item[0].y0, item[0].x0))
+            for position, (rect, region) in enumerate(kept):
+                caption = region.get("caption") or None
+                if caption is None:
+                    # 位图没配到图注时就近找一行
+                    captions = _caption_lines(info)
+                    if captions:
+                        best = min(captions, key=lambda item: _rect_gap(rect, item["line"]["rect"]))
+                        if _rect_gap(rect, best["line"]["rect"]) < page_h * 0.25:
+                            caption = best["line"]["text"]
+                            region = {**region, "label": best["label"], "kind": best["kind"]}
                 figures.append({
                     "page": index + 1,
                     "x": round(rect.x0, 2), "y": round(rect.y0, 2),
                     "x2": round(rect.x1, 2), "y2": round(rect.y1, 2),
                     "width": round(rect.width, 2), "height": round(rect.height, 2),
                     "index": position + 1,
-                    "caption": caption, "label": label,
+                    "caption": caption, "label": region.get("label"),
+                    "kind": region.get("kind") or "figure",
                 })
         return {"ok": True, "figures": figures}
     finally:
@@ -314,6 +740,16 @@ def order_blocks(blocks, page_width):
 
 
 def cmd_text(args):
+    """按页面返回**段落级**文本块（不是「一栏一段」也不是「图里的标签」）。
+
+    做的几件事（对应参考项目里 agent/MinerU 负责的版面工作，这里用 PyMuPDF 规则实现）：
+      1. 跨页统计正文字号，丢掉页眉/页脚（重复出现的短行、页码、期刊名）；
+      2. 用图注 + 矢量绘图簇认出配图区域，区域内的文字（Figure 2 里的 Encoder/Retrieval 等
+         标签）不算正文，避免它们被塞进对照视图；
+      3. 把 PDF 的文本块按段间距/缩进/字号/列表符号重新切成段落（LaTeX 单栏常把整节塞进
+         一个 block，直接拼会得到几万字一段）；
+      4. 给每块标 kind（heading/body/list/caption/footnote），前端据此渲染结构。
+    """
     doc = open_doc(args)
     try:
         page_count = int(doc.page_count)
@@ -327,19 +763,73 @@ def cmd_text(args):
                 raise ArgsError("pages 参数不合法") from None
         else:
             raise ArgsError("pages 参数不合法")
-        pages, missing = [], []
+
+        prepared, missing = [], []
         for number in numbers:
             if number < 1 or number > page_count:
-                missing.append(number)      # 页不存在：跳过并记录
+                missing.append(number)
                 continue
             page = doc.load_page(number - 1)
             rect = page.rect
-            blocks = [record for record in
-                      map(_block_record, page.get_text("dict").get("blocks") or []) if record]
-            blocks = order_blocks(blocks, float(rect.width))  # 双栏页按栏排阅读顺序
-            pages.append({"n": number, "w": round(float(rect.width), 2),
-                          "h": round(float(rect.height), 2), "blocks": blocks})
-        result = {"ok": True, "pages": pages}
+            info = _page_info(page)
+            prepared.append({
+                "n": number,
+                "w": round(float(rect.width), 2),
+                "h": round(float(rect.height), 2),
+                "page": page,
+                "lines": info["lines"],
+            })
+
+        body_size = _doc_body_size(prepared)
+        repeated = _repeated_keys(prepared, 842.0)
+        for item in prepared:
+            item["regions"] = (_figure_regions(item, body_size, repeated)
+                               + _table_regions(item, body_size, repeated))
+
+        pages = []
+        for item in prepared:
+            page, height = item["page"], item["h"] or 842.0
+            regions = item["regions"]
+            page_body = _page_body_size(item, body_size)
+            blocks = []
+            for block in page.get_text("dict").get("blocks") or []:
+                if block.get("type", 0) != 0:
+                    continue
+                lines = _line_records(block)
+                if not lines:
+                    continue
+                lines = [line for line in lines
+                         if not _drop_header_footer(line, repeated, height, body_size)]
+                if not lines:
+                    continue
+                for group in _split_paragraphs(lines, body_size):
+                    text = _join_lines([line["text"] for line in group]).strip()
+                    if not text or not any(ch.isalnum() for ch in text):
+                        continue
+                    rect = fitz.Rect(group[0]["rect"])
+                    for line in group[1:]:
+                        rect |= line["rect"]
+                    kind = _paragraph_kind(text, group[0]["size"], page_body, rect, height,
+                                           bold=any(line["bold"] for line in group))
+                    # 图里的文字（标签/刻度）不是正文：图注本身留着
+                    if kind != "caption" and _inside(rect, regions, 0.5):
+                        continue
+                    char_sizes = []
+                    for line in group:
+                        if line["size"] > 0:
+                            char_sizes.extend([line["size"]] * len(line["text"]))
+                    blocks.append({
+                        "x": round(float(rect.x0), 2), "y": round(float(rect.y0), 2),
+                        "x2": round(float(rect.x1), 2), "y2": round(float(rect.y1), 2),
+                        "size": round(statistics.median(char_sizes), 2) if char_sizes else round(body_size, 2),
+                        "bold": any(line["bold"] for line in group),
+                        "kind": kind,
+                        "text": text,
+                    })
+            blocks = order_blocks(blocks, float(item["w"]))
+            pages.append({"n": item["n"], "w": item["w"], "h": item["h"], "blocks": blocks})
+
+        result = {"ok": True, "pages": pages, "bodySize": body_size}
         if missing:
             result["missing"] = missing
         return result

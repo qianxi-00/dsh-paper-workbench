@@ -350,6 +350,7 @@ body.dragging * { cursor: col-resize !important; }
 .para.kind-list { font-size: 14px; padding-left: 24px; position: relative; margin: 2px 0; }
 .para.kind-list::before { content: '•'; position: absolute; left: 9px; color: var(--muted); }
 .para.kind-caption { color: var(--muted); font-size: 12.5px; }
+.para.kind-footnote { color: var(--muted); font-size: 12px; line-height: 1.6; }
 .para.kind-heading { font-weight: 600; margin: 16px 0 4px; padding: 0 8px; }
 .para.kind-heading.level-2 { font-size: 15.5px; }
 .para.kind-heading.level-3 { font-size: 14.5px; }
@@ -821,6 +822,8 @@ button.switch.on::before { content: '●'; }
 .review-msg { flex: 1; min-width: 0; }
 
 /* 译文层是空的（还没翻 / 正在翻）时不要留一条空竖线 */
+.compare.show-zh .para-zh:empty,
+.compare.only-zh .para-zh:empty,
 .para-zh:empty { display: none; }
 
 .inline-fig { margin: 10px 0 4px; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-soft); }

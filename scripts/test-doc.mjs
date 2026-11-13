@@ -646,7 +646,7 @@ async function runSampleIntegration(sample, root) {
       ok(/^[0-9a-f]{16}$/.test(paragraph.hash), 'hash 不合法：' + paragraph.hash)
       ok(paragraph.text.trim().length > 0, '段落文本不能为空')
       ok(sectionIds.has(paragraph.section), '段落 ' + paragraph.id + ' 的 section 不在 sections 里')
-      ok(['heading', 'body', 'list', 'caption', 'formula'].includes(paragraph.kind), '未知 kind：' + paragraph.kind)
+      ok(['heading', 'body', 'list', 'caption', 'formula', 'footnote'].includes(paragraph.kind), '未知 kind：' + paragraph.kind)
     }
     const headingCount = first.doc.paragraphs.filter((paragraph) => paragraph.kind === 'heading').length
     ok(headingCount > 0, '真实论文应至少识别出一个标题')

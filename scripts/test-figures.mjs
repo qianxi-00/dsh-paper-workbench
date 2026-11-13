@@ -138,7 +138,9 @@ try {
   const first = assignment.byParagraph.h1 || []
   check('label 匹配归到第一次出现的正文段落', first.length === 1 && first[0].label === 3)
   check('同一张图不会挂到第二处引用', !assignment.byParagraph.h2)
-  check('图注段落不抢挂（label 4 未挂到 caption）', !assignment.byParagraph.h3)
+  // 图注段落认领自己的图（label 4 的图注就是 h3）：图与图注不能分家
+  check('图注段落认领自己的图（label 4 挂到 caption）',
+    (assignment.byParagraph.h3 || []).some((figure) => Number(figure.label) === 4))
   check('无 label 的图按同页最近段落兜底', (assignment.byParagraph.h4 || []).some((figure) => figure.label === null))
   check('同一页更远的段落不抢兜底', !(assignment.byParagraph.h5 || []).length)
   check('used + unmatched 数目自洽', assignment.used + assignment.unmatched.length === syntheticFigures.length)

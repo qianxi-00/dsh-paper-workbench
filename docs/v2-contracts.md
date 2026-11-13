@@ -29,7 +29,7 @@
   ],
   "paragraphs": [
     { "id": "p0042", "order": 42, "page": 5, "section": "s3",
-      "kind": "body",                // heading | body | list | caption | formula
+      "kind": "body",                // heading | body | list | caption | footnote | formula
       "level": 0,                    // 仅 heading 有：1..3
       "text": "…", "hash": "a1b2c3d4e5f6a7b8",
       "bbox": [72, 120, 520, 180], "size": 10.2, "crossPage": false }
@@ -41,6 +41,11 @@
 - `sections[].hash` = `titleHash(title)`，用于标题译文缓存。
 - `order` 从 0 连续递增；`startParagraph` = 该节第一个段落的 `order`（目录跳转用）。
 - 扫描件（没有文本层）走 `source: "ocr"`，段落来自 `ocr.md` 的 `## p.N` 分段。
+- `kind` 来自 `pdf_tool text` 的块类型（原文页判断：图注 / 列表 / 脚注 / 公式），`doc.js` 只负责合并与兜底：
+  * `caption` 是图注行（`Figure N` / `Table N` / `图 N` / 算法），配图会挂到它上面；
+  * `footnote` 是比该页正文小一档的文字（脚注、参考文献、表格单元格里的零碎行）；
+  * 非 `body` 的块**不跨页合并**，也不与 `body` 合并。
+- `pdf_tool text` 的返回值带 `bodySize`（全篇正文字号中位数），逐页字号按页内中位数校正（附录/参考文献页字号常常小一档）。
 
 ### 2.2 `trans.json`
 
