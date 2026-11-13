@@ -94,6 +94,9 @@ const state = {
   review: null,
   reviewBusy: false,
   layoutBusy: false,
+  layoutJob: null,
+  layoutResumable: false,
+  layoutSavedPages: 0,
   figures: [],
   figuresByKey: {},
   chatMode: 'session', // session = 落进真正的 DSH 会话；local = 插件自绘（老宿主兜底）
@@ -1333,9 +1336,28 @@ async function openPaper(id, options = {}) {
     // 选区记忆会让划词菜单在没有选区时翻出上一篇的原文。
     state.pageDims = {}
     selectionMemory = { text: '', at: 0 }
+    stopLayoutPoll()
+    state.layoutJob = null
+    state.layoutResumable = false
+    state.layoutSavedPages = 0
+    state.layoutBusy = false
     await Promise.all([loadPage(state.page, seq), loadDoc(id, seq), loadChat(id, seq), loadAi(), loadFigures(seq)])
     if (seq !== state.openSeq) return
     buildFiguresByKey()
+    // 版面任务可能是在上次打开面板时开的（后台还在跑）：回来要接上进度，
+    // 有断点就显示「续跑」，别让人以为要重来一遍。
+    rpc('layout.status', { id })
+      .then((status) => {
+        if (seq !== state.openSeq || !status) return
+        state.layoutJob = status.job || null
+        state.layoutResumable = Boolean(status.resumable)
+        state.layoutSavedPages = status.savedPages || 0
+        const running = status.job && status.job.state === 'running'
+        state.layoutBusy = Boolean(running)
+        render()
+        if (running) pollLayoutJob(id).catch(() => {})
+      })
+      .catch(() => {})
     if (value.meta.status === 'unread') {
       await rpc('library.update', { id, patch: { status: 'reading' } }).catch(() => {})
       if (seq !== state.openSeq) return
@@ -2215,6 +2237,35 @@ function renderTableGrid(paragraph) {
   )
 }
 
+/**
+ * 公式：有 KaTeX 就按数学排版渲染，没有就退回源码（KaTeX 打包在插件里，正常不会缺）。
+ *
+ * 用 katex.render 直接往节点里排，不走 innerHTML —— 走库自己的 DOM 构造路径，
+ * 也就没有「把模型输出的字符串当 HTML 塞进页面」这条风险。
+ */
+function renderFormula(tex) {
+  const box = h('div', { class: 'para-latex', 'data-tex': tex })
+  const katex = typeof window !== 'undefined' ? window.katex : null
+  if (tex === '') return box
+  if (katex && typeof katex.render === 'function') {
+    try {
+      katex.render(tex, box, {
+        displayMode: true,
+        throwOnError: false,
+        strict: false,
+        trust: false,
+        output: 'html',
+      })
+      return box
+    } catch {
+      /* 落回源码 */
+    }
+  }
+  box.classList.add('plain')
+  box.textContent = tex
+  return box
+}
+
 function renderParagraph(paragraph) {
   const kind = paragraph.kind || 'body'
   const id = 'para-' + paragraph.id
@@ -2242,8 +2293,9 @@ function renderParagraph(paragraph) {
   )
   if (kind === 'formula') {
     para.classList.add('kind-formula')
+    const tex = String(paragraph.latex || paragraph.text || '').trim()
     para.replaceChildren(
-      h('div', { class: 'para-latex', 'data-tex': paragraph.latex || '' }, paragraph.latex || paragraph.text || ''),
+      renderFormula(tex),
       h('button', { class: 'link formula-link', onclick: () => jumpToPage(paragraph.page || 1) },
         '见原文页 p.' + (paragraph.page || '?')),
     )
@@ -2327,7 +2379,17 @@ function renderCompareToolbar() {
       ? h('button', { id: 'retry-failed', title: '重新请求这些翻译失败的段落', onclick: retryFailedSegments }, '重试失败 ' + retryable.length)
       : null,
     h('button', { id: 'review-run', disabled: !docReady || !hostReady() || state.reviewBusy, title: hostReady() ? '检查空译文、截断、残留英文、公式残留等可疑段落' : '重启桌面端后可用', onclick: () => runReview('static') }, state.reviewBusy ? '自检中…' : '自检'),
-    h('button', { id: 'layout-run', class: 'ghost', disabled: !docReady || !hostReady() || state.layoutBusy, title: hostReady() ? '用 PaddleOCR 的 PP-StructureV3 版面模型重新切段：会上传 PDF、按页计费' : '重启桌面端后可用', onclick: runLayoutParse }, state.layoutBusy ? '解析中…' : '版面'),
+    h('button', {
+      id: 'layout-run',
+      class: 'ghost' + (state.layoutResumable && !state.layoutBusy ? ' dirty' : ''),
+      disabled: !docReady || !hostReady(),
+      title: hostReady()
+        ? '用 PaddleOCR 的 PP-StructureV3 版面模型切段：会上传 PDF、按页计费；结果存 layout.json，下次不用重跑'
+        : '重启桌面端后可用',
+      onclick: state.layoutBusy ? cancelLayoutParse : runLayoutParse,
+    }, state.layoutBusy
+      ? '解析中… ' + ((state.layoutJob && state.layoutJob.pages) || 0) + '/' + ((state.layoutJob && state.layoutJob.totalPages) || '?')
+      : state.layoutResumable ? '续跑版面 ' + state.layoutSavedPages + ' 页' : '版面'),
     h('button', { id: 'logs-toggle', class: 'ghost' + (state.logs.open ? ' active' : ''), disabled: !hostReady(), title: hostReady() ? '任务日志（翻译 / OCR / 自检）' : '重启桌面端后可用', onclick: toggleLogs }, '日志'),
   )
 }
@@ -3681,6 +3743,58 @@ function renderInlineFigure(figure, ownCaption = false) {
  * 跑一次版面解析。会花钱、会上传 PDF，所以：先查有没有 Key，再明确确认一次。
  * 结果落 layout.json，doc/figures 由服务端优先读它，前端只要重载这两样。
  */
+let layoutPollTimer = null
+
+/** 停掉轮询（切论文、关面板、任务结束时都要调，否则会一直打接口）。 */
+function stopLayoutPoll() {
+  if (layoutPollTimer !== null) {
+    clearTimeout(layoutPollTimer)
+    layoutPollTimer = null
+  }
+}
+
+/**
+ * 版面解析是**后台任务**：请求立刻返回，进度靠轮询 layout.status。
+ * 早先是「发一个请求一直等到结束」，面板一关/一切走，前端就不再听结果了
+ * （服务端还在跑，但界面上看起来像死了，且失败时什么都不知道）。
+ */
+async function pollLayoutJob(id) {
+  stopLayoutPoll()
+  const tick = async () => {
+    if (!state.current || state.current.meta.id !== id) {
+      stopLayoutPoll()
+      return
+    }
+    let status = null
+    try {
+      status = await rpc('layout.status', { id })
+    } catch {
+      stopLayoutPoll()
+      return
+    }
+    const job = status && status.job
+    state.layoutJob = job || null
+    state.layoutResumable = Boolean(status && status.resumable)
+    state.layoutSavedPages = (status && status.savedPages) || 0
+    if (!job || job.state === 'done' || job.state === 'failed' || job.state === 'cancelled') {
+      state.layoutBusy = false
+      stopLayoutPoll()
+      render()
+      if (job && job.state === 'done') {
+        await loadFigures()
+        await loadDoc(id)
+      } else if (job && job.state === 'failed') {
+        toast('版面解析失败：' + (job.error || '未知原因'))
+      }
+      return
+    }
+    state.layoutBusy = job.state === 'running'
+    render()
+    layoutPollTimer = setTimeout(tick, 2000)
+  }
+  await tick()
+}
+
 async function runLayoutParse() {
   const meta = state.current && state.current.meta
   if (!meta) return
@@ -3701,27 +3815,37 @@ async function runLayoutParse() {
     return
   }
   const current = status && status.layout
-  const question = current
-    ? '这篇已经解析过（' + current.blocks + ' 块 / ' + current.figures + ' 图，' + current.model + '）。\n重新解析会再上传一次 PDF、再花一次配额，确定？'
-    : '版面解析会把整篇 PDF 上传到百度 AI Studio，用 PP-StructureV3 按页计费。\n解析后对照视图按真实版面切段，图表原位显示。继续？'
+  const resumable = Boolean(status && status.resumable)
+  const question = resumable
+    ? '上次没跑完，已完成 ' + status.savedPages + ' 页（已存盘，不用重传）。\n接着跑剩下的页？'
+    : current
+      ? '这篇已经解析过（' + current.blocks + ' 块 / ' + current.figures + ' 图，' + current.model + '）。\n重新解析会再上传一次 PDF、再花一次配额，确定？'
+      : '版面解析会把整篇 PDF 上传到百度 AI Studio，用 PP-StructureV3 按页计费。\n解析后对照视图按真实版面切段，图表原位显示；结果会存到 layout.json，下次不用重跑。继续？'
   if (!window.confirm(question)) return
   state.layoutBusy = true
   render()
   try {
-    const result = await rpc('layout.run', { id: meta.id })
-    const summary = (result && result.layout) || {}
-    toast('版面解析完成：' + (summary.blocks || 0) + ' 块 / ' + (summary.figures || 0) + ' 图')
-    await loadFigures()
-    await loadDoc(meta.id)
+    await rpc('layout.start', { id: meta.id, resume: resumable })
+    await pollLayoutJob(meta.id)
   } catch (error) {
-    toast('版面解析失败：' + error.message)
-  } finally {
     state.layoutBusy = false
     render()
+    toast('版面解析没能开始：' + error.message)
   }
 }
 
-// --- 翻译自检
+async function cancelLayoutParse() {
+  const meta = state.current && state.current.meta
+  if (!meta) return
+  try {
+    await rpc('layout.cancel', { id: meta.id })
+    toast('已请求取消：当前这一批跑完就停，已完成的页会留着')
+  } catch (error) {
+    toast('取消失败：' + error.message)
+  }
+}
+
+// --- 翻译自检// --- 翻译自检
 
 async function runReview(mode = 'static') {
   if (!state.current) return

@@ -157,6 +157,30 @@ PaddleOCR AI Studio 任务接口（与 OCR 同一个 Key、同一个 job 服务�
 以原图为准」，表头 sticky、超宽横向滚动、单元格可选中复制。这样即使某个表的结构不准，
 也不会让人以为那就是原文。
 
+## 4.6 后台任务、断点与取消
+
+版面解析是**按页计费**的远程任务，所以不能让「面板关掉」等于「钱白花」：
+
+- `layout.start` 立刻返回一条任务记录（`state: running`），真正的 `runLayout` 在进程里跑；
+  记录同时写 `papers/<id>/layout.job.json`。
+- 前端用 `layout.status` 轮询（2 秒一次）。`status` 返回
+  `{layout, job, resumable, savedPages, ready}`；`job` 字段：
+  `{state: pending|running|done|failed|cancelled|interrupted, stage, pages, totalPages, batches, jobId, resumed, startedAt, finishedAt, error}`。
+- 进程重启后内存里没有任务、磁盘上却是 `running` ⇒ `status` 把它改写成 `interrupted`，
+  前端于是显示「上次中断了（已完成 N 页）」+ `续跑版面 N 页`。
+- `runLayout({resume:true})` 读 `layout.partial.json`：只有「同一份 PDF（size+mtime）、同一个模型」
+  才认这份断点（否则丢弃，避免两篇的结果拼在一起）；已完整覆盖的批次整批跳过，
+  不再 `split`、不再 `submitJob`。
+- 每批成功后立刻原子写一次 `layout.partial.json`（含已解析的 pages、jobs、skipped）；
+  全部完成 → 写 `layout.json` → 删断点。
+- `layout.cancel` 触发 `AbortController`：当前这一批跑完就停（`state: cancelled`），
+  已落盘的批次保留，可续跑。
+- 续跑只保证「不重传已完成的页」；如果服务端的旧 `jobId` 已经过期，续跑会重跑**未完成**的那部分。
+
+KaTeX：公式块在渲染期用打包的 `assets/app/vendor/katex/`（js + css + woff2，无外网依赖）
+`katex.render(tex, node, {displayMode:true, throwOnError:false, trust:false})` 排版；
+失败就退回等宽源码。`vendor/katex/katex.min.css` 里的 `.woff`/`.ttf` 回退已删掉，只留 `woff2`。
+
 ## 5. 翻译与配图
 
 - 翻译池过滤：`formula` / `figure` / `table` 不送翻译（图块只有占位文字，表格是行数据）。
@@ -165,6 +189,9 @@ PaddleOCR AI Studio 任务接口（与 OCR 同一个 Key、同一个 job 服务�
 - 没有 `layout.json` 时行为与 v3 完全一致（PyMuPDF 规则 + 图注认领）。
 
 ## 6. 测试
+
+- `scripts/test-layout-model.mjs`：67 个纯函数/假依赖用例，其中「断点续跑」三条真的跑到第二批失败、
+  再续跑只上传剩下两批（`resumeSplits === [2,3]`）、页号连续、完成后断点文件被清掉。
 
 | 文件 | 覆盖 |
 | --- | --- |

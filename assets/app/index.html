@@ -5,10 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>论文工作台</title>
     <link rel="stylesheet" href="/paper-workbench/app/style.css" />
+    <!-- KaTeX：公式按数学排版显示（跟着插件走，不依赖外网 CDN） -->
+    <link rel="stylesheet" href="/paper-workbench/app/vendor/katex/katex.min.css" />
   </head>
   <body>
     <div id="app"><p class="boot-hint">正在加载…</p></div>
     <div id="toast" class="toast" hidden></div>
+    <!-- 经典脚本：挂到 window.katex 上。加载失败只是公式退回源码，不影响工作台 -->
+    <script src="/paper-workbench/app/vendor/katex/katex.min.js" defer></script>
     <!-- 脚本没加载成功时别留一块空白：宿主没起、路径错、语法错都走这里 -->
     <script
       type="module"

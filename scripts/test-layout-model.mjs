@@ -323,6 +323,84 @@ equal('分片：3 页按 2 页一批切两次', batchCalls.filter(item => item[0
   [[1, 2], [3, 3]])
 equal('分片：页号连续', batched.blocks.map(item => item.page), [1, 2, 3])
 
+// 断点续跑：跑到一半断了，下次只补没跑完的批次（不重新上传，也就不会重复计费）
+const resumeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-layout-resume-'))
+const resumeDir = path.join(resumeRoot, 'paper-r')
+fs.mkdirSync(resumeDir, { recursive: true })
+const resumePdfPath = path.join(resumeDir, 'paper.pdf')
+fs.writeFileSync(resumePdfPath, 'fake pdf for resume')
+const resumeStore = {
+  paperFile: (id, name) => path.join(resumeRoot, id, name),
+  getMeta: async id => ({ id, title: '续跑样例' }),
+  resolvePdf: async () => ({ path: resumePdfPath, meta: { id: 'paper-r' } }),
+  getConfig: async () => ({ ocr: { token: 'token-1', layoutModel: '' } }),
+  readJson: async (file, fallback) => {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch {
+      return fallback
+    }
+  },
+  writeJsonAtomic: async (file, value) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(value))
+  },
+}
+const resumeSplits = []
+const resumePdf = {
+  callTool: async (command, payload) => {
+    if (command === 'info') return { ok: true, pages: 3, sizes: [A4, A4, A4] }
+    if (command === 'split') {
+      resumeSplits.push(payload.from)
+      fs.writeFileSync(payload.out, 'part')
+      return { ok: true, pages: payload.to - payload.from + 1 }
+    }
+    if (command === 'page_lines') return { ok: true, page: payload.page, lines: [] }
+    throw new Error('未预期的命令：' + command)
+  },
+}
+let resumeUploads = 0
+let resumeBroken = true
+const resumeOcr = {
+  submitJob: async () => {
+    resumeUploads += 1
+    if (resumeBroken && resumeUploads === 2) throw new Error('网络断了')
+    return { jobId: 'job-r' + resumeUploads }
+  },
+  pollJob: async () => ({ state: 'done', jsonUrl: 'http://example.com/r.jsonl' }),
+  fetchResults: async () => ({
+    pages: [],
+    skipped: 0,
+    text: JSON.stringify({
+      result: {
+        layoutParsingResults: [{
+          prunedResult: { ...SIZE_1191, parsing_res_list: [block('text', '正文', [10, 10, 900, 60])] },
+        }],
+      },
+    }),
+  }),
+}
+const resumeRunner = createLayout({ store: resumeStore, pdf: resumePdf, ocr: resumeOcr })
+let broke = ''
+try {
+  await resumeRunner.runLayout('paper-r', { batchPages: 1 })
+} catch (error) {
+  broke = error.message
+}
+check('断点：第二批失败会把错误抛出来', broke === '网络断了', broke)
+const partial = await resumeRunner.readPartial('paper-r')
+equal('断点：已完成的第一批落盘', [partial.pages.length, partial.jobs.length], [1, 1])
+check('断点：部分结果不写 layout.json', !fs.existsSync(path.join(resumeDir, 'layout.json')))
+
+resumeBroken = false
+resumeSplits.length = 0
+const resumed = await resumeRunner.runLayout('paper-r', { batchPages: 1, resume: true })
+equal('续跑：只上传剩下的两批', resumeSplits, [2, 3])
+equal('续跑：页号仍然连续', resumed.blocks.map(item => item.page), [1, 2, 3])
+equal('续跑：记下续跑的页数', resumed.resumedPages, 1)
+check('续跑：完成后清掉断点文件', !fs.existsSync(path.join(resumeDir, 'layout.partial.json')))
+fs.rmSync(resumeRoot, { recursive: true, force: true })
+
 // ---------------------------------------------------------------- 表格结构
 
 const serviceTable = htmlToTableModel(
