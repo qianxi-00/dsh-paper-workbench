@@ -397,11 +397,17 @@ async function run() {
     assertFrame({ kind: 'assistant-delta' }, { kind: 'delta', text: '' })
   })
 
-  await check('normalizeFrame ④：不认识的帧进 other 且保留 raw；错误帧不当正文', () => {
+  await check('normalizeFrame ④：不认识的帧进 other 且保留 raw；错误帧归 error 并带文案', () => {
     const frame = { event: 'paper-workbench-status', payload: { state: 'running' } }
     assertFrame(frame, { kind: 'other' })
     assert.equal(normalizeFrame(frame).raw, frame)
-    assertFrame({ kind: 'stream-error', message: '模型挂了' }, { kind: 'other' })
+    // 错误帧以前归 other，面板会静默没有回答；现在必须让前端能显示原因
+    const failed = normalizeFrame({ kind: 'stream-error', message: '模型挂了' })
+    assert.equal(failed.kind, 'error')
+    assert.equal(failed.text, '模型挂了')
+    const finished = normalizeFrame({ type: 'finish', reason: { kind: 'error', message: '配额用完' } })
+    assert.equal(finished.kind, 'error')
+    assert.equal(finished.text, '配额用完')
   })
 
   await check('normalizeFrame ⑤：裸 content / 嵌套 content 数组 / data 解包都能取到文本', () => {

@@ -160,6 +160,24 @@ async function main() {
   check('删除：附件目录被清掉', await fsp.stat(path.join(root, 'chats', c2.id)).then(() => false, () => true))
   await expectError('删除不存在的对话要报错', () => store.removeConversation(c2.id))
 
+  // ---- 并发：chats.json 的读改写必须串行（曾实测 8 并发只记下 3 条附件）
+  const c3 = await store.createConversation({ title: '并发附件' })
+  const uploads = await Promise.all(
+    Array.from({ length: 6 }, (_, index) =>
+      store.attachToConversation(c3.id, { name: 'p' + index + '.txt', data: Buffer.from('x' + index) })),
+  )
+  const kept = (await store.getConversation(c3.id)).attachments
+  check('附件：6 个并发上传都记进清单', kept.length === 6, '记下 ' + kept.length + ' 条')
+  check('附件：并发上传都落盘', (await Promise.all(kept.map((item) => fsp.stat(item.path).then(() => true, () => false)))).every(Boolean))
+  check('附件：并发上传返回的是同一个对话', uploads.every((item) => item.attachment.path.includes(c3.id)))
+
+  // 超过上限要报错，而不是「文件落盘了但清单里没有」
+  for (let index = kept.length; index < 40; index += 1) {
+    await store.attachToConversation(c3.id, { name: 'fill' + index + '.txt', data: Buffer.from('y') })
+  }
+  await expectError('附件：第 41 个要报错', () => store.attachToConversation(c3.id, { name: 'overflow.txt', data: Buffer.from('z') }))
+  check('附件：报错后没有多出文件', (await store.getConversation(c3.id)).attachments.length === 40)
+
   // ---- 坏文件不影响启动
   await fsp.writeFile(path.join(root, 'chats.json'), '{ 这不是 JSON', 'utf8')
   const recovered = await store.listConversations()

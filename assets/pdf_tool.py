@@ -16,10 +16,14 @@ CHINESE_PAGE_RE = re.compile(r"^第\s*\d+\s*页(?:\s*[/／]\s*共?\s*\d+\s*页)?
 ROMAN_PAGE_RE = re.compile(r"^[ivxlcdm]{1,7}$", re.IGNORECASE)
 SAMPLE_PDF = Path(r"G:\笔记\LLM知识体系论文\高效微调\Prompt Tuning.pdf")
 HEURISTIC_RATIO, MAX_TITLE_LEN, SIZE_TOLERANCE, MAX_LEVELS = 1.12, 120, 0.94, 3
+# 中日韩文字与全角标点：行尾断行时直接拼接，不插空格（中文没有词间空格）
+CJK_RE = re.compile(r"[\u3000-\u303f\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]")
 FIGURE_MIN_SIDE = 60.0          # 宽或高小于 60pt 的图按 logo/图标丢弃
 FIGURE_MIN_AREA_RATIO = 0.015   # 面积小于页面 1.5% 的图同样丢弃
 FIGURE_CAPTION_RE = re.compile(r"^(?:图|圖|figure|fig\.?)\s*([0-9]+|[ivxlcdm]+)", re.IGNORECASE)
 _ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
+# 宽度 ≥ 页宽这个比例的块算「全宽块」（标题/摘要/表格），用来把双栏页面切成带
+WIDE_BLOCK_RATIO = 0.6
 
 
 class ArgsError(Exception):
@@ -80,6 +84,8 @@ def _join_lines(lines):
             continue
         if out.endswith("-") and re.match(r"[A-Za-z0-9]", line):
             out = out + line
+        elif CJK_RE.match(out[-1]) and CJK_RE.match(line[0]):
+            out = out + line           # 中文换行不插空格（"本文\n提出" -> "本文提出"）
         else:
             out = out + " " + line
     return out
@@ -183,9 +189,15 @@ def cmd_figures(args):
                         for text, rect in _text_lines(page)
                         if FIGURE_CAPTION_RE.match(text)]
             found, seen = [], set()
+            # get_image_info 的 bbox 在「未旋转」坐标系里，而 page.rect / 渲染 clip
+            # 用的是旋转后的坐标系；不转过来的话 /Rotate 90 的页面会裁出全白区域。
+            rotation = getattr(page, "rotation_matrix", None)
             for info in infos:
                 try:
-                    rect = fitz.Rect(info.get("bbox")) & page.rect
+                    rect = fitz.Rect(info.get("bbox"))
+                    if rotation is not None and getattr(page, "rotation", 0):
+                        rect = rect * rotation
+                    rect = rect & page.rect
                 except Exception:
                     continue
                 if rect.width < FIGURE_MIN_SIDE or rect.height < FIGURE_MIN_SIDE:
@@ -247,6 +259,60 @@ def cmd_info(args):
         doc.close()
 
 
+def _y_span(items):
+    return (min(item["y"] for item in items), max(item["y2"] for item in items))
+
+
+def _is_two_column(left, right):
+    """左右两簇块的纵向范围重叠够多才算真双栏（表格单元格也会落在左右两侧）。"""
+    if len(left) < 2 or len(right) < 2:
+        return False
+    la, lb = _y_span(left)
+    ra, rb = _y_span(right)
+    overlap = min(lb, rb) - max(la, ra)
+    span = max(lb, rb) - min(la, ra)
+    return overlap > 0 and span > 0 and overlap >= 0.5 * span
+
+
+def order_blocks(blocks, page_width):
+    """按阅读顺序排块：全宽块切带，带内先左栏后右栏、各自按 y。
+
+    只按 (y, x) 排会让双栏论文左右交错（左右栏的行基线并不对齐），而 doc.js 的
+    段落合并、翻译、搜索都按数组顺序消费，顺序错了整篇都错。
+    单栏页面几乎全是全宽块（宽度 ≥ 60% 页宽），行为与原来的 (y, x) 排序一致；
+    表格那种左右都有窄块的情况会因为纵向不重叠而退回 (y, x)。
+    """
+    if not blocks:
+        return blocks
+    mid = page_width / 2.0
+    wide = [item for item in blocks if (item["x2"] - item["x"]) >= page_width * WIDE_BLOCK_RATIO]
+    narrow = [item for item in blocks if (item["x2"] - item["x"]) < page_width * WIDE_BLOCK_RATIO]
+    if not wide or not narrow:
+        return sorted(blocks, key=lambda item: (item["y"], item["x"]))
+    left = [item for item in narrow if (item["x"] + item["x2"]) / 2 < mid]
+    right = [item for item in narrow if (item["x"] + item["x2"]) / 2 >= mid]
+    if not _is_two_column(left, right):
+        return sorted(blocks, key=lambda item: (item["y"], item["x"]))
+    wide.sort(key=lambda item: item["y"])
+    order = lambda item: (0 if (item["x"] + item["x2"]) / 2 < mid else 1, item["y"], item["x"])
+    narrow.sort(key=order)
+    bands = [[] for _ in range(len(wide) + 1)]
+    for block in narrow:  # 归属到它上方最近的全宽块之后
+        index = 0
+        for position, anchor in enumerate(wide):
+            if anchor["y"] <= block["y"]:
+                index = position + 1
+            else:
+                break
+        bands[index].append(block)
+    ordered = []
+    for position, anchor in enumerate(wide):
+        ordered.extend(bands[position])
+        ordered.append(anchor)
+    ordered.extend(bands[len(wide)])
+    return ordered
+
+
 def cmd_text(args):
     doc = open_doc(args)
     try:
@@ -270,7 +336,7 @@ def cmd_text(args):
             rect = page.rect
             blocks = [record for record in
                       map(_block_record, page.get_text("dict").get("blocks") or []) if record]
-            blocks.sort(key=lambda item: (item["y"], item["x"]))  # 契约：按 (y,x) 排序
+            blocks = order_blocks(blocks, float(rect.width))  # 双栏页按栏排阅读顺序
             pages.append({"n": number, "w": round(float(rect.width), 2),
                           "h": round(float(rect.height), 2), "blocks": blocks})
         result = {"ok": True, "pages": pages}
@@ -414,47 +480,119 @@ def cmd_render(args):
         doc.close()
 
 
+def _build_sample_pdf(path):
+    """现场生成一张自检用 PDF：标题 + 正文 + 一张图 + 图注 + 书签。"""
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=360)
+    page.insert_text((72, 80), "Self Test Title", fontsize=20)
+    page.insert_text((72, 110), "Abstract", fontsize=11)
+    page.insert_text((72, 130), "Generated sample for pdf_tool self test.",
+                     fontsize=10)
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 120), 0)
+    pix.set_rect(pix.irect, (40, 120, 200))
+    page.insert_image(fitz.Rect(72, 150, 272, 270), stream=pix.tobytes("png"))
+    page.insert_text((72, 290), "Figure 1: sample image", fontsize=10)
+    doc.set_toc([[1, "Introduction", 1]])
+    tmp = Path(str(path) + ".tmp")
+    doc.save(str(tmp))
+    doc.close()
+    tmp.replace(path)
+    return path
+
+
+def _png_bytes(path):
+    try:
+        return Path(path).read_bytes()
+    except OSError:
+        return b""
+
+
 def self_test():
     started = time.perf_counter()
     if fitz is None:
-        return fail("缺少 PyMuPDF(fitz)，请先安装")
-    if not SAMPLE_PDF.is_file():  # 约定样例；自检产物只写 %TEMP%，不进仓库
-        return fail(f"找不到自检样例 PDF：{SAMPLE_PDF}")
-    info = cmd_info({"path": str(SAMPLE_PDF)})
+        return fail("缺少 PyMuPDF(fitz)，请先安装：python -m pip install PyMuPDF")
+    base = Path(tempfile.gettempdir())
+    sample = base / "pb-selftest-sample.pdf"
+    try:
+        _build_sample_pdf(sample)
+    except Exception as exc:
+        return fail(f"生成自检样例失败：{exc}")
+    info = cmd_info({"path": str(sample)})
     pages = info.get("pages") if info.get("ok") else 0
     if not isinstance(pages, int) or pages <= 0:
         return fail(f"info 检查失败：{info.get('error') or 'pages 不大于 0'}")
-    text = cmd_text({"path": str(SAMPLE_PDF), "pages": [1]})
+    if not info.get("hasText"):
+        return fail("info 检查失败：自检样例应当有文字层")
+    text = cmd_text({"path": str(sample), "pages": [1]})
     blocks = (text.get("pages") or [{}])[0].get("blocks") or []
-    if not text.get("ok") or not blocks:
-        return fail(f"text 检查失败：{text.get('error') or '第 1 页没有文本块'}")
-    png = Path(tempfile.gettempdir()) / "pb-selftest-page1.png"
-    render = cmd_render({"path": str(SAMPLE_PDF), "page": 1, "scale": 1.5, "out": str(png)})
-    data = png.read_bytes() if render.get("ok") else b""
-    if not render.get("ok") or len(data) <= 1000:
-        return fail(f"render 检查失败：{render.get('error') or f'产物过小 {len(data)} 字节'}")
+    if not text.get("ok") or len(blocks) < 3:
+        return fail(f"text 检查失败：{text.get('error') or f'第 1 页只有 {len(blocks)} 个文本块'}")
+    joined = " ".join(item.get("text") or "" for item in blocks)
+    if "Self Test Title" not in joined:
+        return fail("text 检查失败：没有取到样例标题")
+    png = base / "pb-selftest-page1.png"
+    render = cmd_render({"path": str(sample), "page": 1, "scale": 1.5, "out": str(png)})
+    data = _png_bytes(png)
+    if not render.get("ok") or not data:
+        return fail(f"render 检查失败：{render.get('error') or '没有生成 PNG'}")
     if not data.startswith(b"\x89PNG\r\n\x1a\n") or render["bytes"] != len(data):
         return fail("render 产物不是有效 PNG（magic 或字节数不符）")
-    outline = cmd_outline({"path": str(SAMPLE_PDF)})
-    if not outline.get("ok") or not isinstance(outline.get("items"), list):
-        return fail(f"outline 检查失败：{outline.get('error')}")
-    figures = cmd_figures({"path": str(SAMPLE_PDF)})
-    if not figures.get("ok") or not isinstance(figures.get("figures"), list):
-        return fail(f"figures 检查失败：{figures.get('error') or 'figures 不是数组'}")
-    clip_png = Path(tempfile.gettempdir()) / "pb-selftest-clip.png"
-    clip = cmd_render({"path": str(SAMPLE_PDF), "page": 1, "scale": 1.0,
-                       "clip": [72, 72, 180, 120], "out": str(clip_png)})
-    clip_data = clip_png.read_bytes() if clip.get("ok") else b""
-    if (not clip.get("ok") or len(clip_data) <= 1000
-            or not clip_data.startswith(b"\x89PNG\r\n\x1a\n")):
-        return fail(f"render clip 检查失败：{clip.get('error') or f'产物异常 {len(clip_data)} 字节'}")
+    if (render["width"], render["height"]) != (600, 540):
+        return fail(f"render 尺寸不对：{render['width']}x{render['height']}（期望 600x540）")
+    outline = cmd_outline({"path": str(sample)})
+    titles = [item.get("title") for item in (outline.get("items") or [])]
+    if not outline.get("ok") or "Introduction" not in titles:
+        return fail(f"outline 检查失败：{outline.get('error') or titles}")
+    figures = cmd_figures({"path": str(sample)})
+    items = figures.get("figures") if figures.get("ok") else None
+    if not isinstance(items, list) or len(items) != 1:
+        return fail(f"figures 检查失败：{figures.get('error') or f'期望 1 张图，实际 {len(items or [])}'}")
+    if items[0].get("label") != 1 or "sample image" not in (items[0].get("caption") or ""):
+        return fail(f"figures 检查失败：图注/编号不对 {items[0].get('label')} {items[0].get('caption')!r}")
+    clip_png = base / "pb-selftest-clip.png"
+    clip = cmd_render({"path": str(sample), "page": 1, "scale": 1.0,
+                       "clip": [72, 150, 200, 120], "out": str(clip_png)})
+    clip_data = _png_bytes(clip_png)
+    if not clip.get("ok") or not clip_data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return fail(f"render clip 检查失败：{clip.get('error') or '不是有效 PNG'}")
+    if (clip["width"], clip["height"]) != (200, 120):
+        return fail(f"render clip 尺寸不对：{clip['width']}x{clip['height']}（期望 200x120）")
+    rotated = base / "pb-selftest-rotated.pdf"
+    try:
+        _build_sample_pdf(rotated)
+        rot_doc = fitz.open(str(rotated))
+        rot_doc.load_page(0).set_rotation(90)
+        rot_doc.save(str(rotated) + ".r")
+        rot_doc.close()
+        Path(str(rotated) + ".r").replace(rotated)
+    except Exception as exc:
+        return fail(f"生成旋转页样例失败：{exc}")
+    rot_figures = cmd_figures({"path": str(rotated)})
+    rot_items = rot_figures.get("figures") if rot_figures.get("ok") else None
+    if not isinstance(rot_items, list) or len(rot_items) != 1:
+        return fail(f"旋转页 figures 检查失败：{rot_figures.get('error') or '没取到图（坐标没跟着旋转）'}")
+    if abs(rot_items[0].get("x", 0) - 90) > 3 or abs(rot_items[0].get("x2", 0) - 210) > 3:
+        return fail("旋转页 figures 检查失败：bbox 还是未旋转坐标")
+    two_column = [
+        {"x": 10, "y": 20, "x2": 270, "y2": 32, "text": "header"},
+        {"x": 10, "y": 60, "x2": 130, "y2": 72, "text": "L1"},
+        {"x": 150, "y": 60, "x2": 270, "y2": 72, "text": "R1"},
+        {"x": 10, "y": 100, "x2": 130, "y2": 112, "text": "L2"},
+        {"x": 150, "y": 100, "x2": 270, "y2": 112, "text": "R2"},
+        {"x": 10, "y": 200, "x2": 270, "y2": 212, "text": "footer"},
+    ]
+    ordered = [item["text"] for item in order_blocks(two_column, 280)]
+    expect = ["header", "L1", "L2", "R1", "R2", "footer"]
+    if ordered != expect:
+        return fail(f"order_blocks 检查失败：{ordered}（期望先左栏后右栏 {expect}）")
     checks = [f"info: pages={pages} hasText={info['hasText']} toc={len(info['toc'])}",
               f"text: page1 blocks={len(blocks)}",
               f"render: bytes={len(data)} {render['width']}x{render['height']}",
-              f"outline: items={len(outline['items'])} outlineOk",
-              f"figures: {len(figures['figures'])} items",
+              f"outline: items={len(outline['items'])}",
+              f"figures: {len(items)} items label={items[0].get('label')}",
               f"render clip: bytes={len(clip_data)} {clip['width']}x{clip['height']}",
-              f"sample={SAMPLE_PDF}"]
+              f"rotated figures: {len(rot_items)} items page={rot_items[0].get('page')}",
+              f"sample={sample}"]
     return {"ok": True, "checks": checks, "ms": int((time.perf_counter() - started) * 1000)}
 
 

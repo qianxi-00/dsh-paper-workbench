@@ -910,3 +910,43 @@ body.pdf-dark-strong .inline-fig img { filter: invert(1) hue-rotate(180deg) cont
 .picker-item:hover { background: var(--bg-soft); border-color: var(--line); }
 .picker-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
 .picker-meta { color: var(--muted); font-size: 11px; flex: none; }
+
+/* ---------------- 环境自检（设置页） ---------------- */
+
+.boot-hint { padding: 18px; color: var(--muted); }
+.doctor-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.doctor-list { display: flex; flex-direction: column; gap: 6px; }
+.doctor-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-soft);
+}
+.doctor-badge {
+  flex: none;
+  min-width: 42px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+}
+.doctor-badge.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.doctor-badge.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.doctor-badge.error { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.doctor-label { font-weight: 600; flex: none; }
+.doctor-detail { flex: 1; min-width: 160px; word-break: break-all; }
+.doctor-hint { flex-basis: 100%; }
+
+/* 文献库的专题/论文行改成可用键盘操作后，给一个看得见的焦点环 */
+.topic-title:focus-visible, .paper-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 6px;
+}

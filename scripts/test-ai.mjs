@@ -296,6 +296,29 @@ async function main() {
     ok(selectionContext.includes('选中的句子'), '应包含选中文字')
   })
 
+  await check('buildChatContext：超长正文不会把选中文字挤出上下文', () => {
+    const s1 = makeSection({ id: 's1', title: '1 Introduction' })
+    const huge = makeParagraph({ id: 'p0', order: 0, section: 's1', text: 'A'.repeat(20000) })
+    const doc = makeDoc({ sections: [s1], paragraphs: [huge] })
+    const context = ai.buildChatContext({
+      doc,
+      meta: { title: '超长' },
+      sectionId: 's1',
+      selection: 'SELECTED-SENTENCE',
+    })
+    ok(context.includes('SELECTED-SENTENCE'), '选中文字必须留在上下文里，实际长度 ' + context.length)
+  })
+
+  await check('parseTranslateReply：JSON 后面的方括号尾注不该让整批解析失败', () => {
+    const reply = '[{"id":"p1","zh":"甲"},{"id":"p2","zh":"乙"}]（[12] 是原文引用）'
+    const parsed = ai.parseTranslateReply(reply, ['p1', 'p2'])
+    ok(parsed && parsed.p1 === '甲' && parsed.p2 === '乙', '实际：' + JSON.stringify(parsed))
+  })
+
+  await check('tidyMath：三个以上的 $ 收成两个，不吞成单个', () => {
+    ok(ai.tidyMath('a $$$ b').includes('$$'), '实际：' + ai.tidyMath('a $$$ b'))
+  })
+
   await check('buildChatContext：paper 范围含摘要/全部章节/结论节', () => {
     const s1 = makeSection({ id: 's1', title: '1 Introduction' })
     const s2 = makeSection({ id: 's2', order: 1, title: '5 Conclusion' })

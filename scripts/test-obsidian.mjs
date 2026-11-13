@@ -301,6 +301,42 @@ async function main() {
     eq(again.created, false)
   })
 
+  await check('正文里的同名「字段行」不会劫持小节写入', async () => {
+    // 正文（不在「## 内容知识化」小节里）出现「- 精读报告：待补」时，
+    // 以前会被当成字段行，把 精读报告 整节压成一行、覆盖掉人工内容。
+    const trickTitle = '劫持测试'
+    const created = await obsidian.upsertCard(kb, {
+      title: trickTitle,
+      category: '测试分类',
+      sections: { 内容知识化: '- 一句话结论：原结论' },
+    })
+    const trickPath = created.path
+    const before = await fsp.readFile(trickPath, 'utf8')
+    ok(!before.includes('- 精读报告：待补'), '样卡正文不该先带这行')
+    // 放进另一个小节（不在「## 内容知识化」里），才算「正文里的同名行」
+    await fsp.writeFile(trickPath, before + '\n## 备注\n\n- 精读报告：待补\n', 'utf8')
+    const patched = await obsidian.upsertCard(kb, { title: trickTitle, sections: { 精读报告: '真正的精读内容' } })
+    const after = await fsp.readFile(trickPath, 'utf8')
+    ok(after.includes('<!-- pb:begin 精读报告 -->'), '应写成带 pb 标记的小节')
+    ok(after.includes('真正的精读内容'), '内容应写进小节')
+    ok(after.includes('- 精读报告：待补'), '正文里那行不该被改掉')
+    eq(patched.skipped.length, 0)
+    await fsp.rm(trickPath, { force: true })
+  })
+
+  await check('同名小节没有 pb 标记时回报 skipped，不静默当成功', async () => {
+    const manualTitle = '手写小节'
+    const created = await obsidian.upsertCard(kb, { title: manualTitle, category: '测试分类' })
+    const manualPath = created.path
+    await fsp.writeFile(manualPath, (await fsp.readFile(manualPath, 'utf8')) + '\n## 精读报告\n\n人工写的内容\n', 'utf8')
+    const result = await obsidian.upsertCard(kb, { title: manualTitle, sections: { 精读报告: '自动写入' } })
+    const text = await fsp.readFile(manualPath, 'utf8')
+    ok(text.includes('人工写的内容'), '不该覆盖人工内容')
+    ok(!text.includes('自动写入'), '不该写进去')
+    eq(result.skipped, ['精读报告'])
+    await fsp.rm(manualPath, { force: true })
+  })
+
   // ---- 8. 列表与检索
   await check('listCards 递归列出论文目录、忽略备份文件', async () => {
     const cards = await obsidian.listCards(kb)

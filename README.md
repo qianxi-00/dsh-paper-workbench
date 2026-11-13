@@ -32,25 +32,104 @@ PDF 页图、笔记与 Obsidian 卡片，最右侧是**面板内对话**。
 - **扫描件 OCR**：没有文本层的 PDF 可以调 PaddleOCR 云端接口（PaddleOCR-VL-1.6 / PP-StructureV3 / PP-OCRv6）识别成按页 Markdown，之后照常对照、翻译、检索、问答。
 - **Obsidian 联动**：直接读写已有「论文知识库」卡片；frontmatter **行级合并**（只改传入的键，保留未知字段、注释和书写风格），写前备份，幂等。
 
-## 依赖
+## 环境要求
 
-| 依赖 | 用途 | 缺失时 |
+| 需要 | 版本 | 没有会怎样 |
 | --- | --- | --- |
-| Python 3.10+ 与 `PyMuPDF`（`import fitz`） | 取文本/坐标、目录、渲页 | 仍能导入与阅读，但改为浏览器原生 PDF 查看器，无文本层/翻译 |
-| Obsidian（CLI 在 PATH 上可选） | 定位 vault、打开卡片 | 「卡片」页签与写入功能不可用，其余照常 |
-| PaddleOCR API Key（百度 AI Studio，可选） | 扫描件 OCR | 扫描件只能看页图，不能翻译/检索；其它 PDF 不受影响 |
+| DeepSeek Harness 桌面端 | 带 `webServer` / `tools` / `sessionController` 的版本 | 装不上 |
+| Node.js | ≥ 20（宿主自带） | 低于 22.5 时 `node:sqlite` 不可用，译文自动退化成 JSON 存储，功能不受影响 |
+| Python 3.10+ 与 `PyMuPDF`（`import fitz`） | 推荐 | 页图、段落模型、对照、翻译都用不了，只能走浏览器原生 PDF 查看器 |
+| Obsidian（桌面端） | 可选 | 「卡片」页签与写入不可用，其余照常 |
+| PaddleOCR API Key（百度 AI Studio） | 可选 | 扫描件只能看页图，不能 OCR/翻译/检索；文本层正常的 PDF 不受影响 |
 
-插件会自动探测 `F:\ProGramApp\Anaconda\python.exe` → `python` → `py`，也可在设置里手动指定路径。
-不引入任何第三方 npm 依赖，客户端也不需要构建。
+插件**零 npm 依赖**、不需要构建、不会动你的 `node_modules`；除了你主动发起的 arXiv/OpenAlex 检索与
+PaddleOCR 识别，它不向第三方发请求。
 
 ## 安装
 
+装完插件记得在「插件」页把它**启用**，然后重启桌面端（宿主侧代码只在插件加载时执行一次）。
+
+### 方式一：插件市场或 npm（推荐）
+
+桌面端 → 设置 →「插件」→ 市场里搜 `paper-workbench`，或直接装 npm 包：
+
 ```bash
-dsh plugin --profile desktop add /absolute/path/to/dsh-paper-workbench
-# 或在桌面端「插件」页添加本地包
+dsh plugin --profile desktop add dsh-paper-workbench
 ```
 
-安装后**重启桌面端**（宿主代码只在插件加载时执行一次；之后改代码需要重新启用插件或重启）。
+### 方式二：从 GitHub 装
+
+```bash
+dsh plugin --profile desktop add github:qianxi-00/dsh-paper-workbench
+```
+
+### 方式三：本地目录（开发、自用、改代码）
+
+```bash
+git clone https://github.com/qianxi-00/dsh-paper-workbench
+dsh plugin --profile desktop add /absolute/path/to/dsh-paper-workbench
+# 想边改边看效果用 link：dsh plugin --profile desktop add link:/absolute/path
+```
+
+也可以在桌面端「插件」页直接选本地包/链接。
+
+> `dsh plugin` 只是把包装进 profile 的 `node_modules`；登记 bundle（`dsh.profile.bundles`）由桌面端的
+> 插件页完成。命令行装完如果侧栏没出现「论文工作台」，去插件页启用一下即可。
+
+### 装 Python 依赖
+
+只有 PDF 取文本/渲页需要 Python，没有它插件照样能装、能开、能看页图（浏览器原生查看器）。
+
+```bash
+# Windows（PowerShell）
+winget install --id Python.Python.3.12  # 或从 python.org 装，勾 Add to PATH
+python -m pip install pymupdf
+
+# macOS
+brew install python && python3 -m pip install --user pymupdf
+
+# Linux（Debian/Ubuntu）
+sudo apt install python3 python3-pip && python3 -m pip install --user pymupdf
+```
+
+装好后不用重启：插件探测失败只缓存 30 秒，在设置里点「重新检测」或直接重开插件即可。
+
+解释器按这个顺序找：设置里填的路径 → `DSH_PAPER_PYTHON` → `PYTHON` → `python3`/`py`/`python`
+（Windows 上还有本机常见的 Anaconda 路径）。全部失败时 `doctor` 会告诉你差什么。
+
+### 装完自检
+
+```bash
+npm run doctor    # 在源码目录里跑；从 npm 装的包也可以直接 node scripts/doctor.mjs
+```
+
+Windows 用户没有 `npm` 也没关系：桌面端 → 论文工作台 → `⚙ 设置` →「环境自检」按钮，报告是同一份
+（Node 版本、数据目录可写、SQLite 引擎、Python/PyMuPDF、Obsidian vault、模型、DSH 宿主能力、OCR Key）。
+它按 `ok / warn / FAIL / skip` 分级，每条都带一句「怎么办」。
+
+## 配置
+
+零配置可用：默认跟随 DSH 当前模型、自动探测 Python 与 Obsidian vault、数据放
+`~/.dsh/paper-workbench`。要改的都在 `config.json`（设置页改的是同一份文件）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `storage` | `link` | `link` 只记 PDF 原路径；`copy` 把 PDF 复制进 `papers/<id>/paper.pdf` |
+| `python` | `''` | 留空自动探测；填绝对路径可钉死解释器 |
+| `vault` / `kb` | `''` | 留空自动从 Obsidian 配置里找 open 的 vault 与「论文知识库」目录 |
+| `ocr.token` | `''` | PaddleOCR Key；写入后文件自动收紧到 0600，界面只回显示尾号 |
+| `ocr.model` | `PaddleOCR-VL-1.6` | 也可 `PP-StructureV3` / `PP-OCRv6` |
+| `ai.translateModel` / `ai.chatModel` | `null` | `null` = 跟随当前会话模型；也可钉 `{provider, model}` |
+| `ai.temperature` | `0.2` | 翻译/对话温度 |
+| `workspace.title` / `workspace.path` | `论文` / `<数据根>/论文` | 原生会话归属的工作区 |
+
+环境变量（兜底用，适合多套数据或测试）：
+
+| 变量 | 作用 |
+| --- | --- |
+| `DSH_PAPER_WORKBENCH_DATA` | 换数据根（默认 `~/.dsh/paper-workbench`） |
+| `DSH_PAPER_PYTHON` / `PYTHON` | 指定 Python 解释器 |
+| `PB_DB_PATH` / `PB_DB_ENGINE` | 换 SQLite 库位置 / 强制 `json` 退化引擎 |
 
 ## 用起来
 
@@ -201,6 +280,7 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
     notes.json           # 高亮
     zh.md                # 中文版（## p.N 分段，会话侧翻译产物）
     ocr.md               # 扫描件 OCR 结果（## p.N 分段）
+    .figures/.stamp      # 配图缓存指纹：figures.json 变了就重裁 PNG
     ocr.json             # 最近一次 OCR 任务状态（进度/错误）
     .figures/            # 配图 PNG 缓存
   .pages/<id>/           # 页图缓存
@@ -217,7 +297,8 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 npm run dev       # 独立调试服务器 http://127.0.0.1:57571/paper-workbench/app（读真实库）
 npm run dev:mock  # 同上，但翻译/对话用假模型，数据目录也换到 %TEMP%\pb-dev-mock（不污染真实库）
 npm run seed      # 塞几篇本机样例论文（幂等）
-npm test          # store 并发 + SQLite + 对话 + 工具层 + 段落模型 + AI + 自检 + 日志 + 配图 + 会话桥 + Obsidian + arXiv + OCR + PDF 自检
+npm test          # store 并发 + SQLite + 安全（回收站/并发写）+ 对话 + 工具层 + 段落模型 + AI + 自检 + 日志 + 配图 + 会话桥 + Obsidian + arXiv + OCR + 环境自检 + PDF 自检
+npm run doctor    # 环境自检：Node/数据目录/SQLite/Python/Obsidian/OCR/模型/宿主
 npm run smoke -- http://127.0.0.1:57571   # 打一遍 HTTP 接口（含 SSE 翻译/对话、搜索、配图、日志、自检、回收站）
 npm run fix:library                       # 干跑一次库体检（重复条目/文件名式标题），加 -- --apply 才动库
 ```
@@ -263,6 +344,8 @@ docs/v3-contracts.md  v3 新增模块（db / jobs / review / figures / session�
 - 原生会话依赖宿主的 `sessionController`；没有就自动退回「本地」自绘对话，功能不受影响，只是不落进主会话。
 - 对话里的附件是以**文件路径**交给 agent 的：宿主 `sessionController.prompt` 只收文本，所以图片不能被"直接看见"，只能由 agent 用文件工具读（能读文字类文件；图片取决于 agent 有没有读图工具）。
 - 一个对话对应一条 DSH 会话，对话删掉只从工作台移除，DSH 里的会话记录仍在（要清理请去会话列表删）。
+- 对话附件上限 40 个、单个 40 MB；附件以路径交给 agent，不会内联进提示词（避免一次塞爆上下文）。
+- 回收站里的「彻底删除」除了 PDF 和元数据，还会删掉这篇的译文 / 任务日志 / 自检结果；恢复不了。
 - `精读整篇` / `整本翻译` / `对比综述` 这类整本活在主会话里跑（依赖 agent 与 `paper_*` 工具），且仍会往会话输入框写指令。
 - 只下载公开 PDF（arXiv / OpenAlex 开放获取），不绕过任何付费墙。
 - 宿主代码改动不会热重载：改完需在插件页重新启用或重启桌面端；`assets/app/` 是静态文件，刷新页面即可。

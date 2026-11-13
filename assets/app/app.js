@@ -40,6 +40,7 @@ const state = {
   expanded: loadTree(), // 已展开的专题（默认空 = 全部收起）
   tempCollapsed: new Set(), // 搜索期间的临时收起，不写 localStorage
   current: null, // library.get: { meta, outline, notes, zhChars, ocr }
+  openSeq: 0, // 打开论文的代次：快速切换时旧请求回来对不上就整段丢弃，防止串台
   doc: null, // doc.get 的 doc（sections/paragraphs）
   docError: '',
   docBusy: false,
@@ -67,6 +68,7 @@ const state = {
   translateBusy: false,
   translateError: '',
   translateReqId: '',
+  translateTask: 0, // 翻译任务令牌：切论文后旧流的 finally 不能再动新论文的 state
   chat: { messages: [], busy: false, abort: null, error: '', draft: '' },
   chatDraft: '',
   card: null,
@@ -75,6 +77,8 @@ const state = {
   showSettings: false,
   selection: null,
   health: null,
+  // 环境自检（设置页）：旧宿主没有 doctor.run，静默降级成一行提示
+  doctor: { loading: false, report: null, error: '', unsupported: false },
   busy: '',
   online: { q: '', source: 'both', items: [], loading: false, error: '' },
   ocr: null,
@@ -467,6 +471,16 @@ function makeSplitter(kind) {
   })
   let drag = null
   const syncAria = () => element.setAttribute('aria-valuenow', String(Math.round(state.layout[kind])))
+  // 兜底收尾：元素在拖动途中被 replaceChildren 摘掉时收不到 pointerup，
+  // 靠 lostpointercapture / window blur 也得把 drag 状态和 body.dragging 清掉，
+  // 否则整页一直处于「拖拽中」：不能选字、光标也不恢复。
+  // 推到下一拍再收尾，避免在 render 换树的过程中同步再触发一次 render。
+  const settleDrag = () => setTimeout(() => finishDrag(true), 0)
+  const onWindowBlur = () => settleDrag()
+  // 兜底之二：元素被整页重绘换掉后，浏览器可能不再把 pointerup 派给旧节点
+  // （capture 已经释放，鼠标落在新节点上），事件会经由新节点冒泡到 document。
+  // 所以拖拽期间在 document 上也收一份 pointerup/pointercancel，保证一定收尾。
+  const onDocPointerEnd = () => finishDrag(true)
   const setWidth = (raw) => {
     applyLayoutWidth(kind, Math.max(0, Math.min(cfg.max, raw)))
     syncAria()
@@ -482,6 +496,9 @@ function makeSplitter(kind) {
     drag = { startX: event.clientX, start: state.layout[kind] }
     element.classList.add('dragging')
     document.body.classList.add('dragging')
+    window.addEventListener('blur', onWindowBlur)
+    document.addEventListener('pointerup', onDocPointerEnd)
+    document.addEventListener('pointercancel', onDocPointerEnd)
   })
   element.addEventListener('pointermove', (event) => {
     if (!drag) return
@@ -491,6 +508,7 @@ function makeSplitter(kind) {
   })
   element.addEventListener('pointerup', () => finishDrag(true))
   element.addEventListener('pointercancel', () => finishDrag(true))
+  element.addEventListener('lostpointercapture', () => settleDrag())
   element.addEventListener('dblclick', (event) => {
     event.preventDefault()
     state.layout[kind] = cfg.def
@@ -517,6 +535,10 @@ function makeSplitter(kind) {
   return element
 
   function finishDrag(allowCollapse) {
+    // 幂等：pointerup / pointercancel / lostpointercapture / blur 可能先后都来一遍
+    window.removeEventListener('blur', onWindowBlur)
+    document.removeEventListener('pointerup', onDocPointerEnd)
+    document.removeEventListener('pointercancel', onDocPointerEnd)
     if (!drag) return
     const width = state.layout[kind]
     drag = null
@@ -731,8 +753,12 @@ function markPending(job) {
 }
 
 function translateHandlers(job) {
+  // 切论文 / 又开了新翻译任务后，旧流可能在 abort 生效前再送几帧：一律丢弃，
+  // 不能让旧论文的译文/状态写进新论文的 state。
+  const live = () => job.token === state.translateTask
   return {
     start(data) {
+      if (!live()) return
       const key = normalizeKey(data && data.key)
       if (!key) return
       const item = state.streams.get(key) || { status: 'streaming', text: '', message: '' }
@@ -741,6 +767,7 @@ function translateHandlers(job) {
       paintTranslation(key)
     },
     delta(data) {
+      if (!live()) return
       const key = normalizeKey(data && data.key)
       if (!key) return
       const item = state.streams.get(key) || { status: 'streaming', text: '', message: '' }
@@ -750,6 +777,7 @@ function translateHandlers(job) {
       paintTranslation(key)
     },
     done(data) {
+      if (!live()) return
       const key = normalizeKey(data && data.key)
       if (!key || job.done.has(key)) return // 幂等：同一次请求重复 done 只覆盖一次
       job.done.add(key)
@@ -760,6 +788,7 @@ function translateHandlers(job) {
       paintTranslateChrome()
     },
     error(data) {
+      if (!live()) return
       const key = normalizeKey(data && data.key)
       if (!key) return
       job.failed.add(key)
@@ -768,6 +797,7 @@ function translateHandlers(job) {
       paintTranslateChrome()
     },
     end(data) {
+      if (!live()) return
       state.translateBusy = false
       paintTranslateChrome()
       if (data && data.ok === false) {
@@ -787,6 +817,8 @@ async function runTranslate(body, job) {
     return
   }
   if (!state.current) return
+  const task = ++state.translateTask
+  job.token = task
   state.translateBusy = true
   state.translateError = ''
   state.job = job
@@ -803,20 +835,27 @@ async function runTranslate(body, job) {
       toast(state.translateError, 5000)
     }
   } finally {
-    if (state.translateAbort === controller) state.translateAbort = null
-    state.translateBusy = false
-    // 未收到 done 的段落标记为中断，已缓存的译文优先保留
-    for (const [key, item] of [...state.streams]) {
-      if (item.status === 'pending' || item.status === 'streaming') {
-        if (state.trans[key]) state.streams.delete(key)
-        else if (!state.translateError) state.streams.set(key, { status: 'error', text: '', message: '翻译已停止，可重试' })
+    // 旧任务（切了论文 / 又开了新任务）不许再动新任务的 busy、状态栏和段落标记
+    if (task === state.translateTask) {
+      if (state.translateAbort === controller) state.translateAbort = null
+      state.translateBusy = false
+      // 未收到 done 的段落标记为中断或失败，别让它们一直停在「翻译中…」；
+      // 已缓存的译文优先保留。
+      for (const [key, item] of [...state.streams]) {
+        if (item.status !== 'pending' && item.status !== 'streaming') continue
+        if (state.trans[key]) {
+          state.streams.delete(key)
+          continue
+        }
+        const message = state.translateError ? '翻译失败，可重试' : '翻译已停止，可重试'
+        state.streams.set(key, { status: 'error', text: '', message })
       }
-    }
-    paintAllTranslations()
-    paintTranslateChrome()
-    if (state.tab === 'compare') {
-      const status = document.getElementById('translate-status')
-      if (status) status.textContent = state.translateError || progressText()
+      paintAllTranslations()
+      paintTranslateChrome()
+      if (state.tab === 'compare') {
+        const status = document.getElementById('translate-status')
+        if (status) status.textContent = state.translateError || progressText()
+      }
     }
   }
 }
@@ -971,18 +1010,20 @@ function toggleOnlyZh() {
   render()
 }
 
-function paintTranslation(key) {
-  const nodes = document.querySelectorAll('[data-zh="' + key + '"]')
-  if (nodes.length === 0) return
+function paintTranslation(key, nodes) {
+  const list = nodes || document.querySelectorAll('[data-zh="' + key + '"]')
+  if (list.length === 0) return
   const text = state.trans[key] && state.trans[key].zh
   const stream = state.streams.get(key)
-  for (const node of nodes) node.replaceChildren(...zhContent(key, text, stream))
-  // 译文是在 render 之后才到的：.compare 的 show-zh 是渲染时算的，
-  // 不补这一步，划词/单段翻译完成后段落下面的中文会被 display:none 藏起来。
-  if (text || stream) {
-    const compare = document.querySelector('.compare')
-    if (compare && !compare.classList.contains('show-zh')) compare.classList.add('show-zh')
-  }
+  for (const node of list) node.replaceChildren(...zhContent(key, text, stream))
+  if (text || stream) ensureShowZh()
+}
+
+/** 译文是在 render 之后才到的：.compare 的 show-zh 是渲染时算的，
+ * 不补这一步，划词/单段翻译完成后段落下面的中文会被 display:none 藏起来。 */
+function ensureShowZh() {
+  const compare = document.querySelector('.compare')
+  if (compare && !compare.classList.contains('show-zh')) compare.classList.add('show-zh')
 }
 
 function zhContent(key, text, stream) {
@@ -998,8 +1039,25 @@ function zhContent(key, text, stream) {
 }
 
 function paintAllTranslations() {
-  const keys = new Set([...Object.keys(state.trans), ...state.streams.keys()])
-  for (const key of keys) paintTranslation(key)
+  // 一次全树扫描建好 key -> 节点 的索引，再按 key 回填；
+  // 以前每个 key 都 querySelectorAll 一遍，整篇 800 个 key 就是 800 次全文档扫描。
+  const byKey = new Map()
+  for (const node of document.querySelectorAll('[data-zh]')) {
+    const key = node.getAttribute('data-zh')
+    if (!key) continue
+    let list = byKey.get(key)
+    if (!list) byKey.set(key, (list = []))
+    list.push(node)
+  }
+  let painted = false
+  for (const [key, list] of byKey) {
+    const text = state.trans[key] && state.trans[key].zh
+    const stream = state.streams.get(key)
+    if (!text && !stream) continue
+    for (const node of list) node.replaceChildren(...zhContent(key, text, stream))
+    painted = true
+  }
+  if (painted) ensureShowZh()
 }
 
 function paintTranslateChrome() {
@@ -1206,13 +1264,43 @@ async function loadHealth() {
   }
 }
 
+/** 切论文前放弃上一篇的所有在途任务：结果回来时不许再写 state。 */
+function abortPaperWork() {
+  // 翻译：先让令牌失效，再 abort（abort 后 finally 还会跑，令牌对不上就什么都不做）
+  state.translateTask += 1
+  if (state.translateAbort) {
+    try {
+      state.translateAbort.abort()
+    } catch {
+      /* 已结束 */
+    }
+  }
+  state.translateAbort = null
+  state.translateBusy = false
+  // 对话：旧回答不能写进新论文的气泡
+  if (state.chat.abort) {
+    try {
+      state.chat.abort.abort()
+    } catch {
+      /* 已结束 */
+    }
+  }
+  state.chat.abort = null
+  state.chat.busy = false
+}
+
 async function openPaper(id, options = {}) {
   // 从会话记忆恢复时：页签、页码、当前节都按离开时的样子来，不重置成「对照 / 上次阅读页」
   const restore = options.session && options.session.paperId === id ? options.session : null
+  // 请求代次：快速切论文时，旧请求（library.get / pdf.text / doc.get / chat.get）可能后回来，
+  // 每个 await 之后都对一次代次，对不上就整段丢弃（不写 state、不 render、不 saveSession）。
+  const seq = ++state.openSeq
+  abortPaperWork()
   try {
     state.busy = 'open'
     render()
     const value = await rpc('library.get', { id })
+    if (seq !== state.openSeq) return
     state.current = value
     const wantedPage = restore && Number(restore.page) > 0 ? Number(restore.page) : value.meta.lastReadPage || 1
     state.page = Math.max(1, Math.min(wantedPage, value.meta.pageCount || 1))
@@ -1221,6 +1309,7 @@ async function openPaper(id, options = {}) {
     state.card = null
     state.ocr = value.ocr || null
     state.ocrPages = []
+    state.ocrBusy = ''
     state.tab = (restore && restore.tab) || 'compare'
     state.doc = null
     state.docError = ''
@@ -1239,34 +1328,47 @@ async function openPaper(id, options = {}) {
     state.search = { open: false, q: '', hits: [], active: 0, busy: false, error: '' }
     state.logs.events = []
     state.logs.lastSeq = 0
-    await Promise.all([loadPage(state.page), loadDoc(id), loadChat(id), loadAi(), loadFigures()])
+    // 上一篇的页尺寸与「刚才选中的那段」不能带进新论文：页尺寸会让占位比例用错页，
+    // 选区记忆会让划词菜单在没有选区时翻出上一篇的原文。
+    state.pageDims = {}
+    selectionMemory = { text: '', at: 0 }
+    await Promise.all([loadPage(state.page, seq), loadDoc(id, seq), loadChat(id, seq), loadAi(), loadFigures(seq)])
+    if (seq !== state.openSeq) return
     buildFiguresByKey()
     if (value.meta.status === 'unread') {
       await rpc('library.update', { id, patch: { status: 'reading' } }).catch(() => {})
+      if (seq !== state.openSeq) return
       await loadLibrary()
+      if (seq !== state.openSeq) return
     }
   } catch (error) {
-    toast('打开失败：' + error.message)
+    if (seq === state.openSeq) toast('打开失败：' + error.message)
   } finally {
-    state.busy = ''
-    render()
-    if (restore && Number.isFinite(Number(restore.scrollTop))) {
-      const scroller = document.querySelector('.compare-scroll')
-      if (scroller) scroller.scrollTop = Number(restore.scrollTop)
+    // 旧代次的 finally 一律不碰界面：新论文的 busy / render / 会话都归新那一次管
+    if (seq === state.openSeq) {
+      state.busy = ''
+      render()
+      if (restore && Number.isFinite(Number(restore.scrollTop))) {
+        const scroller = document.querySelector('.compare-scroll')
+        if (scroller) scroller.scrollTop = Number(restore.scrollTop)
+      }
+      saveSession({ paperId: id, tab: state.tab, page: state.page, sectionId: state.sectionId })
+      if (state.session.available && state.layout.chatOpen) startSessionStream(true)
     }
-    saveSession({ paperId: id, tab: state.tab, page: state.page, sectionId: state.sectionId })
-    if (state.session.available && state.layout.chatOpen) startSessionStream(true)
   }
 }
 
 /** 取一页页图/文本块；不负责 render，调用方决定何时重绘（避免打开论文时闪屏多次）。 */
-async function loadPage(page) {
+async function loadPage(page, seq) {
   if (!state.current) return
   const meta = state.current.meta
+  // seq 由 openPaper 传入：await 回来时论文已经换掉，就别再往新论文上写旧页的数据
+  const stale = () => (seq !== undefined && seq !== state.openSeq) || !state.current || state.current.meta.id !== meta.id
   const total = meta.pageCount || 0
   state.page = Math.max(1, Math.min(Number(page) || 1, total || Number(page) || 1))
   try {
     const text = await rpc('pdf.text', { id: meta.id, pages: [state.page] })
+    if (stale()) return
     const pageData = (text.pages || [])[0]
     if (pageData) {
       state.pageInfo = { w: pageData.w, h: pageData.h }
@@ -1277,36 +1379,43 @@ async function loadPage(page) {
       state.blocks = []
     }
     const info = await rpc('pdf.info', { id: meta.id }).catch(() => null)
+    if (stale()) return
     if (info && info.pages) {
       meta.pageCount = info.pages
       state.page = Math.min(state.page, info.pages)
     }
     await rpc('library.update', { id: meta.id, patch: { lastReadPage: state.page } }).catch(() => {})
+    if (stale()) return
     saveSessionSoon({ page: state.page })
     // 连续滚动视图：重绘后滚到这一页（打开论文、跳转、搜索命中都靠它定位）
     state.pendingPage = state.page
   } catch (error) {
+    if (stale()) return
     state.blocks = []
     state.pageInfo = null
     toast('取文本层失败：' + error.message)
   }
 }
 
-async function loadDoc(id) {
+async function loadDoc(id, seq) {
   state.docBusy = true
+  // 论文换了 / 代次对不上：doc.get 的旧结果不能覆盖新论文的文档模型
+  const stale = () => (seq !== undefined && seq !== state.openSeq) || !state.current || state.current.meta.id !== id
   try {
     const value = await rpc('doc.get', { id })
+    if (stale()) return
     state.doc = (value && value.doc) || null
     state.docError = state.doc ? '' : 'doc.get 没有返回文档模型'
     state.trans = {}
     const entries = (value && value.trans && value.trans.entries) || {}
     for (const [key, entry] of Object.entries(entries)) state.trans[String(key).toLowerCase()] = entry
   } catch (error) {
+    if (stale()) return
     state.doc = null
     state.docError = error.message
     state.trans = {}
   } finally {
-    state.docBusy = false
+    if (seq === undefined || seq === state.openSeq) state.docBusy = false
   }
 }
 
@@ -1336,9 +1445,11 @@ async function loadCard() {
   }
 }
 
-async function loadChat(id) {
+async function loadChat(id, seq) {
+  const stale = () => (seq !== undefined && seq !== state.openSeq) || !state.current || state.current.meta.id !== id
   try {
     const value = await rpc('chat.get', { id })
+    if (stale()) return
     state.chat.messages = (value.messages || []).map((message) => ({
       role: message.role,
       content: message.content,
@@ -1346,6 +1457,7 @@ async function loadChat(id) {
       context: message.context,
     }))
   } catch (error) {
+    if (stale()) return
     state.chat.messages = []
     if (!/no such method/i.test(error.message)) state.chat.error = '对话历史读取失败：' + error.message
   }
@@ -1377,18 +1489,25 @@ async function loadOcrText() {
 async function runOcr() {
   if (!state.current || state.ocrBusy) return
   const id = state.current.meta.id
+  // OCR 轮询要跟着论文走：切了论文（或 id 变了）就停，旧任务的结果不能再写 state.doc
+  const seq = state.openSeq
+  const stale = () => seq !== state.openSeq || !state.current || state.current.meta.id !== id
   const model = (state.settings && state.settings.config && state.settings.config.ocr && state.settings.config.ocr.model) || ''
   const began = Date.now()
   state.ocrBusy = '正在提交 OCR 任务…'
   render()
   try {
     let status = await rpc('ocr.start', model ? { id, model } : { id })
+    if (stale()) return
     state.ocr = status
     while ((status.state === 'pending' || status.state === 'running') && Date.now() - began < 40 * 60 * 1000) {
+      if (stale()) return
       state.ocrBusy = 'OCR 进行中：' + (status.extractedPages || 0) + ' / ' + (status.totalPages || '?') + ' 页（已等 ' + Math.round((Date.now() - began) / 1000) + ' 秒）'
       render()
       await new Promise((resolve) => setTimeout(resolve, 2500))
+      if (stale()) return
       status = await rpc('ocr.status', { id })
+      if (stale()) return
       state.ocr = status
     }
     if (status.state === 'pending' || status.state === 'running') {
@@ -1396,13 +1515,19 @@ async function runOcr() {
     }
     if (status.state === 'failed') throw new Error(status.error || 'OCR 任务失败')
     await loadOcrText()
-    await loadDoc(id) // 扫描件 OCR 完成后，对照视图用新的 ocr → doc
+    if (stale()) return
+    // 扫描件 OCR 完成后，对照视图用新的 ocr → doc；但绝不能把这篇的 doc 写到别的论文上
+    if (!state.current || state.current.meta.id !== id) return
+    await loadDoc(id)
+    if (stale()) return
     toast('OCR 完成：' + (status.pages || state.ocrPages.length) + ' 页')
   } catch (error) {
-    toast('OCR 失败：' + error.message)
+    if (!stale()) toast('OCR 失败：' + error.message)
   } finally {
-    state.ocrBusy = ''
-    render()
+    if (!stale()) {
+      state.ocrBusy = ''
+      render()
+    }
   }
 }
 
@@ -1410,35 +1535,66 @@ async function runOcr() {
 
 let deferredRender = false
 let deferredSince = 0
+let deferredTimer = 0
 const RENDER_DEFER_MAX_MS = 1200
+// 选区一直不消失时最多拖这么久也要补绘一次：否则搜索框 / 弹层会被选区卡住永不出现
+const RENDER_DEFER_FALLBACK_MS = 600
 
-/** 选区消失（或等太久）后补做被推迟的整页重绘。 */
-function flushDeferredRender() {
+/** 选区消失（或等太久 / 兜底定时器到点）后补做被推迟的整页重绘。 */
+function flushDeferredRender(force = false) {
+  if (deferredTimer) {
+    clearTimeout(deferredTimer)
+    deferredTimer = 0
+  }
   if (!deferredRender) return
-  if (liveReaderSelection().length >= 2 && Date.now() - deferredSince < RENDER_DEFER_MAX_MS) return
+  if (!force && liveReaderSelection().length >= 2 && Date.now() - deferredSince < RENDER_DEFER_MAX_MS) return
   deferredRender = false
   deferredSince = 0
-  render()
+  render(true)
 }
 
-function render() {
+function render(force = false) {
   // 用户正在正文里选字时别整页重绘：app.replaceChildren() 会把选区所在的节点一起换掉，
   // 拖选到一半节点被换掉，Chrome 会把选区挪到新节点上，mouseup 时取到的就不是用户选的那段。
   // 这里先记账，等选区空了（或最多等 RENDER_DEFER_MAX_MS）再补绘。
-  if (liveReaderSelection().length >= 2) {
+  if (!force && liveReaderSelection().length >= 2) {
     if (!deferredSince) deferredSince = Date.now()
     if (Date.now() - deferredSince < RENDER_DEFER_MAX_MS) {
       deferredRender = true
+      if (!deferredTimer) {
+        deferredTimer = setTimeout(() => {
+          deferredTimer = 0
+          flushDeferredRender(true)
+        }, RENDER_DEFER_FALLBACK_MS)
+      }
       return
     }
   }
   deferredRender = false
   deferredSince = 0
+  if (deferredTimer) {
+    clearTimeout(deferredTimer)
+    deferredTimer = 0
+  }
   const previousScroll = pendingScrollReset ? 0 : (document.querySelector('.compare-scroll') || {}).scrollTop || 0
   const previousPageScroll = (document.querySelector('.page-scroll') || {}).scrollTop || state.pageScrollTop || 0
   const previousOutline = (document.querySelector('.outline') || {}).scrollTop || 0
+  // 重绘会换掉输入框节点：正在对话里打字时把焦点与光标还回去
+  const focusChat = !!(document.activeElement && document.activeElement.id === 'chat-input')
   pendingScrollReset = false
   app.replaceChildren(renderShell())
+  if (focusChat) {
+    const input = document.getElementById('chat-input')
+    if (input) {
+      input.focus({ preventScroll: true })
+      const end = input.value.length
+      try {
+        input.setSelectionRange(end, end)
+      } catch {
+        /* 非文本输入控件时忽略 */
+      }
+    }
+  }
   // 目录标题/节标题的译文节点渲染时是空的（只能按 data-zh 后填），这里统一补一遍缓存译文
   paintAllTranslations()
   const scroller = document.querySelector('.compare-scroll')
@@ -1556,8 +1712,15 @@ function renderSide() {
                 {
                   class: 'topic-title',
                   role: 'button',
+                  tabindex: '0',
                   'aria-expanded': open ? 'true' : 'false',
                   onclick: () => toggleGroup(topic, searching),
+                  onkeydown: (event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      toggleGroup(topic, searching)
+                    }
+                  },
                 },
                 h('span', {}, (open ? '▾ ' : '▸ ') + topic),
                 h('span', {}, items.length),
@@ -1568,7 +1731,17 @@ function renderSide() {
                       'div',
                       {
                         class: 'paper-row' + (state.current && state.current.meta.id === paper.id ? ' active' : ''),
+                        role: 'button',
+                        tabindex: '0',
                         onclick: () => openPaper(paper.id),
+                        // 行内还有复选框：键盘事件从复选框冒上来时交给它自己处理
+                        onkeydown: (event) => {
+                          if (event.target !== event.currentTarget) return
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault()
+                            openPaper(paper.id)
+                          }
+                        },
                         title: paper.title,
                       },
                       h(
@@ -2030,6 +2203,8 @@ function renderDocMissing() {
 function renderCompareToolbar() {
   const docReady = !!(state.doc && Array.isArray(state.doc.paragraphs) && state.doc.paragraphs.length > 0)
   const status = state.translateError || progressText()
+  // 重试入口不能只看 job.failed：整篇在开流前就失败时 failed 是空的，但段落停在 error 状态
+  const retryable = failedSegmentKeys()
   return h(
     'div',
     { class: 'toolbar compare-toolbar' },
@@ -2063,8 +2238,8 @@ function renderCompareToolbar() {
       '只看译文',
     ),
     h('button', { id: 'translate-titles', disabled: !docReady || state.translateBusy, title: '批量翻译节标题，目录显示英文/中文两行', onclick: translateTitles }, '目录翻译'),
-    state.job && state.job.failed && state.job.failed.size
-      ? h('button', { id: 'retry-failed', title: '重新请求这些翻译失败的段落', onclick: retryFailedSegments }, '重试失败 ' + state.job.failed.size)
+    retryable.length
+      ? h('button', { id: 'retry-failed', title: '重新请求这些翻译失败的段落', onclick: retryFailedSegments }, '重试失败 ' + retryable.length)
       : null,
     h('button', { id: 'review-run', disabled: !docReady || !hostReady() || state.reviewBusy, title: hostReady() ? '检查空译文、截断、残留英文、公式残留等可疑段落' : '重启桌面端后可用', onclick: () => runReview('static') }, state.reviewBusy ? '自检中…' : '自检'),
     h('button', { id: 'logs-toggle', class: 'ghost' + (state.logs.open ? ' active' : ''), disabled: !hostReady(), title: hostReady() ? '任务日志（翻译 / OCR / 自检）' : '重启桌面端后可用', onclick: toggleLogs }, '日志'),
@@ -2210,7 +2385,7 @@ function renderPagePane() {
       state.current.meta.hasText === false || state.ocr
         ? h('button', { class: 'ghost', onclick: runOcr, disabled: !!state.ocrBusy, title: '扫描件：调用 PaddleOCR 识别全文' }, state.ocrBusy ? 'OCR 中…' : state.ocr && state.ocr.pages > 0 ? '重新 OCR' : 'OCR 识别')
         : null,
-      h('button', { onclick: () => window.open(API + 'raw?id=' + encodeURIComponent(meta.id), '_blank') }, '浏览器打开 PDF'),
+      h('button', { onclick: () => window.open(API + 'raw?id=' + encodeURIComponent(meta.id), '_blank', 'noopener') }, '浏览器打开 PDF'),
     ),
     ocrBar(),
     stage,
@@ -2395,6 +2570,8 @@ function renderChat() {
             onclick: () => {
               state.chatMode = sessionMode ? 'local' : 'session'
               state.session.started = ''
+              // 切回「本地」时把会话流停掉：否则后台还在收帧、白白重绘，也容易把旧回答画进新气泡
+              if (state.chatMode === 'local') stopSessionStream()
               render()
             },
           },
@@ -2477,6 +2654,8 @@ function renderMessage(message, index) {
 
 function openSettings() {
   state.showSettings = true
+  // 打开设置页顺手跑一次环境自检；旧宿主没有 doctor.run 时静默降级，不弹 toast
+  loadDoctor()
   loadAi(true).then(() => {
     state.aiDraft = {
       translateModel: (state.aiConfig && state.aiConfig.translateModel) || null,
@@ -2493,6 +2672,74 @@ function openSettings() {
   render()
 }
 
+/**
+ * 环境自检：新宿主有 doctor.run（返回 { ok, at, checks[] }），旧宿主没有这个接口。
+ * 旧宿主上静默降级成一行「要重启桌面端」的提示，不弹 toast、不抛错。
+ */
+async function loadDoctor(force = false) {
+  if (state.doctor.loading) return
+  if (!force && (state.doctor.report || state.doctor.unsupported || state.doctor.error)) return
+  state.doctor.loading = true
+  state.doctor.error = ''
+  if (state.showSettings) render()
+  try {
+    const value = await rpc('doctor.run')
+    state.doctor.report = value && Array.isArray(value.checks) ? value : null
+    state.doctor.unsupported = false
+  } catch (error) {
+    state.doctor.report = null
+    // 旧宿主：接口不存在。只在设置页里留一句可操作的话，别打扰用户。
+    state.doctor.unsupported = /no such method|not found|404|未知方法/i.test(error.message)
+    state.doctor.error = state.doctor.unsupported ? '' : error.message
+  } finally {
+    state.doctor.loading = false
+    if (state.showSettings) render()
+  }
+}
+
+const DOCTOR_STATUS = { ok: 'ok', warn: 'warn', error: 'FAIL', skip: 'skip' }
+
+function doctorRow(check) {
+  const status = String((check && check.status) || 'warn')
+  return h(
+    'div',
+    { class: 'doctor-item ' + status },
+    h('span', { class: 'doctor-badge ' + status }, DOCTOR_STATUS[status] || status),
+    h('span', { class: 'doctor-label' }, (check && check.label) || (check && check.id) || ''),
+    h('span', { class: 'doctor-detail' }, (check && check.detail) || ''),
+    check && check.hint ? h('span', { class: 'doctor-hint hint' }, check.hint) : null,
+  )
+}
+
+function renderDoctorSection() {
+  const doctor = state.doctor
+  const report = doctor.report
+  const checks = report && Array.isArray(report.checks) ? report.checks : []
+  let body = null
+  if (doctor.loading && !report) body = h('div', { class: 'hint' }, '正在检测…')
+  else if (doctor.unsupported) body = h('div', { class: 'hint' }, '自检要重启桌面端后可用（当前宿主还没有 doctor.run 接口）。')
+  else if (doctor.error) body = h('div', { class: 'hint' }, '自检失败：' + doctor.error)
+  else if (checks.length === 0) body = h('div', { class: 'hint' }, '还没有检测结果。')
+  else body = h('div', { class: 'doctor-list' }, ...checks.map(doctorRow))
+  return h(
+    'div',
+    { class: 'doctor' },
+    h('div', { class: 'divider' }, '环境自检'),
+    h(
+      'div',
+      { class: 'doctor-head' },
+      h(
+        'span',
+        { class: 'hint' },
+        report && report.at ? '检测时间 ' + String(report.at).replace('T', ' ').slice(0, 19) : '检查 Python / 存储 / 模型 / Obsidian / OCR 是否就绪',
+      ),
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'ghost', disabled: doctor.loading, onclick: () => loadDoctor(true) }, doctor.loading ? '检测中…' : '重新检测'),
+    ),
+    body,
+  )
+}
+
 function renderSettings() {
   const settings = state.settings || { config: {}, dataRoot: '' }
   const config = settings.config || {}
@@ -2502,12 +2749,15 @@ function renderSettings() {
     chatModel: ai.chatModel || null,
     temperature: Number.isFinite(Number(ai.temperature)) ? Number(ai.temperature) : 0.2,
   }
-  const field = (key, label, placeholder) =>
-    h(
+  const field = (key, label, placeholder) => {
+    const id = 'set-' + key
+    return h(
       'div',
       { class: 'field' },
-      h('label', {}, label),
+      // label 用 for 关联到 input：点标签也能聚焦，屏幕阅读器也能读对
+      h('label', { for: id }, label),
       h('input', {
+        id,
         type: 'text',
         value: config[key] || '',
         placeholder: placeholder || '',
@@ -2516,6 +2766,7 @@ function renderSettings() {
         },
       }),
     )
+  }
   const modelSelect = (id, label, key) =>
     h(
       'div',
@@ -2630,6 +2881,7 @@ function renderSettings() {
         '清除 Key',
       ),
     ),
+    renderDoctorSection(),
     h(
       'div',
       { class: 'foot' },
@@ -2737,7 +2989,7 @@ function renderOnline() {
             },
             item.pdfUrl ? '下载并入库' : '无开放 PDF',
           ),
-          item.url || item.absUrl ? h('button', { onclick: () => window.open(item.url || item.absUrl, '_blank') }, '打开原文页') : null,
+          item.url || item.absUrl ? h('button', { onclick: () => window.open(item.url || item.absUrl, '_blank', 'noopener') }, '打开原文页') : null,
           h('button', { onclick: () => insertPrompt('帮我找并读一下这篇论文：' + item.title + (item.doi ? '（DOI ' + item.doi + '）' : '')) }, '让 agent 读'),
         ),
       ),
@@ -2971,7 +3223,7 @@ async function addHighlight(text) {
 // ---------------------------------------------------------------- 会话注入（次要通道）
 
 function insertPrompt(text) {
-  window.parent.postMessage({ __pb: true, type: 'insert-prompt', text }, '*')
+  window.parent.postMessage({ __pb: true, type: 'insert-prompt', text }, location.origin)
   toast('已写入当前会话输入框，回到对话里发送即可')
 }
 
@@ -3153,7 +3405,7 @@ function gotoSearchHit(index) {
     node.scrollIntoView({ block: 'center', behavior: 'smooth' })
     node.classList.add('flash')
     setTimeout(() => node.classList.remove('flash'), 1600)
-    render()
+    // 这里不能再 render()：整页重绘会把滚动位置拉回顶部、flash 节点也被换掉
   } else {
     state.search.open = false
     jumpToPage(hit.page || 1)
@@ -3230,16 +3482,20 @@ function renderSearchOverlay() {
 
 // --- 配图（正文里按「图 N」插入）
 
-async function loadFigures() {
+async function loadFigures(seq) {
   if (!state.current) {
     state.figures = []
     state.figuresByKey = {}
     return
   }
+  const id = state.current.meta.id
+  const stale = () => (seq !== undefined && seq !== state.openSeq) || !state.current || state.current.meta.id !== id
   try {
-    const value = await rpc('figures.list', { id: state.current.meta.id })
+    const value = await rpc('figures.list', { id })
+    if (stale()) return
     state.figures = Array.isArray(value.figures) ? value.figures : []
   } catch {
+    if (stale()) return
     state.figures = []
   }
   buildFiguresByKey()
@@ -3584,9 +3840,58 @@ function sessionMessages() {
     } else if (frame.kind === 'done') {
       if (live) live.streaming = false
       live = null
+    } else if (frame.kind === 'error') {
+      // 模型报错要能看见：以前这类帧被归成 other，界面上直接没有回答
+      if (live) live.streaming = false
+      out.push({ role: 'error', text: String(frame.text || '会话返回了错误') })
+      live = null
     }
   }
   return out
+}
+
+const SESSION_FRAMES_MAX = 2000
+
+/**
+ * 裁剪会话帧窗口。旧实现固定只留最后 400 帧，窗口可能落在一帧 delta 上，
+ * 于是 history 缓冲从半句话开始（sessionMessages 会给它新起一条流式气泡）。
+ * 现在上限放到 2000，并且只在窗口起点是「完整消息/结束」边界时才裁。
+ */
+function pruneSessionFrames() {
+  const frames = state.session.frames
+  if (frames.length <= SESSION_FRAMES_MAX) return
+  const target = frames.length - SESSION_FRAMES_MAX
+  let start = target
+  while (start < frames.length) {
+    const kind = frames[start] && frames[start].kind
+    if (kind === 'message' || kind === 'done') break
+    start += 1
+  }
+  if (start >= frames.length) return // 窗口里没有可用的消息边界：宁可不裁，也不显示半句
+  state.session.frames = frames.slice(start)
+}
+
+/**
+ * 会话流增量帧只更新最后一条正在流式输出的气泡（和本地对话的 paintLiveChat 同款思路）：
+ * 每帧 render() 会换掉 #chat-input，用户正在输入的字会丢焦点。
+ * 没有这条气泡时（新一轮回答刚开始）也只补一条，不整页重绘。
+ */
+function paintSessionLive() {
+  const messages = sessionMessages()
+  const live = messages.length > 0 ? messages[messages.length - 1] : null
+  if (!live || !live.streaming) return false
+  const list = document.querySelector('.chat-messages')
+  if (!list) return false
+  let body = document.getElementById('session-live-body')
+  if (!body) {
+    body = h('div', { class: 'msg-body streaming', id: 'session-live-body' })
+    list.append(h('div', { class: 'msg assistant' }, body))
+    const hint = list.querySelector('.chat-hint')
+    if (hint) hint.remove()
+  }
+  body.innerHTML = renderAssistantHtml(live.text) + '<span class="caret"></span>'
+  list.scrollTop = list.scrollHeight
+  return true
 }
 
 async function startSessionStream(force = false) {
@@ -3610,8 +3915,11 @@ async function startSessionStream(force = false) {
       {
         frame: (frame) => {
           state.session.frames.push(frame)
-          if (state.session.frames.length > 400) state.session.frames = state.session.frames.slice(-400)
-          render()
+          pruneSessionFrames()
+          // 增量帧只补最后一口气泡；只有消息边界与流结束才整页重绘，
+          // 否则流式期间每帧 render() 都会换掉 #chat-input，输入框丢焦点、草稿被打断。
+          if (frame && frame.kind === 'delta') paintSessionLive()
+          else if (frame && (frame.kind === 'message' || frame.kind === 'done' || frame.kind === 'error')) render()
         },
         error: (data) => {
           state.session.error = (data && data.error) || '会话流出错'
@@ -4064,7 +4372,12 @@ function renderSessionChat(aside) {
       list.append(h('div', { class: 'msg user' }, h('div', { class: 'msg-body' }, stripScopePrompt(message.text))))
       continue
     }
-    const body = h('div', { class: 'msg-body' + (message.streaming ? ' streaming' : '') })
+    if (message.role === 'error') {
+      // 模型/宿主报错时给一条红字，别让用户对着「思考中」一直等
+      list.append(h('div', { class: 'msg assistant' }, h('div', { class: 'msg-body chat-error error' }, message.text)))
+      continue
+    }
+    const body = h('div', { class: 'msg-body' + (message.streaming ? ' streaming' : ''), id: message.streaming ? 'session-live-body' : undefined })
     body.innerHTML = renderAssistantHtml(message.text)
     if (message.streaming) body.append(h('span', { class: 'caret' }))
     list.append(h('div', { class: 'msg assistant' }, body, h('div', { class: 'msg-actions' }, h('button', { class: 'link', onclick: () => copyText(message.text) }, '复制'))))
@@ -4120,8 +4433,17 @@ function renderSessionChat(aside) {
   if (key && state.session.started !== key && !state.session.streaming) startSessionStream()
 }
 
+/** 能重试的失败段落：任务记录的失败项 + 停在 error 的段落（整篇失败时 job.failed 可能是空的）。 */
+function failedSegmentKeys() {
+  const keys = new Set(state.job && state.job.failed ? state.job.failed : [])
+  for (const [key, item] of state.streams) {
+    if (item && item.status === 'error' && !state.trans[key]) keys.add(key)
+  }
+  return [...keys]
+}
+
 function retryFailedSegments() {
-  const failed = state.job && state.job.failed ? [...state.job.failed] : []
+  const failed = failedSegmentKeys()
   if (failed.length === 0) {
     toast('没有失败的段落')
     return
@@ -4144,10 +4466,15 @@ async function boot() {
 async function bootInner() {
   applyDark()
   document.addEventListener('keydown', (event) => {
-    if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === 'f' && state.current) {
-      event.preventDefault()
-      openSearch()
-    }
+    if (!(event.ctrlKey || event.metaKey) || String(event.key).toLowerCase() !== 'f') return
+    if (event.isComposing) return
+    const target = event.target
+    // 输入框 / 可编辑区里的 Ctrl+F 交给浏览器自己的查找
+    if (target && target.closest && target.closest('input, textarea, select, [contenteditable="true"]')) return
+    // 旧宿主没有文内搜索接口：不 preventDefault，让浏览器的查找照常可用
+    if (!state.current || !hostReady()) return
+    event.preventDefault()
+    openSearch()
   })
   render()
   await Promise.all([loadHealth(), loadAi()])
@@ -4184,6 +4511,8 @@ window.__pb = {
   render,
   loadDoc,
   openPaper,
+  openSettings,
+  loadDoctor,
   translateSection,
   translateAll,
   translateSelection,

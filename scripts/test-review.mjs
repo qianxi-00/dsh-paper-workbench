@@ -454,6 +454,21 @@ async function testRun() {
     const result = await reviewer.run('paper-1', { mode: 'both' })
     eq(result.stats.llmError, '上游 500')
   })
+
+  await check('run：输出被 max-tokens 截断时不要伪装成「自检通过」', async () => {
+    const store = makeStore({ doc: RULE_DOC, trans: { version: 1, entries: RULE_ENTRIES } })
+    const llm = makeLlm([
+      { type: 'text-delta', index: 0, text: '[]' },
+      { type: 'finish', reason: { kind: 'max-tokens' } },
+    ])
+    const reviewer = createReview({
+      store,
+      getServices: () => ({ llm, agentDefaultModel: agentOf({ provider: 'p', model: 'm' }) }),
+    })
+    const result = await reviewer.run('paper-1', { mode: 'both' })
+    ok(String(result.stats.llmError || '').includes('截断'), '应写明被截断')
+    eq(result.stats.llmChecked > 0, true)
+  })
 }
 
 async function main() {

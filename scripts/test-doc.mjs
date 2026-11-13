@@ -700,6 +700,15 @@ async function runSampleIntegration(sample, root) {
     eq(changed.doc.pdf.bytes, pdfBytes.length + cacheBuster.length, 'bytes 应随文件变化')
   })
 
+  await check('[' + id + '] text.json 带 source 指纹，PDF 换了版本会重新抽文本', async () => {
+    // 只比 PDF sha1 而不重抽文本的话，原地换 PDF 会留下「doc.json 是新 sha1、正文是旧内容」
+    const cachedText = JSON.parse(await fsp.readFile(path.join(paperDir, 'text.json'), 'utf8'))
+    ok(cachedText.source && typeof cachedText.source.size === 'number', 'text.json 应带 source')
+    const stat = await fsp.stat(pdfFile)
+    eq(cachedText.source.size, stat.size, 'source.size 应跟当前 PDF 一致')
+    eq(cachedText.source.mtimeMs, stat.mtimeMs, 'source.mtimeMs 应跟当前 PDF 一致')
+  })
+
   // 旧 doc 存在 + PDF 找不到 → 返回旧 doc 并标 stale
   const savedMeta = JSON.parse(await fsp.readFile(path.join(paperDir, 'meta.json'), 'utf8'))
   await fsp.writeFile(path.join(paperDir, 'meta.json'), JSON.stringify({ ...savedMeta, srcPath: '' }), 'utf8')

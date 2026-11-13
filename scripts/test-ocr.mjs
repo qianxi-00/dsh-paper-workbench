@@ -145,12 +145,14 @@ async function runOffline() {
     assert.equal(second.text, '')
   })
 
-  await check('parseJsonl：空行跳过、坏行只计 skipped 不整体失败', () => {
+  await check('parseJsonl：空行跳过、坏行只计 skipped 且仍占页码', () => {
     const bad = parseJsonl(['{"result":{"layoutParsingResults":[{"markdown":{"text":"好页"}}]}}', '{坏行', '', 'null', '[]'].join('\n'))
-    assert.equal(bad.pages.length, 1)
+    // 坏行不能直接 continue：否则后面每页的 ## p.N 会整体前移一位，页码/翻译/跳转全错位
+    assert.equal(bad.pages.length, 4)
     assert.equal(bad.skipped, 3)
-    assert.equal(bad.pages[0].n, 1)
+    assert.deepEqual(bad.pages.map((page) => page.n), [1, 2, 3, 4])
     assert.equal(bad.pages[0].markdown, '好页')
+    assert.equal(bad.pages[1].markdown, '')
   })
 
   await check('pagesToMarkdown：含 ## p.1/## p.2 且顺序正确，空页仍占号', () => {
@@ -303,7 +305,7 @@ async function runOffline() {
       return textResponse(LAYOUT_FIXTURE + '\n{坏行\n')
     }
     const out = await fetchResults({ jsonUrl: 'https://cdn.example/out.jsonl', fetchImpl })
-    assert.equal(out.pages.length, 2)
+    assert.equal(out.pages.length, 3, '坏行应占位，页码才不乱')
     assert.equal(out.skipped, 1)
     assert.equal(captured.url, 'https://cdn.example/out.jsonl')
     assert.equal(captured.init.headers.Authorization, undefined, '对象存储直链不该带鉴权头')

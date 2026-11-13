@@ -165,9 +165,9 @@ export function sseError(res, status, message)
 
 ## 7. HTTP 契约（lead 在 `lib/server.js` 实现）
 
-### 7.1 非流式 RPC（`POST /paper-workbench/api/<method>`，沿用 `{ ok, result }` 包装）
+### 7.1 非流式 RPC（`POST /paper-workbench/api/<method>`，沿用 `{ ok, value }` 包装；失败为 `{ ok:false, error }`）
 
-| method | 入参 | 出参 `result` |
+| method | 入参 | 出参 `value` |
 |---|---|---|
 | `doc.get` | `{ id, rebuild? }` | `{ doc, trans, stale? }` |
 | `doc.build` | `{ id }` | `{ sections, paragraphs, ms }` |
