@@ -141,6 +141,31 @@ await check('第二次读 doc 命中缓存', async () => {
   eq(again.doc.source, 'layout', '缓存来源')
 })
 
+await check('有目录（meta.outline）的论文也能命中版面缓存', async () => {
+  // 版面分节不靠 outline，但缓存判断会拿 outlineHash 比：存空指纹会让每次打开都重建
+  await store.updateMeta(id, { outline: [{ title: '1 Introduction', page: 1, level: 1 }] })
+  docModule.invalidateDocCache(id, { dropDoc: true })
+  await new Promise(resolve => setTimeout(resolve, 120))
+  const first = await docModule.getDoc(id, { rebuild: true })
+  eq(first.built, true, '第一次应重建')
+  const second = await docModule.getDoc(id)
+  eq(second.built, false, '目录没变时第二次应命中缓存')
+})
+
+await check('rebuild 不会直接返回缓存', async () => {
+  const again = await docModule.getDoc(id, { rebuild: true })
+  eq(again.built, true, 'rebuild:true 必须重新建模')
+})
+
+await check('构建算法版本变了要让旧 doc.json 失效', async () => {
+  const cached = await store.readDoc(id)
+  ok(cached && cached.source === 'layout', '应有一份版面 doc 缓存')
+  await store.writeDoc(id, { ...cached, layoutBuild: 'clean-0' })
+  const again = await docModule.getDoc(id)
+  eq(again.built, true, 'layoutBuild 不一致时应重建')
+  eq(again.doc.layoutBuild, layoutModule.LAYOUT_BUILD, '重建后带上当前构建版本')
+})
+
 await check('段落 hash 稳定（译文能对上）', async () => {
   const first = await docModule.getDoc(id, { rebuild: true })
   const second = await docModule.getDoc(id, { rebuild: true })
@@ -159,6 +184,17 @@ await check('figures.list 用版面的图/表清单', async () => {
   eq(figures[0].label, 1, '图注编号')
 })
 
+await check('先有 PyMuPDF 的 figures.json，跑完版面后必须换成版面清单', async () => {
+  // 旧规则清单（1 张不在 layout 里的图），source 与当前 PDF 一致 —— 曾经的实现会一直返回它
+  const cached = { version: 1, source: { path: stat.path || copy, size: stat.size, mtimeMs: stat.mtimeMs }, figures: [
+    { page: 1, x: 10, y: 10, x2: 60, y2: 60, width: 50, height: 50, index: 1, caption: null, label: null, kind: 'figure' },
+  ] }
+  await store.writeJsonAtomic(store.paperFile(id, 'figures.json'), cached)
+  const figures = await figuresModule.listFigures(id)
+  eq(figures.length, 2, '应该用版面清单（2 项），实际 ' + figures.length)
+  eq([figures[0].attachOrder, figures[1].attachOrder], [2, 6], 'attachOrder 来自版面块')
+})
+
 await check('版面与 PDF 对不上时退回文本层', async () => {
   // 把 layout.source 改小，模拟「PDF 换过版本」
   const stale = { ...layout, at: '2026-01-02T00:00:00.000Z', source: { ...layout.source, size: 1 } }
@@ -168,6 +204,19 @@ await check('版面与 PDF 对不上时退回文本层', async () => {
   const built = await docModule.getDoc(id, { rebuild: true })
   ok(built.doc.source !== 'layout', '过期版面不应被使用，实际 ' + built.doc.source + ' built=' + built.built)
   ok(built.doc.paragraphs.length > 8, '文本层路线段落应远多于 8，实际 ' + built.doc.paragraphs.length)
+})
+
+await check('版面被清掉后 figures 不能还挂着版面清单', async () => {
+  // 前面的用例把 layout.source 改坏了，这里先恢复一份对得上的版面
+  await store.writeJsonAtomic(store.paperFile(id, layoutModule.LAYOUT_FILE), layout)
+  const fromLayout = await figuresModule.listFigures(id, { refresh: true })
+  eq(fromLayout.length, 2, '版面清单应为 2 项')
+  await layoutModule.createLayout({ store, pdf: null, ocr: null }).clearLayout(id)
+  docModule.invalidateDocCache(id, { dropDoc: true })
+  const layoutExists = await fsp.access(store.paperFile(id, layoutModule.LAYOUT_FILE)).then(() => true, () => false)
+  const figures = await figuresModule.listFigures(id)
+  ok(figures.every(item => item.attachOrder === null || item.attachOrder === undefined),
+    '版面清掉后不应再有 attachOrder（layout.json exists=' + layoutExists + '）：' + JSON.stringify(figures.slice(0, 2)))
 })
 
 await check('没有 layout.json 时也能正常建模', async () => {

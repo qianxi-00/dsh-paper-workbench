@@ -485,7 +485,9 @@ def _to_native(page, rect):
     value = fitz.Rect(rect)
     if getattr(page, "rotation", 0):
         value = value * page.derotation_matrix
-    return value & page.rect
+    # 收口要用原生页框：page.rect 在旋转页是显示尺寸，会把原生 x 超出显示宽的那条带裁空
+    width, height = _native_size(page)
+    return value & fitz.Rect(0, 0, width, height)
 
 
 def _inside(rect, regions, ratio=0.55):
@@ -648,6 +650,13 @@ def cmd_figures(args):
             page_h = float(page.rect.height)
             regions = (_figure_regions(info, body_size, repeated)
                        + _table_regions(info, body_size, repeated))
+            # 没有图注的位图（照片、示意图、整页扫描）也要算：旧版按 get_image_info 出，
+            # 只认图注会让它们从列表里消失。已被现有区域覆盖的就不再加
+            for box in _image_boxes(page):
+                if any((box & fitz.Rect(region["rect"])).get_area() / max(1.0, box.get_area()) > 0.6
+                       for region in regions):
+                    continue
+                regions.append({"rect": tuple(box), "kind": "figure", "label": None, "caption": ""})
             # 同一页上重复/相交的区域合并，避免一张图出好几条
             entries, seen = [], set()
             for region in regions:
@@ -819,6 +828,11 @@ def cmd_text(args):
                 "n": number,
                 "w": round(float(rect.width), 2),
                 "h": round(float(rect.height), 2),
+                # 原生（未旋转）尺寸与变换矩阵：行/区域都在原生坐标里算，
+                # 输出前再用 _to_rendered 换成渲染坐标，两套坐标不能混
+                "wn": info["wn"],
+                "hn": info["hn"],
+                "matrix": info["matrix"],
                 "page": page,
                 "lines": info["lines"],
             })
@@ -826,11 +840,15 @@ def cmd_text(args):
         body_size = _doc_body_size(prepared)
         repeated = _repeated_keys(prepared, 842.0)
         for item in prepared:
-            item["regions"] = (_figure_regions(item, body_size, repeated)
-                               + _table_regions(item, body_size, repeated))
+            # 区域几何与文本行都在原生坐标里，这里临时去掉 matrix 再算
+            native_item = {**item, "matrix": None, "h": item.get("hn") or item["h"]}
+            item["regions"] = (_figure_regions(native_item, body_size, repeated)
+                               + _table_regions(native_item, body_size, repeated))
 
         pages = []
         for item in prepared:
+            # 页眉/页脚阈值必须用原生页高：旋转页的 page.rect 是显示尺寸，
+            # 拿 0.92×显示高去比原生 y，页脚永远判不掉
             page, height = item["page"], item.get("hn") or item["h"] or 842.0
             regions = item["regions"]
             page_body = _page_body_size(item, body_size)
@@ -1035,14 +1053,19 @@ def cmd_page_lines(args):
             raise ArgsError("page 必须是整数") from None
         if number < 1 or number > doc.page_count:
             raise ArgsError(f"页码超出范围：{number}（共 {doc.page_count} 页）")
-        info = _page_info(doc.load_page(number - 1))
+        page = doc.load_page(number - 1)
+        info = _page_info(page)
         lines = []
         for line in info["lines"]:
-            rect = line["rect"]
+            # 与 cmd_text / clip_text 统一成渲染坐标：调用方（lib/layout.js）拿块 bbox
+            # 按块页面的 w/h 缩放，两套坐标混用会让旋转页整页错位
+            rect = _to_rendered(info, line["rect"])
             lines.append({"x": round(float(rect.x0), 2), "y": round(float(rect.y0), 2),
                           "x2": round(float(rect.x1), 2), "y2": round(float(rect.y1), 2),
                           "size": line["size"], "bold": line["bold"], "text": line["text"]})
-        return {"ok": True, "page": number, "width": info["wn"], "height": info["hn"],
+        return {"ok": True, "page": number,
+                "width": round(float(page.rect.width), 2),
+                "height": round(float(page.rect.height), 2),
                 "lines": lines}
     finally:
         doc.close()
@@ -1088,9 +1111,15 @@ def cmd_split(args):
     doc = open_doc(args)
     try:
         total = int(doc.page_count)
+        raw_first = args.get("from")
+        raw_last = args.get("to")
+        # 不能用 `or`：from=0 会被悄悄当成 1，2.9 会被截成 2，切片就会重复/漏页
+        for value in (raw_first, raw_last):
+            if isinstance(value, float) and not value.is_integer():
+                raise ArgsError("from/to 必须是整数")
         try:
-            first = int(args.get("from") or 1)
-            last = int(args.get("to") or total)
+            first = total if raw_first is None else int(raw_first)
+            last = total if raw_last is None else int(raw_last)
         except (TypeError, ValueError):
             raise ArgsError("from/to 必须是整数") from None
         if first < 1 or last > total or first > last:
@@ -1166,7 +1195,16 @@ def _table_payload(table, info):
         return None
     if len(rows) < 2 or len(rows[0]) < 2:
         return None
-    rect = _to_rendered(info, fitz.Rect(table.bbox))
+    raw = fitz.Rect(table.bbox)
+    page = info["page"]
+    if getattr(page, "rotation", 0):
+        # PyMuPDF 1.26 的 find_tables 在 /Rotate 页已经返回渲染坐标；
+        # 再乘一次 rotation_matrix 会被 page.rect 裁掉一半。取「落在页内且面积大」的那个。
+        converted = _to_rendered(info, raw) & page.rect
+        direct = raw & page.rect
+        rect = converted if converted.get_area() >= direct.get_area() else direct
+    else:
+        rect = _to_rendered(info, raw)
     return {
         "bbox": [round(float(rect.x0), 2), round(float(rect.y0), 2),
                  round(float(rect.x1), 2), round(float(rect.y1), 2)],
@@ -1360,10 +1398,102 @@ def self_test():
         zh_doc.close()
     if "sample image" in zh_text:
         return fail("zhpdf 检查失败：原来的英文还在（没擦掉）")
+    # 只断言「英文没了」是不够的：放不下时 PyMuPDF 一个字符都不写，会擦完留空白
+    if "示例图片" not in zh_text:
+        return fail(f"zhpdf 检查失败：中文没写进去（{zh_text[:40]!r}）")
+
+    # 页底放不下的长译文：必须整段跳过（保留英文），不能擦完变成空白
+    long_zh = "这是一段故意写得很长的译文，" * 12
+    zh_bottom_pdf = base / "pb-selftest-zh-bottom.pdf"
+    bottom = cmd_zhpdf({"path": str(sample), "out": str(zh_bottom_pdf), "pages": [{
+        "n": 1,
+        "blocks": [{
+            "rect": [72, 292, 328, 302],
+            "source": "Figure 1: sample image",
+            "text": long_zh,
+        }],
+    }]})
+    if not bottom.get("ok") or bottom.get("blocks") != 0 or bottom.get("skipped") != 1:
+        return fail(f"zhpdf 页底长译文应整段跳过：{bottom.get('blocks')}/{
+            bottom.get('skipped')}")
+    bottom_doc = fitz.open(str(zh_bottom_pdf))
+    try:
+        bottom_text = bottom_doc[0].get_text()
+    finally:
+        bottom_doc.close()
+    if "sample image" not in bottom_text:
+        return fail("zhpdf 页底长译文：既没写中文也把英文擦掉了")
     zh_png = base / "pb-selftest-zh.png"
     zh_render = cmd_render({"path": str(zh_pdf), "page": 1, "scale": 1.0, "out": str(zh_png)})
     if not zh_render.get("ok") or not _png_bytes(zh_png).startswith(b"\x89PNG\r\n\x1a\n"):
         return fail(f"zhpdf 渲染检查失败：{zh_render.get('error') or '不是有效 PNG'}")
+    # 旋转页：text / page_lines 必须输出同一套（渲染）坐标，zhpdf 也要能把中文写进去
+    rot_pdf = base / "pb-selftest-rot.pdf"
+    rot_doc = fitz.open(str(sample))
+    rot_doc[0].set_rotation(90)
+    rot_doc.save(str(rot_pdf))
+    rot_doc.close()
+    rot_text = cmd_text({"path": str(rot_pdf), "pages": [1]})
+    rot_page = (rot_text.get("pages") or [{}])[0]
+    if (not rot_text.get("ok") or abs(float(rot_page.get("w", 0)) - 360) > 1
+            or abs(float(rot_page.get("h", 0)) - 400) > 1):
+        return fail(f"旋转页 text 尺寸不对：{rot_page.get('w')}x{rot_page.get('h')}")
+    for item in rot_page.get("blocks") or []:
+        if (item["x"] < -1 or item["y"] < -1
+                or item["x2"] > float(rot_page["w"]) + 1 or item["y2"] > float(rot_page["h"]) + 1):
+            return fail(f"旋转页块坐标超出页面：{item}")
+    rot_lines = cmd_page_lines({"path": str(rot_pdf), "page": 1})
+    if (not rot_lines.get("ok")
+            or abs(float(rot_lines.get("width", 0)) - float(rot_page["w"])) > 1
+            or abs(float(rot_lines.get("height", 0)) - float(rot_page["h"])) > 1):
+        return fail(f"旋转页 page_lines 与 text 坐标系不一致：{rot_lines.get('width')}x{rot_lines.get('height')}")
+    rot_zh_pdf = base / "pb-selftest-rot-zh.pdf"
+    rot_zh = cmd_zhpdf({"path": str(rot_pdf), "out": str(rot_zh_pdf), "pages": [{
+        "n": 1,
+        "blocks": [{
+            "rect": [0, 0, float(rot_page["w"]), float(rot_page["h"])],
+            "source": "Self Test Title",
+            "text": "自检标题",
+        }],
+    }]})
+    if not rot_zh.get("ok") or rot_zh.get("blocks") != 1:
+        return fail(f"旋转页 zhpdf 失败：{rot_zh.get('error') or rot_zh.get('skipped')}")
+    rot_zh_doc = fitz.open(str(rot_zh_pdf))
+    try:
+        rot_zh_text = rot_zh_doc[0].get_text()
+    finally:
+        rot_zh_doc.close()
+    if "自检标题" not in rot_zh_text:
+        return fail(f"旋转页 zhpdf 中文没写进去（{rot_zh_text[:40]!r}）")
+
+    # 同页重复文本：块 rect 指向第二处时，中文必须落在第二处
+    dup_path = base / "pb-selftest-dup.pdf"
+    dup_doc = fitz.open()
+    dup_page = dup_doc.new_page(width=400, height=500)
+    dup_page.insert_text((50, 100), "Duplicate sentence here.", fontsize=12)
+    dup_page.insert_text((50, 400), "Duplicate sentence here.", fontsize=12)
+    dup_doc.save(str(dup_path))
+    dup_doc.close()
+    dup_out = base / "pb-selftest-dup-zh.pdf"
+    dup = cmd_zhpdf({"path": str(dup_path), "out": str(dup_out), "pages": [{
+        "n": 1,
+        "blocks": [{
+            "rect": [45, 386, 360, 404],
+            "source": "Duplicate sentence here.",
+            "text": "这里重复出现的一句话。",
+        }],
+    }]})
+    if not dup.get("ok") or dup.get("blocks") != 1:
+        return fail(f"重复文本 zhpdf 失败：{dup.get('error') or dup.get('skipped')}")
+    dup_result = fitz.open(str(dup_out))
+    try:
+        top = dup_result[0].get_text(clip=fitz.Rect(20, 80, 380, 120))
+        bottom = dup_result[0].get_text(clip=fitz.Rect(20, 380, 380, 420))
+    finally:
+        dup_result.close()
+    if "这里重复出现的一句话" not in bottom or "Duplicate sentence" not in top:
+        return fail(f"重复文本写错了位置：top={top!r} bottom={bottom!r}")
+
     checks = [f"info: pages={pages} hasText={info['hasText']} toc={len(info['toc'])}",
               f"text: page1 blocks={len(blocks)}",
               f"render: bytes={len(data)} {render['width']}x{render['height']}",
@@ -1375,6 +1505,8 @@ def self_test():
               f"page_lines: {len(line_items)} lines {lines['width']}x{lines['height']}",
               f"split: pages={split['pages']} bytes={cut.stat().st_size}",
               f"zhpdf: {zh['blocks']} blocks text={zh['pages']}pp size={zh_pdf.stat().st_size}",
+              f"rotated: text={rot_page['w']}x{rot_page['h']} lines={rot_lines['width']}x{rot_lines['height']} zh={rot_zh['blocks']}",
+              f"duplicate text: {dup['blocks']} block placed at the given rect",
               f"sample={sample}"]
     return {"ok": True, "checks": checks, "ms": int((time.perf_counter() - started) * 1000)}
 
@@ -1409,29 +1541,43 @@ def _similarity(a, b):
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-def _match_block_lines(source, lines, taken=None):
+def _line_near(rect, box, pad=8.0):
+    """这一行是不是落在块框附近（块框本身有十几 pt 偏移，所以放宽一点）。"""
+    centre_y = (rect.y0 + rect.y1) / 2
+    centre_x = (rect.x0 + rect.x1) / 2
+    if box.y0 - pad <= centre_y <= box.y1 + pad and box.x0 - pad <= centre_x <= box.x1 + pad:
+        return True
+    overlap = min(box.y1, rect.y1) - max(box.y0, rect.y0)
+    return overlap >= max(2.0, (rect.y1 - rect.y0) * 0.7)
+
+
+def _match_block_lines(source, lines, taken=None, box=None):
     """把块对回 PDF 的真实行。
 
-    块文字是这些行按顺序拼出来的，所以「按内容找一段连续行」比按坐标靠谱。
-    为了不让相似的短块互相抢行：调用方按 y 从上到下处理，已经认领过的行跳过。
+    块文字是这些行按顺序拼出来的，所以「按内容找一段连续行」比按坐标靠谱；
+    但同一页可能有完全相同的句子（页眉、表头、重复图注），所以先按块框收窄候选，
+    再按分数 + 到块框中心的距离决胜，避免把中文写到另一处一模一样的文字上。
     """
     target = _norm_text(source)
     if len(target) < 4 or not lines:
         return []
     guard = taken if taken is not None else set()
+    centre_y = (box.y0 + box.y1) / 2 if box is not None else 0.0
     starts = []
     for index, line in enumerate(lines):
         if index in guard:
+            continue
+        if box is not None and not _line_near(line["rect"], box):
             continue
         head = _norm_text(line["text"])
         if len(head) < 4:
             continue
         probe = head[: min(len(head), 24)]
-        # 用开头一小段在块文字里找位置：找到了才可能是这一段的第一行
         pos = target.find(probe)
         if pos >= 0:
+            # 从这一行开始拼，只接受和块文字前半段对得上的起点
             starts.append((index, pos))
-    best = (0.0, None)
+    best = (0.0, None, float("inf"))
     for index, pos in starts:
         acc = ""
         picked = []
@@ -1449,8 +1595,11 @@ def _match_block_lines(source, lines, taken=None):
             if len(acc) < len(target) * 0.6:
                 continue
             score = _similarity(acc, target)
-            if score > best[0]:
-                best = (score, list(picked))
+            if score >= 0.62:
+                first = picked[0]["rect"]
+                distance = abs(((first.y0 + first.y1) / 2) - centre_y) if box is not None else 0.0
+                if score > best[0] + 1e-6 or (abs(score - best[0]) <= 1e-6 and distance < best[2]):
+                    best = (score, list(picked), distance)
             if score >= 0.995:
                 break
     return best[1] if best[0] >= 0.62 else []
@@ -1461,7 +1610,6 @@ ZH_FONT_CANDIDATES = [
     "C:/Windows/Fonts/simhei.ttf",
     "C:/Windows/Fonts/Deng.ttf",
     "C:/Windows/Fonts/msyh.ttc",
-    "C:/Windows/Fonts/msyh.ttf",
     "C:/Windows/Fonts/simsun.ttc",
     "/System/Library/Fonts/PingFang.ttc",
     "/System/Library/Fonts/Supplemental/Songti.ttc",
@@ -1519,10 +1667,10 @@ def _fit_text(page, box, text, start_size, lineheight, fontname="china-s", font_
 def cmd_zhpdf(args):
     """把译文写回原版面，产出中文版 PDF（右栏渲染它就和原文逐页对齐）。
 
-    参数：{path, out, pages:[{n, blocks:[{rect:[x,y,x2,y2], text, size?}]}], lineheight?}
+    参数：{path, out, pages:[{n, blocks:[{rect:[x,y,x2,y2], text, source?}]}], lineheight?}
     做法：每个块先用 PDF 自己的文本行定位（不信版面模型 bbox 的几 pt 偏移），
-    redact 掉那些行（保留图片/矢量图），再把中文写进同一块行框。
-    只用 PyMuPDF 内置简体中文字体 china-s，不依赖系统字体。
+    先在草稿页上确认译文放得下，再 redact 掉那些行（保留图片/矢量图）并写回中文。
+    先擦后试是不可逆的：放不下就整段跳过，绝不让英文被擦掉而中文没写上。
     """
     doc = open_doc(args)
     try:
@@ -1551,37 +1699,45 @@ def cmd_zhpdf(args):
             blocks = item.get("blocks")
             if not isinstance(blocks, list) or not blocks:
                 continue
-            lines = _page_text_lines(page)
-            erases = []
-            draws = []
-            claimed = set()          # 行下标：一行只归一个块，避免两块抢同一行（文字叠在一起）
-            ordered = [b for b in blocks if isinstance(b, dict)]
-            ordered.sort(key=lambda b: (float((b.get('rect') or [0, 0])[1] or 0), float((b.get('rect') or [0])[0] or 0)))
-            for block in ordered:
+            # 先把块规范化（坏 rect 在这里就丢掉），再按 y 排序 —— 排序键不能先于校验
+            prepared = []
+            for block in blocks:
                 if not isinstance(block, dict):
+                    skipped += 1
                     continue
                 rect = block.get("rect")
                 text = str(block.get("text") or "").strip()
-                # source 是这一块的原文（用来对上 PDF 的真实行），text 是译文（写回去的）
                 source = str(block.get("source") or "").strip() or text
                 if not isinstance(rect, list) or len(rect) != 4 or text == "":
                     skipped += 1
                     continue
                 try:
-                    box = fitz.Rect(float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+                    values = [float(value) for value in rect]
                 except (TypeError, ValueError):
                     skipped += 1
                     continue
-                box = (box * page.derotation_matrix) & page.rect
+                prepared.append({"rect": values, "text": text, "source": source})
+            prepared.sort(key=lambda block: (block["rect"][1], block["rect"][0]))
+            if not prepared:
+                continue
+
+            native = fitz.Rect(0, 0, *_native_size(page))
+            lines = _page_text_lines(page)
+            claimed = set()          # 行下标：一行只归一个块，避免两块抢同一行（文字叠在一起）
+            erases = []
+            draws = []
+            for block in prepared:
+                box = fitz.Rect(*block["rect"]) * page.derotation_matrix
+                box = box & native          # 收口用原生页框（旋转页的 page.rect 是显示尺寸）
                 if box.is_empty or box.width <= 1 or box.height <= 1:
                     skipped += 1
                     continue
-                cluster = _match_block_lines(source, lines, claimed)
+                cluster = _match_block_lines(block["source"], lines, claimed, box)
                 if not cluster:
                     skipped += 1                       # 一行都对不上就别乱擦
                     continue
                 for index, line in enumerate(lines):
-                    if any(line is item for item in cluster):
+                    if any(line is picked for picked in cluster):
                         claimed.add(index)
                 union = cluster[0]["rect"]
                 for line in cluster[1:]:
@@ -1597,8 +1753,28 @@ def cmd_zhpdf(args):
                 erase = fitz.Rect(union.x0 - 1.2, union.y0 - 1.2, union.x1 + 1.2, union.y1 + 1.2)
                 sizes = [line["size"] for line in cluster if line["size"] > 0]
                 base = sum(sizes) / len(sizes) if sizes else max(7.5, union.height / len(cluster) * 0.75)
+                # 先试排：排不下就不擦（擦除不可逆，宁可留着英文）
+                size, fits = _fit_text(page, erase, block["text"], base, lineheight, font_name, font_file)
+                target = erase
+                if not fits:
+                    # 往下借空白，但不能压到已经算好的下一块
+                    limit = native.y1 - 6
+                    for other in prepared:
+                        other_box = fitz.Rect(*other["rect"]) * page.derotation_matrix
+                        if other_box.y0 > erase.y1 + 1:
+                            limit = min(limit, other_box.y0 - 2)
+                    extra = min(28.0, max(0.0, limit - erase.y1))
+                    if extra > 2:
+                        target = fitz.Rect(erase.x0, erase.y0, erase.x1, erase.y1 + extra)
+                        size, fits = _fit_text(page, target, block["text"], base, lineheight, font_name, font_file)
+                if not fits:
+                    # 擦不了也放不下：整段跳过，保留英文，并在统计里体现出来
+                    skipped += 1
+                    for index in [i for i, line in enumerate(lines) if any(line is picked for picked in cluster)]:
+                        claimed.discard(index)
+                    continue
                 erases.append(erase)
-                draws.append((erase, text, base))
+                draws.append((target, block["text"], size))
             if not draws:
                 continue
             for erase in erases:
@@ -1609,7 +1785,7 @@ def cmd_zhpdf(args):
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
             # 有些 PDF 把标题画成了路径/内嵌图形，redact 擦不掉（文字层里也没有）。
             # 在写字前先铺一层白底，残字就不会和中文叠在一起。
-            for box, _text, _base in draws:
+            for box, _text, _size in draws:
                 page.draw_rect(box, color=None, fill=(1, 1, 1), overlay=True)
             if font_file:
                 try:
@@ -1617,18 +1793,13 @@ def cmd_zhpdf(args):
                 except Exception:
                     font_file = ""
                     font_name = "china-s"
-            for box, text, base in draws:
-                size, fits = _fit_text(page, box, text, base, lineheight, font_name, font_file)
-                target = box
-                if not fits:
-                    # 放不下就往下借空间：只要下一行以下的空白够，就扩到那儿
-                    below = page.rect.y1 - box.y1
-                    extra = min(28.0, max(0.0, below - 8))
-                    if extra > 2:
-                        target = fitz.Rect(box.x0, box.y0, box.x1, box.y1 + extra)
-                        size, fits = _fit_text(page, target, text, base, lineheight, font_name, font_file)
-                page.insert_textbox(target, text, fontname=font_name, fontsize=size,
-                                    lineheight=lineheight, align=0, color=(0, 0, 0))
+            for box, text, size in draws:
+                rc = page.insert_textbox(box, text, fontname=font_name, fontsize=size,
+                                         lineheight=lineheight, align=0, color=(0, 0, 0))
+                if rc < 0:
+                    # 试排和真页有细微差异时可能出现：别把它算成写成功
+                    skipped += 1
+                    continue
                 written += 1
         # 中文字体会整份嵌进去（好几 MB），能子集化就子集化；PyMuPDF 版本差异大，失败就算了
         try:

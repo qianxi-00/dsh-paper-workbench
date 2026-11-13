@@ -1,6 +1,6 @@
 {
   "name": "dsh-paper-workbench",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "论文对照阅读器 + 面板内翻译与对话 + 可选版面模型（PP-StructureV3）",
   "type": "module",
   "main": "lib/index.js",

@@ -721,7 +721,9 @@ function translatableParagraphs(sectionIds) {
   const allowed = sectionIds && sectionIds.length > 0 ? new Set(sectionIds) : null
   return doc.paragraphs.filter((paragraph) => {
     if (!paragraph.hash) return false
-    if (paragraph.kind === 'formula') return false // 公式/表格段不翻
+    // 与 lib/ai.js 的 SKIP_TRANSLATE_KINDS 保持一致：公式/图/表不送翻译，
+    // 否则进度条会一直差这几段、章节永远不满、重试也发不出去
+    if (paragraph.kind === 'formula' || paragraph.kind === 'figure' || paragraph.kind === 'table') return false
     if (!allowed) return true
     const sectionId = paragraph.section && sections.some((section) => section.id === paragraph.section) ? paragraph.section : sections[0] && sections[0].id
     return allowed.has(sectionId)
@@ -2425,22 +2427,29 @@ async function toggleZhPdf() {
     needRestart()
     return
   }
+  const id = meta.id
+  const stillHere = () => Boolean(state.current && state.current.meta.id === id)
   state.zhBusy = true
   try {
     let status = state.zhStatus
-    if (!status) status = await rpc('zhpdf.status', { id: meta.id })
+    if (!status) status = await rpc('zhpdf.status', { id })
+    if (!stillHere()) return
     if (!status.exists) {
       const ok = window.confirm('生成中文版 PDF：把已翻译的段落写回原来的版面，和原文逐页对齐。\n纯本地处理，不上传、不花钱；没翻译的段落保留原文。继续？')
       if (!ok) return
-      const result = await rpc('zhpdf.build', { id: meta.id })
+      const result = await rpc('zhpdf.build', { id })
+      if (!stillHere()) return
       toast('中文版已生成：' + result.blocks + ' 段，' + (result.skipped ? result.skipped + ' 段没对上原文（保留英文）' : '全部替换'))
-      status = await rpc('zhpdf.status', { id: meta.id })
+      status = await rpc('zhpdf.status', { id })
+      if (!stillHere()) return
     } else if (status.stale) {
       const again = window.confirm('有新的译文，中文版还是上次的。要重新生成吗？（纯本地，很快）')
       if (again) {
-        const result = await rpc('zhpdf.build', { id: meta.id })
+        const result = await rpc('zhpdf.build', { id })
+        if (!stillHere()) return
         toast('中文版已更新：' + result.blocks + ' 段')
-        status = await rpc('zhpdf.status', { id: meta.id })
+        status = await rpc('zhpdf.status', { id })
+        if (!stillHere()) return
       }
     }
     state.zhStatus = status
@@ -2449,7 +2458,8 @@ async function toggleZhPdf() {
   } catch (error) {
     toast(error.message)
   } finally {
-    state.zhBusy = false
+    // 切走了就别动新论文的 busy 标记
+    if (stillHere()) state.zhBusy = false
   }
 }
 
@@ -3813,6 +3823,20 @@ function stopLayoutPoll() {
  * 早先是「发一个请求一直等到结束」，面板一关/一切走，前端就不再听结果了
  * （服务端还在跑，但界面上看起来像死了，且失败时什么都不知道）。
  */
+function paintLayoutButton() {
+  const button = document.getElementById('layout-run')
+  if (!button) return
+  button.disabled = !(state.doc && state.current) || !hostReady()
+  button.className = 'ghost' + (state.layoutResumable && !state.layoutBusy ? ' dirty' : '')
+  button.onclick = state.layoutBusy ? cancelLayoutParse : runLayoutParse
+  button.textContent = state.layoutBusy
+    ? '解析中… ' + ((state.layoutJob && state.layoutJob.pages) || 0) + '/' + ((state.layoutJob && state.layoutJob.totalPages) || '?')
+    : state.layoutResumable ? '续跑版面 ' + state.layoutSavedPages + ' 页' : '版面'
+  if (state.layoutJob && state.layoutBusy && state.layoutJob.stage) {
+    button.title = state.layoutJob.stage
+  }
+}
+
 async function pollLayoutJob(id) {
   stopLayoutPoll()
   const tick = async () => {
@@ -3823,7 +3847,18 @@ async function pollLayoutJob(id) {
     let status = null
     try {
       status = await rpc('layout.status', { id })
-    } catch {
+    } catch (error) {
+      // 宿主重启 / 一次 500 都会到这里：不复位的话按钮永远停在「解析中…」
+      stopLayoutPoll()
+      if (state.current && state.current.meta.id === id) {
+        state.layoutBusy = false
+        render()
+        toast('查版面进度失败：' + (error && error.message ? error.message : error))
+      }
+      return
+    }
+    // 请求在飞的时候可能已经切了论文：别把上一篇的状态写到新论文上
+    if (!state.current || state.current.meta.id !== id) {
       stopLayoutPoll()
       return
     }
@@ -3831,7 +3866,10 @@ async function pollLayoutJob(id) {
     state.layoutJob = job || null
     state.layoutResumable = Boolean(status && status.resumable)
     state.layoutSavedPages = (status && status.savedPages) || 0
-    if (!job || job.state === 'done' || job.state === 'failed' || job.state === 'cancelled') {
+    // interrupted 也是终态：磁盘上写着 running 但进程已经重启过，再轮询也等不到结果
+    const settled = !job || job.state === 'done' || job.state === 'failed' ||
+      job.state === 'cancelled' || job.state === 'interrupted'
+    if (settled) {
       state.layoutBusy = false
       stopLayoutPoll()
       render()
@@ -3844,7 +3882,9 @@ async function pollLayoutJob(id) {
       return
     }
     state.layoutBusy = job.state === 'running'
-    render()
+    // 不要每 2 秒整页重绘：那会把正在读的选区、滚动和输入框都掀掉。
+    // 只改按钮自己的文字/状态，等任务结束再整体 render。
+    paintLayoutButton()
     layoutPollTimer = setTimeout(tick, 2000)
   }
   await tick()
@@ -3893,8 +3933,15 @@ async function cancelLayoutParse() {
   const meta = state.current && state.current.meta
   if (!meta) return
   try {
-    await rpc('layout.cancel', { id: meta.id })
-    toast('已请求取消：当前这一批跑完就停，已完成的页会留着')
+    const result = await rpc('layout.cancel', { id: meta.id })
+    if (result && result.cancelled) {
+      toast('已请求取消：当前这一批跑完就停，已完成的页会留着')
+    } else {
+      // 任务可能已经结束/被重启清掉了：把按钮复位，别让它一直显示「解析中…」
+      state.layoutBusy = false
+      render()
+      toast('没有正在跑的版面任务（可能已经结束）')
+    }
   } catch (error) {
     toast('取消失败：' + error.message)
   }

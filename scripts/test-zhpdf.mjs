@@ -6,7 +6,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { createZhPdf, zhPagesFromDoc, ZH_FILE } from '../lib/zhpdf.js'
+import { createZhPdf, transFingerprint, zhPagesFromDoc, ZH_FILE, ZH_META } from '../lib/zhpdf.js'
 
 let pass = 0
 let fail = 0
@@ -84,11 +84,29 @@ equal('build：payload 每段都有原文和译文',
 
 const status = await runner.status('paper-z')
 check('status：存在且有大小', status.exists === true && status.size > 0)
+equal('status：没有 generating 记录时报出块数/页数', [status.blocks, status.pages], [3, 3])
+check('status：生成记录里存的是当前译文指纹',
+  JSON.parse(fs.readFileSync(path.join(paperDir, ZH_META), 'utf8')).transHash === transFingerprint(trans))
+check('status：刚生成完不算过期', status.stale === false)
+
 check('status：doc.json 更新后判定为过期',
   await (async () => {
     fs.writeFileSync(path.join(paperDir, 'doc.json'), '{}')
     const later = new Date(Date.now() + 2000)
     fs.utimesSync(path.join(paperDir, 'doc.json'), later, later)
+    return (await runner.status('paper-z')).stale === true
+  })())
+
+check('status：译文改了也判定为过期（不依赖 doc.json 时间）',
+  await (async () => {
+    const changed = { entries: { h1: { zh: '第一段（改过）。' }, h3: { zh: '第二段。' }, h5: { zh: '引言' } } }
+    const runner2 = createZhPdf({ store: { ...fakeStore, readTrans: async () => changed }, pdf: null })
+    return (await runner2.status('paper-z')).stale === true
+  })())
+
+check('status：没有生成记录的老文件算过期',
+  await (async () => {
+    fs.rmSync(path.join(paperDir, ZH_META), { force: true })
     return (await runner.status('paper-z')).stale === true
   })())
 
@@ -123,7 +141,8 @@ try {
 check('工具报错时带上原因', failure.includes('磁盘满了'), failure)
 
 await runner.clear('paper-z')
-check('clear 删掉文件', !fs.existsSync(path.join(paperDir, ZH_FILE)))
+check('clear 删掉文件与生成记录',
+  !fs.existsSync(path.join(paperDir, ZH_FILE)) && !fs.existsSync(path.join(paperDir, ZH_META)))
 
 fs.rmSync(root, { recursive: true, force: true })
 

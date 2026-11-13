@@ -410,6 +410,13 @@ equal('looksLikeFormulaText 带希腊字母的式子', looksLikeFormulaText('wer
 equal('looksLikeFormulaText 普通正文', looksLikeFormulaText('The predictor consists of two convolution layers, with the output being a float weight.'), false)
 equal('looksLikeFormulaText 带等号的正文句子', looksLikeFormulaText('The number of neighbours equals the batch size we used.'), false)
 equal('looksLikeFormulaText 空串', looksLikeFormulaText('   '), false)
+// 「公式后面跟一句 where α = …」很常见：不能因为长相像公式就把整句删掉
+equal('looksLikeFormulaText 公式旁的正文短句', looksLikeFormulaText('where α = 0.3, β = 0.7 and γ = 0.1'), false)
+const guarded = cleanLayoutBlocks([
+  { order: 0, page: 1, kind: 'body', text: 'where α = 0.3, β = 0.7 and γ = 0.1', bbox: { x: 10, y: 100, width: 200, height: 16 } },
+  { order: 1, page: 1, kind: 'formula', text: '', latex: '\\alpha+\\beta=\\gamma', bbox: { x: 40, y: 112, width: 150, height: 24 } },
+])
+equal('clean 不删公式旁的正文短句', [guarded.dropped, guarded.blocks.length], [0, 2])
 
 const cleanedBlocks = cleanLayoutBlocks([
   { order: 0, page: 1, kind: 'body', text: 'N X LNAT = log P (yn | X; θ) (2)', bbox: { x: 10, y: 100, width: 200, height: 16 } },
@@ -561,6 +568,66 @@ const tableReload = await tableRunner.readLayout('paper-t')
 check('表格：写进 layout.json', Boolean(tableReload.blocks[0].table) && tableReload.blocks[0].table.cols === 3)
 const refreshed = await tableRunner.refreshTables('paper-t')
 equal('refreshTables 只重算表格，不重新上传', [refreshed.tables, tableCalls.filter(item => item[0] === 'submit').length], [1, 0])
+const warningCount = refreshed.warnings.filter(text => String(text).includes('表格')).length
+const refreshedAgain = await tableRunner.refreshTables('paper-t')
+equal('refreshTables 不会把告警越堆越多',
+  [warningCount, refreshedAgain.warnings.filter(text => String(text).includes('表格')).length], [0, 0])
+
+// 同页两个 table 块：各自认领一张表，不能都拿同一张
+const dualRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-layout-dual-'))
+const dualDir = path.join(dualRoot, 'paper-d')
+fs.mkdirSync(dualDir, { recursive: true })
+const dualPdfPath = path.join(dualDir, 'paper.pdf')
+fs.writeFileSync(dualPdfPath, 'fake pdf dual')
+const dualStore = {
+  paperFile: (id, name) => path.join(dualRoot, id, name),
+  getMeta: async id => ({ id, title: '双表样例' }),
+  resolvePdf: async () => ({ path: dualPdfPath, meta: { id: 'paper-d' } }),
+  getConfig: async () => ({ ocr: { token: 'token-d', layoutModel: '' } }),
+  readJson: async (file, fallback) => {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return fallback }
+  },
+  writeJsonAtomic: async (file, value) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(value))
+  },
+}
+const dualPdf = {
+  callTool: async (command, payload) => {
+    if (command === 'info') return { ok: true, pages: 1, sizes: [A4] }
+    if (command === 'split') { fs.writeFileSync(payload.out, 'part'); return { ok: true } }
+    if (command === 'page_lines') return { ok: true, page: payload.page, lines: [] }
+    if (command === 'tables') {
+      return { ok: true, tables: [
+        { bbox: [72, 100, 500, 200], rows: [['A', '1'], ['B', '2']], cols: 2, rowCount: 2, headerRows: 1 },
+        { bbox: [72, 300, 500, 400], rows: [['C', '3'], ['D', '4']], cols: 2, rowCount: 2, headerRows: 1 },
+      ] }
+    }
+    throw new Error('未预期：' + command)
+  },
+}
+const dualOcr = {
+  submitJob: async () => ({ jobId: 'job-d' }),
+  pollJob: async () => ({ state: 'done', jsonUrl: 'http://example.com/d.jsonl' }),
+  fetchResults: async () => ({
+    pages: [],
+    skipped: 0,
+    text: JSON.stringify({ result: { layoutParsingResults: [{ prunedResult: {
+      ...SIZE_1191,
+      parsing_res_list: [
+        block('table', '', [140, 200, 1020, 400]),
+        block('table', '', [140, 580, 1020, 780]),
+      ],
+    } }] } }),
+  }),
+}
+const dualBuilt = await createLayout({ store: dualStore, pdf: dualPdf, ocr: dualOcr }).runLayout('paper-d')
+const dualTables = dualBuilt.blocks.filter(item => item.kind === 'table' && item.table)
+equal('同页两张表：两个块各拿到一张', dualTables.length, 2)
+check('同页两张表：内容不相同（没认领同一张）',
+  dualTables.length === 2 && dualTables[0].table.rows[0].cells[0].text !== dualTables[1].table.rows[0].cells[0].text,
+  JSON.stringify(dualTables.map(item => item.table && item.table.rows[0].cells[0].text)))
+fs.rmSync(dualRoot, { recursive: true, force: true })
 
 fs.rmSync(tableRoot, { recursive: true, force: true })
 
