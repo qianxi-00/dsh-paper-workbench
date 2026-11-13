@@ -3,7 +3,7 @@
 """DSH 论文工作台 · Python 侧 PDF 工具（单文件）。
 宿主以子进程调用（python assets/pdf_tool.py <command>，参数走 stdin JSON），
 stdout 只写一行 JSON；失败也尽量 exit 0。输入 PDF 只读，依赖标准库 + PyMuPDF。"""
-import contextlib, json, os, re, statistics, sys, tempfile, time, traceback
+import contextlib, difflib, json, os, re, statistics, sys, tempfile, time, traceback
 from pathlib import Path
 try:
     import fitz  # PyMuPDF
@@ -1341,6 +1341,29 @@ def self_test():
     split = cmd_split({"path": str(sample), "from": 1, "to": 1, "out": str(cut)})
     if not split.get("ok") or split.get("pages") != 1 or not cut.is_file():
         return fail(f"split 检查失败：{split.get('error') or '没有生成切片'}")
+    # 中文版：把一段英文换成中文，原位置写回，且原来的英文必须消失
+    zh_pdf = base / "pb-selftest-zh.pdf"
+    zh = cmd_zhpdf({"path": str(sample), "out": str(zh_pdf), "pages": [{
+        "n": 1,
+        "blocks": [{
+            "rect": [72, 270, 328, 302],
+            "source": "Figure 1: sample image",
+            "text": "图 1：示例图片",
+        }],
+    }]})
+    if not zh.get("ok") or zh.get("blocks") != 1 or not zh_pdf.is_file():
+        return fail(f"zhpdf 检查失败：{zh.get('error') or f'替换了 {zh.get('blocks')} 段'}")
+    zh_doc = fitz.open(str(zh_pdf))
+    try:
+        zh_text = zh_doc[0].get_text()
+    finally:
+        zh_doc.close()
+    if "sample image" in zh_text:
+        return fail("zhpdf 检查失败：原来的英文还在（没擦掉）")
+    zh_png = base / "pb-selftest-zh.png"
+    zh_render = cmd_render({"path": str(zh_pdf), "page": 1, "scale": 1.0, "out": str(zh_png)})
+    if not zh_render.get("ok") or not _png_bytes(zh_png).startswith(b"\x89PNG\r\n\x1a\n"):
+        return fail(f"zhpdf 渲染检查失败：{zh_render.get('error') or '不是有效 PNG'}")
     checks = [f"info: pages={pages} hasText={info['hasText']} toc={len(info['toc'])}",
               f"text: page1 blocks={len(blocks)}",
               f"render: bytes={len(data)} {render['width']}x{render['height']}",
@@ -1351,14 +1374,288 @@ def self_test():
               f"clip_text: {len(clip_texts)} rects title={clip_texts[0][:24]!r}",
               f"page_lines: {len(line_items)} lines {lines['width']}x{lines['height']}",
               f"split: pages={split['pages']} bytes={cut.stat().st_size}",
+              f"zhpdf: {zh['blocks']} blocks text={zh['pages']}pp size={zh_pdf.stat().st_size}",
               f"sample={sample}"]
     return {"ok": True, "checks": checks, "ms": int((time.perf_counter() - started) * 1000)}
+
+
+def _page_text_lines(page):
+    """页面上真实的文本行（PDF 原生坐标，未旋转）：用它们定位/擦除，比信版面模型的 bbox 准。"""
+    lines = []
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            spans = [span for span in line.get("spans", []) if str(span.get("text") or "").strip()]
+            if not spans:
+                continue
+            text = "".join(str(span.get("text") or "") for span in spans).strip()
+            if text == "":
+                continue
+            sizes = [float(span.get("size") or 0) for span in spans if float(span.get("size") or 0) > 0]
+            lines.append({
+                "rect": fitz.Rect(line["bbox"]),
+                "text": text,
+                "size": (sum(sizes) / len(sizes)) if sizes else 0.0,
+            })
+    return lines
+
+
+def _norm_text(value):
+    return re.sub(r"\s+", "", str(value or "")).lower()
+
+
+def _similarity(a, b):
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def _match_block_lines(source, lines, taken=None):
+    """把块对回 PDF 的真实行。
+
+    块文字是这些行按顺序拼出来的，所以「按内容找一段连续行」比按坐标靠谱。
+    为了不让相似的短块互相抢行：调用方按 y 从上到下处理，已经认领过的行跳过。
+    """
+    target = _norm_text(source)
+    if len(target) < 4 or not lines:
+        return []
+    guard = taken if taken is not None else set()
+    starts = []
+    for index, line in enumerate(lines):
+        if index in guard:
+            continue
+        head = _norm_text(line["text"])
+        if len(head) < 4:
+            continue
+        probe = head[: min(len(head), 24)]
+        # 用开头一小段在块文字里找位置：找到了才可能是这一段的第一行
+        pos = target.find(probe)
+        if pos >= 0:
+            starts.append((index, pos))
+    best = (0.0, None)
+    for index, pos in starts:
+        acc = ""
+        picked = []
+        cursor = index
+        while cursor < len(lines) and len(acc) < len(target) * 1.2:
+            if cursor in guard:
+                cursor += 1
+                continue
+            nxt = _norm_text(lines[cursor]["text"])
+            cursor += 1
+            if nxt == "":
+                continue
+            acc += nxt
+            picked.append(lines[cursor - 1])
+            if len(acc) < len(target) * 0.6:
+                continue
+            score = _similarity(acc, target)
+            if score > best[0]:
+                best = (score, list(picked))
+            if score >= 0.995:
+                break
+    return best[1] if best[0] >= 0.62 else []
+
+
+ZH_FONT_CANDIDATES = [
+    os.environ.get("DSH_PAPER_ZH_FONT", ""),
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/Deng.ttf",
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/msyh.ttf",
+    "C:/Windows/Fonts/simsun.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+]
+_zh_font_cache = {}
+
+
+def _zh_font():
+    """找一个既有中文、拉丁字母又按比例排版的字体。
+
+    PyMuPDF 内置的 china-s 把拉丁字母也画成全角，英文单词会变成 "G P T - 4"，
+    所以优先用系统字体；找不到才退回内置字体。
+    """
+    if "value" in _zh_font_cache:
+        return _zh_font_cache["value"]
+    picked = ""
+    for item in ZH_FONT_CANDIDATES:
+        if not item:
+            continue
+        try:
+            if Path(item).is_file():
+                picked = item
+                break
+        except OSError:
+            continue
+    _zh_font_cache["value"] = picked
+    return picked
+
+
+def _fit_text(page, box, text, start_size, lineheight, fontname="china-s", font_file=""):
+    """从原字号往下试，返回 (字号, 是否放得下)。"""
+    size = max(6.5, min(float(start_size), 13.0))
+    probe = fitz.open()
+    try:
+        probe_page = probe.new_page(width=page.rect.width, height=page.rect.height)
+        if font_file:
+            try:
+                probe_page.insert_font(fontname=fontname, fontfile=font_file)
+            except Exception:
+                fontname = "china-s"
+        while size >= 6.5:
+            rc = probe_page.insert_textbox(box, text, fontname=fontname, fontsize=size,
+                                           lineheight=lineheight, align=0)
+            if rc >= 0:
+                return size, True
+            size -= 0.5
+    finally:
+        probe.close()
+    return 6.5, False
+
+
+def cmd_zhpdf(args):
+    """把译文写回原版面，产出中文版 PDF（右栏渲染它就和原文逐页对齐）。
+
+    参数：{path, out, pages:[{n, blocks:[{rect:[x,y,x2,y2], text, size?}]}], lineheight?}
+    做法：每个块先用 PDF 自己的文本行定位（不信版面模型 bbox 的几 pt 偏移），
+    redact 掉那些行（保留图片/矢量图），再把中文写进同一块行框。
+    只用 PyMuPDF 内置简体中文字体 china-s，不依赖系统字体。
+    """
+    doc = open_doc(args)
+    try:
+        out = str(args.get("out") or "").strip()
+        if out == "":
+            raise ArgsError("缺少 out 参数")
+        pages = args.get("pages")
+        if not isinstance(pages, list) or not pages:
+            raise ArgsError("缺少 pages 参数")
+        lineheight = float(args.get("lineheight") or 1.3)
+        font_file = _zh_font()
+        font_name = "zhbody" if font_file else "china-s"
+        written = 0
+        skipped = 0
+        for item in pages:
+            if not isinstance(item, dict):
+                continue
+            try:
+                page_number = int(item.get("n") or 0)
+            except (TypeError, ValueError):
+                continue
+            if page_number < 1 or page_number > doc.page_count:
+                skipped += 1
+                continue
+            page = doc[page_number - 1]
+            blocks = item.get("blocks")
+            if not isinstance(blocks, list) or not blocks:
+                continue
+            lines = _page_text_lines(page)
+            erases = []
+            draws = []
+            claimed = set()          # 行下标：一行只归一个块，避免两块抢同一行（文字叠在一起）
+            ordered = [b for b in blocks if isinstance(b, dict)]
+            ordered.sort(key=lambda b: (float((b.get('rect') or [0, 0])[1] or 0), float((b.get('rect') or [0])[0] or 0)))
+            for block in ordered:
+                if not isinstance(block, dict):
+                    continue
+                rect = block.get("rect")
+                text = str(block.get("text") or "").strip()
+                # source 是这一块的原文（用来对上 PDF 的真实行），text 是译文（写回去的）
+                source = str(block.get("source") or "").strip() or text
+                if not isinstance(rect, list) or len(rect) != 4 or text == "":
+                    skipped += 1
+                    continue
+                try:
+                    box = fitz.Rect(float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+                except (TypeError, ValueError):
+                    skipped += 1
+                    continue
+                box = (box * page.derotation_matrix) & page.rect
+                if box.is_empty or box.width <= 1 or box.height <= 1:
+                    skipped += 1
+                    continue
+                cluster = _match_block_lines(source, lines, claimed)
+                if not cluster:
+                    skipped += 1                       # 一行都对不上就别乱擦
+                    continue
+                for index, line in enumerate(lines):
+                    if any(line is item for item in cluster):
+                        claimed.add(index)
+                union = cluster[0]["rect"]
+                for line in cluster[1:]:
+                    union |= line["rect"]
+                # 同一基线上的其它片断（大标题常被拆成多个 span/line）一起算进擦除范围，
+                # 否则会剩下半截字母，中文就叠在残字上
+                for line in lines:
+                    center_line = (line["rect"].y0 + line["rect"].y1) / 2
+                    center_union = (union.y0 + union.y1) / 2
+                    if abs(center_line - center_union) <= max(2.5, line["rect"].height * 0.25):
+                        if line["rect"].x1 > union.x0 - 2 and line["rect"].x0 < union.x1 + 2:
+                            union |= line["rect"]
+                erase = fitz.Rect(union.x0 - 1.2, union.y0 - 1.2, union.x1 + 1.2, union.y1 + 1.2)
+                sizes = [line["size"] for line in cluster if line["size"] > 0]
+                base = sum(sizes) / len(sizes) if sizes else max(7.5, union.height / len(cluster) * 0.75)
+                erases.append(erase)
+                draws.append((erase, text, base))
+            if not draws:
+                continue
+            for erase in erases:
+                page.add_redact_annot(erase, fill=None)
+            try:
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_NONE)
+            except TypeError:
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+            # 有些 PDF 把标题画成了路径/内嵌图形，redact 擦不掉（文字层里也没有）。
+            # 在写字前先铺一层白底，残字就不会和中文叠在一起。
+            for box, _text, _base in draws:
+                page.draw_rect(box, color=None, fill=(1, 1, 1), overlay=True)
+            if font_file:
+                try:
+                    page.insert_font(fontname="zhbody", fontfile=font_file)
+                except Exception:
+                    font_file = ""
+                    font_name = "china-s"
+            for box, text, base in draws:
+                size, fits = _fit_text(page, box, text, base, lineheight, font_name, font_file)
+                target = box
+                if not fits:
+                    # 放不下就往下借空间：只要下一行以下的空白够，就扩到那儿
+                    below = page.rect.y1 - box.y1
+                    extra = min(28.0, max(0.0, below - 8))
+                    if extra > 2:
+                        target = fitz.Rect(box.x0, box.y0, box.x1, box.y1 + extra)
+                        size, fits = _fit_text(page, target, text, base, lineheight, font_name, font_file)
+                page.insert_textbox(target, text, fontname=font_name, fontsize=size,
+                                    lineheight=lineheight, align=0, color=(0, 0, 0))
+                written += 1
+        # 中文字体会整份嵌进去（好几 MB），能子集化就子集化；PyMuPDF 版本差异大，失败就算了
+        try:
+            doc.subset_fonts()
+        except Exception:
+            pass
+        target = Path(out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        try:
+            doc.save(str(tmp), garbage=3, deflate=True)
+        except Exception as exc:
+            raise ArgsError(f"保存中文版失败：{exc}") from exc
+        try:
+            os.replace(tmp, target)
+        except OSError as exc:
+            raise ArgsError(f"写入中文版失败：{exc}") from exc
+        return {"ok": True, "path": str(target), "blocks": written, "skipped": skipped,
+                "pages": int(doc.page_count)}
+    finally:
+        doc.close()
 
 
 HANDLERS = {"info": cmd_info, "text": cmd_text, "outline": cmd_outline,
             "render": cmd_render, "figures": cmd_figures,
             "clip_text": cmd_clip_text, "page_lines": cmd_page_lines, "split": cmd_split,
-            "tables": cmd_tables}
+            "tables": cmd_tables, "zhpdf": cmd_zhpdf}
 
 
 def main(argv):
@@ -1367,7 +1664,7 @@ def main(argv):
         if "--self-test" in argv[1:]:
             payload = self_test()
         elif not command:
-            payload = fail("缺少命令（info | text | outline | render | figures | clip_text | page_lines | split | tables）")
+            payload = fail("缺少命令（info | text | outline | render | figures | clip_text | page_lines | split | tables | zhpdf）")
         elif command not in HANDLERS:
             payload = fail(f"未知命令：{command}")
         else:

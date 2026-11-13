@@ -252,6 +252,37 @@ node scripts/layout.mjs <论文 id>            # 结果写 papers/<id>/layout.js
 版面模型对双栏论文的段落切分仍可能把一段拆成两段（我们用「服务端文字做证据」把掉进块缝里的首行补回来，
 但模型自己切错的地方补不了）。
 
+## 中文版 PDF（把译文写回原版面）
+
+对照视图的右栏是「重排后的阅读稿」：段落、图、公式都在，但行宽和换行跟原页不是一一对应的。
+想要**跟原版一眼对得上**的中文，可以把译文直接写回 PDF 的同一位置，生成
+`papers/<id>/paper-zh.pdf`，原文页切到「中文版」就渲染它 —— 左边原图、右边中文版，
+逐页对齐（这就是参考项目用 BabelDOC 做的事，代价小得多，也完全本地）。
+
+怎么用：
+
+- 先有译文（几句也行，整篇也行）。工具栏 **`中文版`** 按钮 → 确认（说明纯本地、不上传）→
+  几秒后按钮变 `中文版 ✓`，原文页开始渲染中文版；再点一次切回原 PDF。
+- 命令行等价物：`POST /paper-workbench/api/zhpdf.build {"id":"<论文 id>"}`。
+- 只替换**有译文**的段落；没译的段落保留英文。公式、图、表格原样不动。
+
+做法（`assets/pdf_tool.py` 的 `zhpdf` 命令）：
+
+1. 用 PDF 自己的文本行给每个块定位 —— 不直接信版面模型的 bbox（实测有十几 pt 偏移，
+   照 bbox 擦会留下半行英文），而是拿块原文逐行比对（`difflib` 相似度 ≥0.62），
+   认到的行并集才是擦除/绘制的框；一行只归一个块。
+2. `redact` 掉这些行（`PDF_REDACT_IMAGE_NONE` + `PDF_REDACT_LINE_ART_NONE`：图片和
+   矢量图都不动），先铺一层白底（有些 PDF 把标题画成了路径，`redact` 擦不掉），
+   再用中文重写。
+3. 中文字体优先用系统字体（Windows 的 `simhei`/`Deng`、macOS 的 `PingFang`、
+   Linux 的 `Noto Sans CJK`；`DSH_PAPER_ZH_FONT` 可指定），这样英文单词不会变成
+   「G P T - 4」；找不到才退回 PyMuPDF 内置的 `china-s`。字号从原字号开始试，
+   放不下就往下借空白，再不行才缩小。
+
+已知取舍：译文比原文长很多时字号会被压小；矢量路径画成的标题可能有残字（已铺白底，
+个别字体仍会露一点）；只写了译文的段落，未翻译的图注/脚注仍是英文；合并单元格的表格
+不会有结构（表格本来就是原图，不动）。
+
 ## 扫描件 OCR（PaddleOCR 云端接口）
 
 扫描件（整页是图片）没有文本层，读不了、译不了、搜不了。工作台把这类 PDF 送到 **PaddleOCR 官方
@@ -292,12 +323,12 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 | 路由 | 说明 |
 | --- | --- |
 | `GET  /paper-workbench/app` | 工作台页面（主区 iframe 的内容） |
-| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`doc.get`、`ai.models`、`trans.get`、`chat.get`、`search.doc`、`figures.list`、`logs.list`、`review.run`、`trash.list`、`session.status`、`conv.list`、`vault.upsert`、`layout.status`、`layout.run`、`layout.clear`、`layout.tables` |
+| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`doc.get`、`ai.models`、`trans.get`、`chat.get`、`search.doc`、`figures.list`、`logs.list`、`review.run`、`trash.list`、`session.status`、`conv.list`、`vault.upsert`、`layout.status`、`layout.run`、`layout.clear`、`layout.tables`、`zhpdf.status`、`zhpdf.build`、`zhpdf.clear` |
 | `POST /paper-workbench/ai/translate` | SSE 逐段翻译（事件 `start/delta/done/error/end`） |
 | `POST /paper-workbench/ai/chat` | SSE 对话（事件 `delta/done/error/end`） |
 | `POST /paper-workbench/ai/cancel` | 取消正在跑的流式请求（`{reqId}`） |
 | `GET  /paper-workbench/session/follow?conv=` | 原生 DSH 会话的事件流（SSE，事件 `frame`；`conv` 是对话 id，兼容旧的 `id=`） |
-| `GET  /paper-workbench/api/page?id=&page=&scale=` | 页图 PNG（按需渲染，带磁盘缓存） |
+| `GET  /paper-workbench/api/page?id=&page=&scale=&source=` | 页图 PNG（按需渲染，带磁盘缓存；`source=zh` 渲染中文版 PDF） |
 | `GET  /paper-workbench/api/figure?id=&index=` | 正文配图 PNG（`figures.json` 的数组下标） |
 | `GET  /paper-workbench/api/raw?id=` | 原始 PDF（支持单段 Range，供浏览器查看器） |
 | `POST /paper-workbench/api/upload?name=` | 上传 PDF 原始字节 |
@@ -315,6 +346,7 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 | 版面解析 | `papers/<id>/layout.json` | 手动 `layout.clear`，或 PDF 换版本 |
 | 版面断点 | `papers/<id>/layout.partial.json` | 解析成功后被清掉；PDF 换版本后下次续跑会丢弃 |
 | 配图清单与裁剪图 | `papers/<id>/figures.json`、`.figures/*.png` | PDF 换了版本，或版面结果变了 |
+| 中文版 PDF | `papers/<id>/paper-zh.pdf` | 手动 `zhpdf.clear`；重新翻译后可再生成一次（覆盖） |
 | 译文 | `workbench.db` 的 `translations` 表 | 手动清除；段落 hash 变了（重新切段）就对不上旧译文 |
 | 任务日志 / 自检 | `workbench.db` 的 `job_events` / `reviews` 表 | 手动清除 |
 
@@ -407,7 +439,8 @@ docs/v3-contracts.md  v3 新增模块（db / jobs / review / figures / session�
 - 表格默认显示**原文裁剪图**；展开「表格结构」可以按行列选中/复制。结构来自 PDF 的格线（其次版面模型的 HTML），
   合并单元格、整列并进一格这类情况会被画错列——所以它默认折叠、旁边写着「以原图为准」。
 - 配图裁剪靠「图注 + 空白带 + 绘图簇」，图注缺失或图与正文贴得极近时可能裁偏；极端情况宁可不贴图，也不把正文裁进去。
-- 面板内翻译是逐段"可读"译文，不做 PDF 版面重排；需要整版双语 PDF 的话本插件不提供（不做 BabelDOC/MinerU 那类子进程）。
+- 「中文版 PDF」是**覆盖式**的：把译文写回原页的同一位置（不重排版面、不下载 BabelDOC）。
+  只替换有译文的段落，译文过长时字号会被压小，极少数矢量标题可能残留原字母。
 - PDF 深色是**反相滤镜**，不是重新排版；彩色图会跟着变色，想要原色就切回「关」。
 - 翻译自检是启发式：静态规则会误报（短标题、刻意省略），模型批检也可能漏；它只提示，不改你的译文。
 - 原生会话依赖宿主的 `sessionController`；没有就自动退回「本地」自绘对话，功能不受影响，只是不落进主会话。

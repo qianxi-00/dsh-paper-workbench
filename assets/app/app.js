@@ -94,6 +94,9 @@ const state = {
   review: null,
   reviewBusy: false,
   layoutBusy: false,
+  zhMode: false,
+  zhStatus: null,
+  zhBusy: false,
   layoutJob: null,
   layoutResumable: false,
   layoutSavedPages: 0,
@@ -1341,6 +1344,8 @@ async function openPaper(id, options = {}) {
     state.layoutResumable = false
     state.layoutSavedPages = 0
     state.layoutBusy = false
+    state.zhMode = false
+    state.zhStatus = null
     await Promise.all([loadPage(state.page, seq), loadDoc(id, seq), loadChat(id, seq), loadAi(), loadFigures(seq)])
     if (seq !== state.openSeq) return
     buildFiguresByKey()
@@ -2406,9 +2411,52 @@ function pageRatio(page) {
   return PAGE_DEFAULT_RATIO
 }
 
+/** 中文版：只替换有译文的段落，其余保留原文（所以是「部分中文」的页面）。 */
+async function toggleZhPdf() {
+  const meta = state.current && state.current.meta
+  if (!meta) return
+  if (state.zhBusy) return
+  if (state.zhMode) {
+    state.zhMode = false
+    render()
+    return
+  }
+  if (!hostReady()) {
+    needRestart()
+    return
+  }
+  state.zhBusy = true
+  try {
+    let status = state.zhStatus
+    if (!status) status = await rpc('zhpdf.status', { id: meta.id })
+    if (!status.exists) {
+      const ok = window.confirm('生成中文版 PDF：把已翻译的段落写回原来的版面，和原文逐页对齐。\n纯本地处理，不上传、不花钱；没翻译的段落保留原文。继续？')
+      if (!ok) return
+      const result = await rpc('zhpdf.build', { id: meta.id })
+      toast('中文版已生成：' + result.blocks + ' 段，' + (result.skipped ? result.skipped + ' 段没对上原文（保留英文）' : '全部替换'))
+      status = await rpc('zhpdf.status', { id: meta.id })
+    } else if (status.stale) {
+      const again = window.confirm('有新的译文，中文版还是上次的。要重新生成吗？（纯本地，很快）')
+      if (again) {
+        const result = await rpc('zhpdf.build', { id: meta.id })
+        toast('中文版已更新：' + result.blocks + ' 段')
+        status = await rpc('zhpdf.status', { id: meta.id })
+      }
+    }
+    state.zhStatus = status
+    state.zhMode = true
+    render()
+  } catch (error) {
+    toast(error.message)
+  } finally {
+    state.zhBusy = false
+  }
+}
+
 function pageImageSrc(meta, page) {
   const scale = Math.max(1, Math.round(state.fitScale * state.zoom * 10) / 10)
-  return API + 'page?id=' + encodeURIComponent(meta.id) + '&page=' + page + '&scale=' + scale
+  const zh = state.zhMode ? '&source=zh' : ''
+  return API + 'page?id=' + encodeURIComponent(meta.id) + '&page=' + page + '&scale=' + scale + zh
 }
 
 function renderPageBlock(meta, page) {
@@ -2529,6 +2577,13 @@ function renderPagePane() {
       h('span', { class: 'sep' }),
       h('button', { onclick: openSearch, title: '全文检索' }, '🔍 检索'),
       h('button', { onclick: () => explainPage() }, '讲解本页'),
+      h('button', {
+        class: state.zhMode ? 'on' : 'ghost',
+        title: state.zhStatus && state.zhStatus.exists
+          ? '中文版 PDF（译文写回原版面，和原文逐页对齐）' + (state.zhStatus.stale ? ' —— 有新的译文，点右键菜单重新生成' : '')
+          : '把已有译文写回原版面，生成一份中文版 PDF（纯本地，不上传）',
+        onclick: toggleZhPdf,
+      }, state.zhMode ? '中文版 ✓' : '中文版'),
       h('span', { class: 'spacer' }),
       state.current.meta.hasText === false || state.ocr
         ? h('button', { class: 'ghost', onclick: runOcr, disabled: !!state.ocrBusy, title: '扫描件：调用 PaddleOCR 识别全文' }, state.ocrBusy ? 'OCR 中…' : state.ocr && state.ocr.pages > 0 ? '重新 OCR' : 'OCR 识别')

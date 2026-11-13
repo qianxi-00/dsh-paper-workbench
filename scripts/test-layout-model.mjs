@@ -10,6 +10,7 @@ import {
   LAYOUT_MODEL,
   LAYOUT_VERSION,
   cleanLatex,
+  cleanLayoutBlocks,
   createLayout,
   gridToTableModel,
   headingLevel,
@@ -18,6 +19,7 @@ import {
   labelToKind,
   layoutSummary,
   joinLines,
+  looksLikeFormulaText,
   missingHeadPosition,
   normalizeLayout,
   parseLayoutJsonl,
@@ -400,6 +402,43 @@ equal('续跑：页号仍然连续', resumed.blocks.map(item => item.page), [1, 
 equal('续跑：记下续跑的页数', resumed.resumedPages, 1)
 check('续跑：完成后清掉断点文件', !fs.existsSync(path.join(resumeDir, 'layout.partial.json')))
 fs.rmSync(resumeRoot, { recursive: true, force: true })
+
+// ---------------------------------------------------------------- 块清理
+
+equal('looksLikeFormulaText 乱序公式', looksLikeFormulaText('N X LNAT = log P (yn | X; θ) (2)'), true)
+equal('looksLikeFormulaText 带希腊字母的式子', looksLikeFormulaText('werr(x, y∗) Ltotal = γLCE + LMAE + LN (6)'), true)
+equal('looksLikeFormulaText 普通正文', looksLikeFormulaText('The predictor consists of two convolution layers, with the output being a float weight.'), false)
+equal('looksLikeFormulaText 带等号的正文句子', looksLikeFormulaText('The number of neighbours equals the batch size we used.'), false)
+equal('looksLikeFormulaText 空串', looksLikeFormulaText('   '), false)
+
+const cleanedBlocks = cleanLayoutBlocks([
+  { order: 0, page: 1, kind: 'body', text: 'N X LNAT = log P (yn | X; θ) (2)', bbox: { x: 10, y: 100, width: 200, height: 16 } },
+  { order: 1, page: 1, kind: 'formula', text: '', latex: '\\mathcal{L}_{NAT}=\\sum', bbox: { x: 40, y: 118, width: 150, height: 24 } },
+  { order: 2, page: 1, kind: 'body', text: 'The model is trained with two losses and the details are', bbox: { x: 10, y: 300, width: 300, height: 16 } },
+  { order: 3, page: 1, kind: 'body', text: 'listed in the appendix for completeness.', bbox: { x: 10, y: 320, width: 300, height: 16 } },
+  { order: 4, page: 1, kind: 'caption', text: 'Figure 1 | Overview.', bbox: { x: 10, y: 400, width: 300, height: 16 } },
+])
+equal('clean 去掉公式的重复正文块', [cleanedBlocks.dropped, cleanedBlocks.blocks.length], [1, 3])
+equal('clean 接回被拆开的段落', [cleanedBlocks.merged, cleanedBlocks.blocks[1].text],
+  [1, 'The model is trained with two losses and the details are listed in the appendix for completeness.'])
+equal('clean 重新编号', cleanedBlocks.blocks.map(block => block.order), [0, 1, 2])
+equal('clean orderMap 能让图注的 order 跟上',
+  [cleanedBlocks.orderMap.get(1), cleanedBlocks.orderMap.get(4)], [0, 2])
+
+// normalizeLayout 里也要生效：公式重复块被去掉、图注的 order 重映射后仍指向正确的块
+const cleanedLayout = normalizeLayout([page1([
+  block('paragraph_title', '2 Method', [100, 100, 700, 150]),
+  block('text', 'N X LNAT = log P (yn | X; θ) (2)', [100, 300, 700, 340]),
+  block('formula', '\\mathcal{L}_{NAT}=\\sum', [150, 350, 650, 420]),
+  block('figure_title', 'Figure 1 | Overview.', [100, 500, 700, 540]),
+  block('image', '', [150, 560, 650, 800]),
+])], { pageSizes: [A4], pageCount: 1 })
+equal('normalizeLayout 去掉公式重复块', cleanedLayout.blocks.map(item => item.kind),
+  ['heading', 'formula', 'caption', 'figure'])
+equal('normalizeLayout 图注 order 仍指向 caption 块',
+  cleanedLayout.figures[0].captionOrder, cleanedLayout.blocks.find(item => item.kind === 'caption').order)
+check('normalizeLayout 记下清理结果', cleanedLayout.warnings.some(text => text.includes('重复')),
+  JSON.stringify(cleanedLayout.warnings))
 
 // ---------------------------------------------------------------- 表格结构
 
