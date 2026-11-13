@@ -103,6 +103,18 @@ try {
       ok(Boolean(captionKey) && Array.isArray(assigned.byParagraph[captionKey]),
         'Figure 2 挂到自己的图注段落上')
     }
+
+    // 表格格子：PyMuPDF 按 PDF 的格线切；RETRO 第 34 页是整页大表
+    const pdfLib = await import('../lib/pdf.js')
+    const tableResult = await pdfLib.callTool('tables', { path: path.join(tmpRoot, 'layout-retro.pdf'), page: 34 })
+    const tables = (tableResult && tableResult.tables) || []
+    ok(tables.length > 0, '整页大表能按格线切出结构（' + tables.length + ' 张）')
+    if (tables.length > 0) {
+      const first = tables[0]
+      ok(first.rowCount >= 2 && first.cols >= 2,
+        '表格行列数合理（' + first.rowCount + ' 行 × ' + first.cols + ' 列）')
+      ok(Array.isArray(first.rows[0]) && first.rows[0].length === first.cols, '每行列数与 cols 一致')
+    }
   }
 
   // ---------------------------------------------------------------- FlashAttention（双栏）

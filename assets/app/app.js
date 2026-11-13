@@ -2155,13 +2155,64 @@ function renderFigureParagraph(paragraph) {
       onclick: () => window.open(src, '_blank', 'noopener'),
     }),
   )
-  if (kind === 'table' && paragraph.text) {
-    figure.append(
-      h('details', { class: 'table-text' }, h('summary', {}, '表格文字'),
-        h('pre', {}, paragraph.text)),
-    )
+  if (kind === 'table') {
+    const grid = renderTableGrid(paragraph)
+    if (grid !== null) figure.append(grid)
+    if (paragraph.text) {
+      figure.append(
+        h('details', { class: 'table-text' }, h('summary', {}, '表格纯文本'),
+          h('pre', {}, paragraph.text)),
+      )
+    }
   }
   return figure
+}
+
+/**
+ * 表格块的表格结构（可选中、可复制）。
+ *
+ * 服务端/PDF 抽出来的格子并不可靠（合并单元格、整列并进一格都会被画错列），
+ * 所以默认显示的是「裁剪图」——那是原文；结构放在折叠块里，用户自己决定要不要用。
+ * 单元格一律用 h() 建，不 innerHTML：结构在宿主侧已经转成纯数据。
+ */
+function renderTableGrid(paragraph) {
+  const model = paragraph.table
+  const rows = model && Array.isArray(model.rows) ? model.rows : []
+  if (rows.length === 0) return null
+  const table = h('table', { class: 'lit-table' })
+  const headerRows = Math.max(0, Math.min(rows.length, Number(model.headerRows) || 0))
+  let body = null
+  rows.forEach((row, index) => {
+    const cells = Array.isArray(row.cells) ? row.cells : []
+    if (cells.length === 0) return
+    const tr = h('tr')
+    for (const cell of cells) {
+      const tag = cell.header ? 'th' : 'td'
+      const attrs = {}
+      if (Number(cell.colspan) > 1) attrs.colspan = Number(cell.colspan)
+      if (Number(cell.rowspan) > 1) attrs.rowspan = Number(cell.rowspan)
+      if (cell.text) attrs.title = cell.text
+      tr.append(h(tag, attrs, cell.text || ''))
+    }
+    if (index < headerRows) {
+      if (!table.querySelector('thead')) table.append(h('thead'))
+      table.querySelector('thead').append(tr)
+    } else {
+      if (body === null) {
+        body = h('tbody')
+        table.append(body)
+      }
+      body.append(tr)
+    }
+  })
+  if (!table.querySelector('tbody')) table.append(h('tbody'))
+  return h(
+    'details',
+    { class: 'table-grid' },
+    h('summary', {}, '表格结构（可选中、复制；识别可能有错，以左侧原图为准）'),
+    h('div', { class: 'table-scroll' }, table),
+    h('div', { class: 'table-note' }, model.source === 'pdf' ? '格子来自 PDF 的格线' : '格子来自版面模型'),
+  )
 }
 
 function renderParagraph(paragraph) {

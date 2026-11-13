@@ -121,6 +121,42 @@ PaddleOCR AI Studio 任务接口（与 OCR 同一个 Key、同一个 job 服务�
 `size/mtime` 不一致、或走 `rebuild`，都会重建。`layout.run` 完成后服务端会**等** `doc.json` 删除
 再返回（删盘是异步的，不等会出现「刚解析完还是旧文本」）。
 
+## 4.5 表格结构（`block.table` / `doc.paragraphs[].table`）
+
+版面模型只说「这块是表格、在哪」，格子从 PDF 自己要：`pdf_tool tables` 用 PyMuPDF
+的 `find_tables()` 按格线切（没有格线再按文字对齐试一次），返回二维文本。抽不到才退回
+版面模型的表格 HTML（`block.html`）。
+
+```jsonc
+// layout.json 的 table 块上多一个字段
+{
+  "kind": "table",
+  "table": {
+    "rows": [
+      { "cells": [{ "text": "Model", "header": true, "colspan": 1, "rowspan": 1 }], "header": true }
+    ],
+    "cols": 3,
+    "headerRows": 1,
+    "source": "pdf"          // pdf | service
+  }
+}
+```
+
+规则：
+
+- 服务端 HTML 先转数据（`htmlToTableModel`：剥标签、`<br>` 当换行、解实体、保留
+  `colspan/rowspan`），绝不把 HTML 交给前端 `innerHTML`；前端只用 `h()` 建 `<td>/<th>`。
+- 可信度门槛 `tableQuality`：行数 ≥2、列数 ≥2、每行列数（含 colspan）一致率 ≥60%、
+  非空格子 ≥30%、没有格子塞整段文字（>400 字符）。服务端 HTML 另加一条：
+  「有格子里挤了 3 个以上数字」的比例 >30% 判为合并列，不用。
+- 过不了门槛就不写 `table`——前端只显示裁剪图 + 纯文本，不硬画一张错的表。
+- 想只补表格（不重新上传 PDF、不花额度）：RPC `layout.tables` →
+  `createLayout().refreshTables(id)`，重算表格并清 doc 缓存。
+
+前端：裁剪图是主体（原文），表格结构放在**折叠块**里（`<details>`），标题写明「识别可能有错，
+以原图为准」，表头 sticky、超宽横向滚动、单元格可选中复制。这样即使某个表的结构不准，
+也不会让人以为那就是原文。
+
 ## 5. 翻译与配图
 
 - 翻译池过滤：`formula` / `figure` / `table` 不送翻译（图块只有占位文字，表格是行数据）。
@@ -134,5 +170,6 @@ PaddleOCR AI Studio 任务接口（与 OCR 同一个 Key、同一个 job 服务�
 | --- | --- |
 | `scripts/test-layout-model.mjs` | 标签映射、坐标缩放、图注认领、公式清洗、表格 HTML→文本、行回填/补缝、分片页号、假依赖跑通 `runLayout`、没 Key 的中文提示 |
 | `scripts/test-doc-layout.mjs` | `doc.get` 走 layout（kind/figureIndex/latex/html/节归属）、缓存命中、hash 稳定、`figures.list` 用版面清单、指纹不一致自动退回文本层 |
-| `scripts/test-layout.mjs` | 没有版面的文本层路线不回归（段落/图表/双栏） |
+| `scripts/test-layout.mjs` | 没有版面的文本层路线不回归（段落/图表/双栏），`tables` 在真实大表上切出 ≥2×2 |
+| `scripts/test-layout-model.mjs` | 表格 HTML → 结构、可信度门槛、跑版面时补表格、`refreshTables` 不重传 |
 | `assets/pdf_tool.py --self-test` | `page_lines` / `clip_text` / `split` / 旋转页坐标 |

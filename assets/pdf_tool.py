@@ -3,7 +3,7 @@
 """DSH 论文工作台 · Python 侧 PDF 工具（单文件）。
 宿主以子进程调用（python assets/pdf_tool.py <command>，参数走 stdin JSON），
 stdout 只写一行 JSON；失败也尽量 exit 0。输入 PDF 只读，依赖标准库 + PyMuPDF。"""
-import json, os, re, statistics, sys, tempfile, time, traceback
+import contextlib, json, os, re, statistics, sys, tempfile, time, traceback
 from pathlib import Path
 try:
     import fitz  # PyMuPDF
@@ -1119,6 +1119,102 @@ def cmd_split(args):
         doc.close()
 
 
+def _cell_text(value):
+    """单元格文本压成「一行一行」：PDF 抽取的换行是排版换行，保留比抹平好读。"""
+    raw = "" if value is None else str(value)
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t\u00a0]+", " ", line).strip() for line in raw.split("\n")]
+    return "\n".join(line for line in lines if line != "")
+
+
+def _trim_table_rows(rows, max_rows=400, max_cols=40):
+    """去掉空行/空列、补齐每行列数；过大的表截断，避免把整本表结构塞进 doc.json。"""
+    cleaned = [[_cell_text(cell) for cell in row] for row in rows or []]
+    cleaned = [row for row in cleaned if any(cell != "" for cell in row)]
+    if not cleaned:
+        return []
+    while cleaned and all(cell == "" for cell in cleaned[-1]):
+        cleaned.pop()
+    width = min(max(len(row) for row in cleaned), max_cols)
+    out = []
+    for row in cleaned[:max_rows]:
+        cells = row[:width]
+        out.append(cells + [""] * (width - len(cells)))
+    return out
+
+
+NUMERIC_CELL_RE = re.compile(r"^[-+0-9.,%()\s]*$")
+
+
+def _looks_like_header(row):
+    """表头行：有字、不是纯数字、每格都不长。纯数字第一行通常是表体第一行。"""
+    if not row:
+        return False
+    filled = [cell for cell in row if cell != ""]
+    if not filled:
+        return False
+    if all(NUMERIC_CELL_RE.match(cell) for cell in filled):
+        return False
+    return all(len(cell) <= 40 for cell in filled)
+
+
+def _table_payload(table, info):
+    """把 PyMuPDF 的表格对象转成前端能直接画的结构（坐标为渲染坐标，和版面块一致）。"""
+    try:
+        rows = _trim_table_rows(table.extract() or [])
+    except Exception:      # 个别畸形表格抽不出来，跳过它而不是整页失败
+        return None
+    if len(rows) < 2 or len(rows[0]) < 2:
+        return None
+    rect = _to_rendered(info, fitz.Rect(table.bbox))
+    return {
+        "bbox": [round(float(rect.x0), 2), round(float(rect.y0), 2),
+                 round(float(rect.x1), 2), round(float(rect.y1), 2)],
+        "rows": rows,
+        "cols": len(rows[0]),
+        "rowCount": len(rows),
+        "headerRows": 1 if _looks_like_header(rows[0]) else 0,
+    }
+
+
+def cmd_tables(args):
+    """整页表格：按 PDF 里的格线（其次按文字对齐）切成二维文本。
+
+    版面模型只告诉我们「这块是表格、在哪」，格子得从 PDF 自己要——
+    模型给的表格 HTML 常常把整列文字塞进一个 <td>，直接渲染会误导。
+    """
+    doc = open_doc(args)
+    try:
+        try:
+            number = int(args.get("page") or 1)
+        except (TypeError, ValueError):
+            raise ArgsError("page 必须是整数") from None
+        if number < 1 or number > doc.page_count:
+            raise ArgsError(f"页码超出范围：{number}（共 {doc.page_count} 页）")
+        page = doc.load_page(number - 1)
+        info = _page_info(page)
+        tables = []
+        # 先按格线找（最准）；一格线都没有的论文再退回按文字对齐（易错，但聊胜于无）
+        for strategy in ({"vertical_strategy": "lines", "horizontal_strategy": "lines"},
+                         {"vertical_strategy": "text", "horizontal_strategy": "text"}):
+            try:
+                # PyMuPDF 会在 stdout 打「Consider using pymupdf_layout…」，
+                # 而 stdout 只允许一行 JSON（插件那边按行解析），所以把它赶到 stderr。
+                with contextlib.redirect_stdout(sys.stderr):
+                    found = page.find_tables(**strategy)
+            except Exception:
+                continue
+            for table in getattr(found, "tables", []) or []:
+                payload = _table_payload(table, info)
+                if payload:
+                    tables.append(payload)
+            if tables:
+                break
+        return {"ok": True, "page": number, "tables": tables}
+    finally:
+        doc.close()
+
+
 def _build_sample_pdf(path):
     """现场生成一张自检用 PDF：标题 + 正文 + 一张图 + 图注 + 书签。"""
     doc = fitz.open()
@@ -1261,7 +1357,8 @@ def self_test():
 
 HANDLERS = {"info": cmd_info, "text": cmd_text, "outline": cmd_outline,
             "render": cmd_render, "figures": cmd_figures,
-            "clip_text": cmd_clip_text, "page_lines": cmd_page_lines, "split": cmd_split}
+            "clip_text": cmd_clip_text, "page_lines": cmd_page_lines, "split": cmd_split,
+            "tables": cmd_tables}
 
 
 def main(argv):
@@ -1270,7 +1367,7 @@ def main(argv):
         if "--self-test" in argv[1:]:
             payload = self_test()
         elif not command:
-            payload = fail("缺少命令（info | text | outline | render | figures | clip_text | page_lines | split）")
+            payload = fail("缺少命令（info | text | outline | render | figures | clip_text | page_lines | split | tables）")
         elif command not in HANDLERS:
             payload = fail(f"未知命令：{command}")
         else:

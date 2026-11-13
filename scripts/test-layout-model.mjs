@@ -11,7 +11,9 @@ import {
   LAYOUT_VERSION,
   cleanLatex,
   createLayout,
+  gridToTableModel,
   headingLevel,
+  htmlToTableModel,
   htmlToText,
   labelToKind,
   layoutSummary,
@@ -19,6 +21,7 @@ import {
   missingHeadPosition,
   normalizeLayout,
   parseLayoutJsonl,
+  tableQuality,
 } from '../lib/layout.js'
 
 let pass = 0
@@ -319,6 +322,130 @@ const batched = await batchRunner.runLayout('paper-x', { batchPages: 2 })
 equal('分片：3 页按 2 页一批切两次', batchCalls.filter(item => item[0] === 'split').map(item => [item[1], item[2]]),
   [[1, 2], [3, 3]])
 equal('分片：页号连续', batched.blocks.map(item => item.page), [1, 2, 3])
+
+// ---------------------------------------------------------------- 表格结构
+
+const serviceTable = htmlToTableModel(
+  '<html><body><table>' +
+  '<tr><th rowspan="2">Model</th><th colspan="2">WER</th></tr>' +
+  '<tr><th>dev</th><th>test</th></tr>' +
+  '<tr><td>Paraformer</td><td>5.1 &lt; 6.2</td><td>5.6<br>7.8</td></tr>' +
+  '</table></body></html>')
+equal('服务端表格 HTML：行数', serviceTable.rows.length, 3)
+equal('服务端表格 HTML：rowspan/colspan', [serviceTable.rows[0].cells[0].rowspan, serviceTable.rows[0].cells[1].colspan], [2, 2])
+equal('服务端表格 HTML：表头标记', serviceTable.headerRows, 1)
+equal('服务端表格 HTML：按列数（含 colspan）', serviceTable.cols, 3)
+equal('服务端表格 HTML：实体与换行', serviceTable.rows[2].cells[1].text, '5.1 < 6.2')
+equal('服务端表格 HTML：<br> 当换行', serviceTable.rows[2].cells[2].text, '5.6\n7.8')
+equal('服务端表格 HTML：空字符串返回 null', htmlToTableModel('   '), null)
+
+const pdfTable = gridToTableModel([
+  ['Model', 'dev', 'test'],
+  ['Paraformer', '5.1', '5.6'],
+  ['Whisper', '7.2', '7.8'],
+], { headerRows: 1 })
+equal('PDF 表格：表头行数', pdfTable.headerRows, 1)
+equal('PDF 表格：source', pdfTable.source, 'pdf')
+check('PDF 表格：可信', tableQuality(pdfTable).ok, JSON.stringify(tableQuality(pdfTable)))
+check('全是空格的表格不可信', !tableQuality(gridToTableModel([['', ''], ['', '']])).ok)
+check('列数不一致的表格不可信',
+  !tableQuality({
+    rows: [
+      { cells: [{ text: 'a' }, { text: 'b' }] },
+      { cells: [{ text: 'c' }] },
+      { cells: [{ text: 'd' }, { text: 'e' }, { text: 'f' }] },
+    ],
+  }).ok)
+check('有格子塞了整段文字不可信',
+  !tableQuality({
+    rows: [
+      { cells: [{ text: 'a' }, { text: 'b' }] },
+      { cells: [{ text: 'x'.repeat(500) }, { text: 'b' }] },
+    ],
+  }).ok)
+
+// 跑一次带表格的版面：PDF 格线优先，抽不到时退回服务端 HTML
+const tableRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-layout-table-'))
+const tableDir = path.join(tableRoot, 'paper-t')
+fs.mkdirSync(tableDir, { recursive: true })
+const tablePdfPath = path.join(tableDir, 'paper.pdf')
+fs.writeFileSync(tablePdfPath, 'fake pdf')
+const tableStore = {
+  paperFile: (id, name) => path.join(tableRoot, id, name),
+  getMeta: async id => ({ id, title: '表格样例' }),
+  resolvePdf: async () => ({ path: tablePdfPath, meta: { id: 'paper-t' } }),
+  getConfig: async () => ({ ocr: { token: 'token-1', layoutModel: '' } }),
+  readJson: async (file, fallback) => {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch {
+      return fallback
+    }
+  },
+  writeJsonAtomic: async (file, value) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(value))
+  },
+}
+const tableCalls = []
+const tablePdf = {
+  callTool: async (command, payload) => {
+    tableCalls.push([command, payload && payload.page])
+    if (command === 'info') return { ok: true, pages: 1, sizes: [A4] }
+    if (command === 'split') {
+      fs.writeFileSync(payload.out, 'part')
+      return { ok: true, pages: 1 }
+    }
+    if (command === 'page_lines') {
+      return { ok: true, page: payload.page, lines: [{ x: 52, y: 300, x2: 400, y2: 316, text: '表下正文' }] }
+    }
+    if (command === 'tables') {
+      return {
+        ok: true,
+        page: payload.page,
+        tables: [{
+          bbox: [72, 200, 500, 280],
+          rows: [['Model', 'dev', 'test'], ['Paraformer', '5.1', '5.6']],
+          cols: 3,
+          rowCount: 2,
+          headerRows: 1,
+        }],
+      }
+    }
+    throw new Error('未预期的命令：' + command)
+  },
+}
+const tableOcr = {
+  submitJob: async () => ({ jobId: 'job-t' }),
+  pollJob: async () => ({ state: 'done', jsonUrl: 'http://example.com/t.jsonl' }),
+  fetchResults: async () => ({
+    pages: [],
+    skipped: 0,
+    text: JSON.stringify({
+      result: {
+        layoutParsingResults: [{
+          prunedResult: {
+            ...SIZE_1191,
+            parsing_res_list: [
+              block('table', '<table><tr><td>坏</td></tr></table>', [140, 400, 1020, 560]),
+            ],
+          },
+        }],
+      },
+    }),
+  }),
+}
+const tableRunner = createLayout({ store: tableStore, pdf: tablePdf, ocr: tableOcr })
+const tableBuilt = await tableRunner.runLayout('paper-t')
+equal('表格：只对表格页调 tables', tableCalls.filter(item => item[0] === 'tables').map(item => item[1]), [1])
+equal('表格：结构来自 PDF 格线', [tableBuilt.blocks[0].table.source, tableBuilt.blocks[0].table.rows.length], ['pdf', 2])
+equal('表格：记了补上的表格数', tableBuilt.tables, 1)
+const tableReload = await tableRunner.readLayout('paper-t')
+check('表格：写进 layout.json', Boolean(tableReload.blocks[0].table) && tableReload.blocks[0].table.cols === 3)
+const refreshed = await tableRunner.refreshTables('paper-t')
+equal('refreshTables 只重算表格，不重新上传', [refreshed.tables, tableCalls.filter(item => item[0] === 'submit').length], [1, 0])
+
+fs.rmSync(tableRoot, { recursive: true, force: true })
 
 fs.rmSync(root, { recursive: true, force: true })
 

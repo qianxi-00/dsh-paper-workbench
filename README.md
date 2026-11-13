@@ -233,10 +233,13 @@ node scripts/layout.mjs <论文 id>            # 结果写 papers/<id>/layout.js
 解析后：
 
 - 对照视图按模型的阅读顺序分段，图/表渲染在**自己原来的位置**（不再按「图 N」字样猜着挂）；
-- 表格显示裁剪图，下面可以展开「表格文字」（HTML 转文本）；
+- 表格显示裁剪图，下面可以展开「表格纯文本」和「表格结构」（真表格：可选中、可复制、超宽横向滚动）；
+  格子按 PDF 的格线切（PyMuPDF），没有格线的表才退回版面模型的表格 HTML；两者都要过可信度门槛，
+  过不了就只给裁剪图 + 纯文本，不硬画一张错的表；
 - 公式显示 LaTeX 源码，不送翻译；
 - `doc.get` 的 `source` 变成 `layout`，`layoutAt` 记录解析时间；PDF 换版本（size/mtime 变了）会自动退回文本层；
 - 想退回文本层：调一次 `layout.clear`（或删掉 `layout.json`），下次打开会重建。
+- 只补表格结构（不重新上传、不花额度）：`layout.tables`，给老的 `layout.json` 回填。
 
 已知取舍：公式只显示 LaTeX 源码、不做 KaTeX 排版；表格是「图 + 文字」，不能逐格选中；
 版面模型对双栏论文的段落切分仍可能把一段拆成两段（我们用「服务端文字做证据」把掉进块缝里的首行补回来，
@@ -282,7 +285,7 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 | 路由 | 说明 |
 | --- | --- |
 | `GET  /paper-workbench/app` | 工作台页面（主区 iframe 的内容） |
-| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`doc.get`、`ai.models`、`trans.get`、`chat.get`、`search.doc`、`figures.list`、`logs.list`、`review.run`、`trash.list`、`session.status`、`conv.list`、`vault.upsert`、`layout.status`、`layout.run`、`layout.clear` |
+| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`doc.get`、`ai.models`、`trans.get`、`chat.get`、`search.doc`、`figures.list`、`logs.list`、`review.run`、`trash.list`、`session.status`、`conv.list`、`vault.upsert`、`layout.status`、`layout.run`、`layout.clear`、`layout.tables` |
 | `POST /paper-workbench/ai/translate` | SSE 逐段翻译（事件 `start/delta/done/error/end`） |
 | `POST /paper-workbench/ai/chat` | SSE 对话（事件 `delta/done/error/end`） |
 | `POST /paper-workbench/ai/cancel` | 取消正在跑的流式请求（`{reqId}`） |
@@ -374,7 +377,9 @@ docs/v3-contracts.md  v3 新增模块（db / jobs / review / figures / session�
 
 - 扫描件要能读/译，得先走一次 OCR（「设置 → 扫描件 OCR」填 PaddleOCR Key）；OCR 结果是按页 Markdown，不还原图片位置。
 - 对照阅读的粒度是「段落」。默认由 PDF 文本层按栏内顺序切；开了「版面解析」就按 PP-StructureV3 的块切，双栏/图表/公式都更准，代价是上传 PDF 与按页计费。
-- 公式块显示 LaTeX 源码（不做 KaTeX 排版），也不送翻译；表格按整块图贴出（可展开纯文本），文字不能逐格选中。
+- 公式块显示 LaTeX 源码（不做 KaTeX 排版），也不送翻译。
+- 表格默认显示**原文裁剪图**；展开「表格结构」可以按行列选中/复制。结构来自 PDF 的格线（其次版面模型的 HTML），
+  合并单元格、整列并进一格这类情况会被画错列——所以它默认折叠、旁边写着「以原图为准」。
 - 配图裁剪靠「图注 + 空白带 + 绘图簇」，图注缺失或图与正文贴得极近时可能裁偏；极端情况宁可不贴图，也不把正文裁进去。
 - 面板内翻译是逐段"可读"译文，不做 PDF 版面重排；需要整版双语 PDF 的话本插件不提供（不做 BabelDOC/MinerU 那类子进程）。
 - PDF 深色是**反相滤镜**，不是重新排版；彩色图会跟着变色，想要原色就切回「关」。

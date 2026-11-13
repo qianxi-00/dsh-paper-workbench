@@ -88,7 +88,17 @@ const layout = {
     block(1, 'formula', 'formula', '', { x: 120, y: 420, width: 300, height: 40 }, { latex: 'O=\\operatorname{softmax}(QK^{T})V' }),
     block(1, 'heading', 'paragraph_title', '2 Method', { x: 72, y: 480, width: 260, height: 16 }, { level: 1 }),
     block(1, 'table', 'table', 'a | b', { x: 72, y: 520, width: 460, height: 140 }, {
-      figureIndex: 1, html: '<table><tr><td>a</td><td>b</td></tr></table>',
+      figureIndex: 1,
+      html: '<table><tr><td>a</td><td>b</td></tr></table>',
+      table: {
+        rows: [
+          { cells: [{ text: 'Model', header: true, colspan: 1, rowspan: 1 }, { text: 'WER', header: true, colspan: 1, rowspan: 1 }], header: true },
+          { cells: [{ text: 'Paraformer', header: false, colspan: 1, rowspan: 1 }, { text: '5.1', header: false, colspan: 1, rowspan: 1 }], header: false },
+        ],
+        cols: 2,
+        headerRows: 1,
+        source: 'pdf',
+      },
     }),
     block(1, 'body', 'text', '第二段正文，讲 tiling。', { x: 72, y: 680, width: 480, height: 40 }),
   ],
@@ -119,6 +129,8 @@ await check('doc 用版面模型建模', async () => {
   eq(built.doc.paragraphs[6].figureIndex, 1, '表格块的 figureIndex')
   eq(built.doc.paragraphs[4].latex, 'O=\\operatorname{softmax}(QK^{T})V', '公式 latex')
   eq(built.doc.paragraphs[6].html.startsWith('<table>'), true, '表格 html')
+  eq(built.doc.paragraphs[6].table.rows.length, 2, '表格结构要传到 doc')
+  eq(built.doc.paragraphs[6].table.rows[1].cells[1].text, '5.1', '表格单元格文字')
   eq(built.doc.sections.map(section => section.title), ['1 Introduction', '2 Method'], '节标题')
   eq(built.doc.paragraphs.map(item => item.section), ['s1', 's1', 's1', 's1', 's1', 's2', 's2', 's2'], '节归属')
 })
