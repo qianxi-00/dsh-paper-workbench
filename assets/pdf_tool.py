@@ -1187,6 +1187,32 @@ def _looks_like_header(row):
     return all(len(cell) <= 40 for cell in filled)
 
 
+def _table_plausible(payload, page):
+    """按文字对齐切出来的「表」是不是真的像表格。
+
+    网格线策略很可靠，不用管；这里只兜 text/text 的兜底：
+    整页正文被切成几十行 × 十几列时，几乎一定是伪表。
+    """
+    bbox = payload.get("bbox") or [0, 0, 0, 0]
+    width = max(1.0, float(bbox[2]) - float(bbox[0]))
+    height = max(1.0, float(bbox[3]) - float(bbox[1]))
+    page_area = max(1.0, float(page.rect.width) * float(page.rect.height))
+    if width * height > page_area * 0.55:
+        return False
+    rows = int(payload.get("rowCount") or 0)
+    cols = int(payload.get("cols") or 0)
+    if rows > 40 or cols > 12:
+        return False
+    cells = [cell for row in payload.get("rows") or [] for cell in row if str(cell or "").strip()]
+    if len(cells) < 4:
+        return False
+    numeric = sum(1 for cell in cells if NUMERIC_CELL_RE.search(str(cell)))
+    # 真表格通常有数字/日期；通篇散文的「表格」多半是切错了
+    if rows > 12 and numeric / len(cells) < 0.15:
+        return False
+    return True
+
+
 def _table_payload(table, info):
     """把 PyMuPDF 的表格对象转成前端能直接画的结构（坐标为渲染坐标，和版面块一致）。"""
     try:
@@ -1242,8 +1268,13 @@ def cmd_tables(args):
                     found = page.find_tables(**strategy)
             except Exception:
                 continue
+            text_mode = strategy["vertical_strategy"] == "text"
             for table in getattr(found, "tables", []) or []:
                 payload = _table_payload(table, info)
+                if payload and text_mode and not _table_plausible(payload, page):
+                    # 按文字对齐切表很容易把整页正文切成「45 行 × 8 列」的伪表，
+                    # 一旦认错，正文会被当成表格内容从对照视图里拿掉
+                    continue
                 if payload:
                     tables.append(payload)
             if tables:

@@ -136,6 +136,23 @@ try {
     const jumps = ys.filter((value, index) => index > 0 && value < ys[index - 1] - 1).length
     ok(jumps === 0, '双栏页面阅读顺序没有来回跳（y 逆序 ' + jumps + ' 处）')
   }
+// 按文字对齐的兜底很容易把整页正文切成「45 行 × 8 列」的伪表，
+// 一旦认错，正文会被当成表格内容从对照视图里拿掉。有真实单栏论文就验一下。
+const pseudoPdf = 'G:\\笔记\\LLM知识体系论文\\语音\\icml_2006(CTC1).pdf'
+if (fs.existsSync(pseudoPdf)) {
+  const pdfLib = await import('../lib/pdf.js')
+  try {
+    const result = await pdfLib.callTool('tables', { path: pseudoPdf, page: 1 })
+    const tables = (result && result.tables) || []
+    ok(tables.length === 0, '单栏正文页不会被切成伪表（实际 ' + tables.length + ' 张' +
+      (tables.length ? '：' + JSON.stringify(tables.map((item) => [item.rowCount, item.cols])) : '') + '）')
+  } catch (error) {
+    ok(false, '单栏正文页不会被切成伪表：' + (error && error.message ? error.message : error))
+  }
+} else {
+  skip('单栏正文页不会被切成伪表（样例 PDF 不在这台机器上）')
+}
+
 } finally {
   for (const id of ['layout-retro', 'layout-flash']) {
     await store.removePaper(id).catch(() => {})
