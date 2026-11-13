@@ -185,8 +185,21 @@ def _clean_inline(text):
     return re.sub(r"\s+", " ", str(text or "").replace("\u00a0", " ")).strip()
 
 
+def _native_size(page):
+    """页面在 PDF 原生（未旋转）坐标系里的宽高。"""
+    rect = page.rect
+    if getattr(page, "rotation", 0) in (90, 270):
+        return float(rect.height), float(rect.width)
+    return float(rect.width), float(rect.height)
+
+
+def _page_matrix(page):
+    """旋转页的坐标变换：get_text 给的是未旋转坐标，渲染/裁剪用的是旋转后坐标。"""
+    return page.rotation_matrix if getattr(page, "rotation", 0) else None
+
+
 def _line_records(block):
-    """把一个文本块的每一行拆成 {text, rect, size, bold}。"""
+    """把一个文本块的每一行拆成 {text, rect, size, bold}（PDF 原生坐标，未旋转）。"""
     out = []
     for line in block.get("lines") or []:
         pieces, char_sizes, bold = [], [], False
@@ -256,7 +269,7 @@ def _drawing_clusters(page):
         clusters = [fitz.Rect(rect) for rect in page.cluster_drawings()]
     except Exception:
         return []
-    width = float(page.rect.width)
+    width = _native_size(page)[0]
     kept = []
     for rect in clusters:
         if rect.height < 3 or rect.width < 3:
@@ -275,13 +288,10 @@ def _image_boxes(page):
     except Exception:
         return boxes
     page_area = max(1.0, float(page.rect.width) * float(page.rect.height))
-    rotation = getattr(page, "rotation_matrix", None)
+    native = fitz.Rect(0, 0, _native_size(page)[0], _native_size(page)[1])
     for info in infos:
         try:
-            rect = fitz.Rect(info.get("bbox"))
-            if rotation is not None and getattr(page, "rotation", 0):
-                rect = rect * rotation
-            rect = rect & page.rect
+            rect = fitz.Rect(info.get("bbox")) & native
         except Exception:
             continue
         if rect.width < FIGURE_MIN_SIDE or rect.height < FIGURE_MIN_SIDE:
@@ -316,9 +326,15 @@ def _rect_touch(first, second, gap):
 
 def _page_info(page):
     """把一页压成后面各步都要用的小结构（文本行 + 配图区域）。"""
+    rect = page.rect
+    rotated = getattr(page, "rotation", 0) in (90, 270)
+    native_w, native_h = (float(rect.height), float(rect.width)) if rotated else (float(rect.width), float(rect.height))
     return {
         "page": page,
         "h": float(page.rect.height),
+        "wn": native_w,
+        "hn": native_h,
+        "matrix": _page_matrix(page),
         "lines": [line for block in (page.get_text("dict").get("blocks") or [])
                   if block.get("type", 0) == 0
                   for line in _line_records(block)],
@@ -335,8 +351,8 @@ def _figure_regions(info, body_size=0.0, repeated=None):
     """
     page = info["page"]
     lines = info["lines"]
-    height = info["h"] or float(page.rect.height)
-    width = float(page.rect.width)
+    height = info.get("hn") or info["h"] or float(page.rect.height)
+    width = info.get("wn") or float(page.rect.width)
     captions = _caption_lines(info)
     if not captions:
         return []
@@ -391,10 +407,10 @@ def _figure_regions(info, body_size=0.0, repeated=None):
         ink.y1 = min(y1, ink.y1 + 4)
         left = max(24.0, ink.x0 - 12)
         right = min(width - 24, ink.x1 + 12)
-        rect = fitz.Rect(left, ink.y0, right, ink.y1) & page.rect
+        rect = fitz.Rect(left, ink.y0, right, ink.y1) & fitz.Rect(0, 0, width, height)
         if rect.width < 60 or rect.height < 24:
             continue
-        regions.append({"rect": rect, "caption": line["text"],
+        regions.append({"rect": _to_rendered(info, rect), "caption": line["text"],
                         "label": caption["label"], "kind": caption["kind"]})
     return regions
 
@@ -406,8 +422,8 @@ def _table_regions(info, body_size=0.0, repeated=None):
     173 个 8.5pt 单元格被当成 173 段落）。这里按「小字密簇」整体框出来，交给配图管线裁成一张图。
     """
     page = info["page"]
-    height = info["h"] or float(page.rect.height)
-    width = float(page.rect.width)
+    height = info.get("hn") or info["h"] or float(page.rect.height)
+    width = info.get("wn") or float(page.rect.width)
     threshold = (body_size or 10.0) * 0.95
     margin = height * 0.05
     skip = repeated or set()
@@ -449,9 +465,27 @@ def _table_regions(info, body_size=0.0, repeated=None):
                 elif cap_rect.y0 >= rect.y1:
                     rect = fitz.Rect(rect.x0, rect.y0, rect.x1, min(rect.y1, cap_rect.y0 - 2))
         rect = fitz.Rect(max(24.0, rect.x0 - 10), max(12.0, rect.y0 - 4),
-                         min(width - 20, rect.x1 + 10), min(height - 12, rect.y1 + 4)) & page.rect
-        regions.append({"rect": rect, "caption": caption, "label": label, "kind": kind})
+                         min(width - 20, rect.x1 + 10), min(height - 12, rect.y1 + 4)) & fitz.Rect(0, 0, width, height)
+        regions.append({"rect": _to_rendered(info, rect), "caption": caption,
+                        "label": label, "kind": kind})
     return regions
+
+
+def _to_rendered(info, rect):
+    """未旋转坐标 → 渲染坐标系（旋转页 bbox 必须换过来，render clip 才裁得对）。"""
+    matrix = info.get("matrix")
+    page = info["page"]
+    if matrix is None:
+        return fitz.Rect(rect) & page.rect
+    return (fitz.Rect(rect) * matrix) & page.rect
+
+
+def _to_native(page, rect):
+    """渲染坐标 → 未旋转坐标（对齐 get_text/get_textbox 的坐标系）。"""
+    value = fitz.Rect(rect)
+    if getattr(page, "rotation", 0):
+        value = value * page.derotation_matrix
+    return value & page.rect
 
 
 def _inside(rect, regions, ratio=0.55):
@@ -563,7 +597,7 @@ def _repeated_keys(pages, page_h_default):
     counts = {}
     total = max(1, len(pages))
     for page in pages:
-        height = page["h"] or page_h_default
+        height = page.get("hn") or page["h"] or page_h_default
         seen = set()
         for line in page["lines"]:
             y_center = (line["rect"].y0 + line["rect"].y1) / 2
@@ -679,7 +713,16 @@ def cmd_info(args):
             toc = [item for item in toc if item["title"]]
         except (TypeError, ValueError, IndexError):
             toc = []
+        sizes = []
+        for index in range(pages):
+            try:
+                rect = doc.load_page(index).rect
+                sizes.append({"n": index + 1, "w": round(float(rect.width), 2),
+                              "h": round(float(rect.height), 2)})
+            except Exception:
+                sizes.append({"n": index + 1, "w": 0.0, "h": 0.0})
         return {"ok": True, "pages": pages, "hasText": has_text, "toc": toc,
+                "sizes": sizes,
                 "encrypted": bool(getattr(doc, "is_encrypted", False))}
     finally:
         doc.close()
@@ -788,7 +831,7 @@ def cmd_text(args):
 
         pages = []
         for item in prepared:
-            page, height = item["page"], item["h"] or 842.0
+            page, height = item["page"], item.get("hn") or item["h"] or 842.0
             regions = item["regions"]
             page_body = _page_body_size(item, body_size)
             blocks = []
@@ -818,9 +861,10 @@ def cmd_text(args):
                     for line in group:
                         if line["size"] > 0:
                             char_sizes.extend([line["size"]] * len(line["text"]))
+                    shown = _to_rendered(item, rect)
                     blocks.append({
-                        "x": round(float(rect.x0), 2), "y": round(float(rect.y0), 2),
-                        "x2": round(float(rect.x1), 2), "y2": round(float(rect.y1), 2),
+                        "x": round(float(shown.x0), 2), "y": round(float(shown.y0), 2),
+                        "x2": round(float(shown.x1), 2), "y2": round(float(shown.y1), 2),
                         "size": round(statistics.median(char_sizes), 2) if char_sizes else round(body_size, 2),
                         "bold": any(line["bold"] for line in group),
                         "kind": kind,
@@ -970,6 +1014,111 @@ def cmd_render(args):
         doc.close()
 
 
+def _rect_text(page, rect):
+    """一个 bbox 内的文本层文字：按行去空白后用 _join_lines 合回一段。"""
+    try:
+        raw = page.get_text("text", clip=rect, sort=True) or ""
+    except Exception:
+        return ""
+    lines = [re.sub(r"\s+", " ", line).strip() for line in raw.splitlines()]
+    lines = [line for line in lines if line]
+    return _join_lines(lines).strip()
+
+
+def cmd_page_lines(args):
+    """整页的文本行（带 bbox）：版面模型只给块的框，按行回填文字才不会把词从中间切断。"""
+    doc = open_doc(args)
+    try:
+        try:
+            number = int(args.get("page") or 1)
+        except (TypeError, ValueError):
+            raise ArgsError("page 必须是整数") from None
+        if number < 1 or number > doc.page_count:
+            raise ArgsError(f"页码超出范围：{number}（共 {doc.page_count} 页）")
+        info = _page_info(doc.load_page(number - 1))
+        lines = []
+        for line in info["lines"]:
+            rect = line["rect"]
+            lines.append({"x": round(float(rect.x0), 2), "y": round(float(rect.y0), 2),
+                          "x2": round(float(rect.x1), 2), "y2": round(float(rect.y1), 2),
+                          "size": line["size"], "bold": line["bold"], "text": line["text"]})
+        return {"ok": True, "page": number, "width": info["wn"], "height": info["hn"],
+                "lines": lines}
+    finally:
+        doc.close()
+
+
+def cmd_clip_text(args):
+    """按 bbox 取文本层（版面模型只给结构，正文文字仍以 PDF 文本层为准）。
+
+    为什么不用服务端 OCR 文本：PP-StructureV3 认字有错（tokns / ReTRo[OF]），
+    数字原生 PDF 的文本层是准的，拿它才不把错字带进对照视图和翻译。
+    """
+    doc = open_doc(args)
+    try:
+        try:
+            number = int(args.get("page") or 1)
+        except (TypeError, ValueError):
+            raise ArgsError("page 必须是整数") from None
+        if number < 1 or number > doc.page_count:
+            raise ArgsError(f"页码超出范围：{number}（共 {doc.page_count} 页）")
+        rects = args.get("rects")
+        if not isinstance(rects, list) or not rects:
+            raise ArgsError("rects 参数不合法（需要 [[x0,y0,x1,y1], …]）")
+        page = doc.load_page(number - 1)
+        texts = []
+        for index, raw in enumerate(rects):
+            if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+                raise ArgsError(f"第 {index + 1} 个 rect 不合法（需要 4 个数字）")
+            try:
+                x0, y0, x1, y1 = (float(value) for value in raw)
+            except (TypeError, ValueError):
+                raise ArgsError(f"第 {index + 1} 个 rect 不是数字") from None
+            rect = fitz.Rect(x0, y0, x1, y1)
+            if rect.width <= 0 or rect.height <= 0:
+                raise ArgsError(f"第 {index + 1} 个 rect 面积为 0")
+            texts.append(_rect_text(page, _to_native(page, rect)))
+        return {"ok": True, "page": number, "texts": texts}
+    finally:
+        doc.close()
+
+
+def cmd_split(args):
+    """切出 [from, to] 页写成新 PDF（版面模型分片上传用，页号 1 基、含两端）。"""
+    doc = open_doc(args)
+    try:
+        total = int(doc.page_count)
+        try:
+            first = int(args.get("from") or 1)
+            last = int(args.get("to") or total)
+        except (TypeError, ValueError):
+            raise ArgsError("from/to 必须是整数") from None
+        if first < 1 or last > total or first > last:
+            raise ArgsError(f"页范围不合法：{first}-{last}（共 {total} 页）")
+        out = str(args.get("out") or "").strip()
+        if out == "":
+            raise ArgsError("缺少 out 参数")
+        target = Path(out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        part = fitz.open()
+        try:
+            part.insert_pdf(doc, from_page=first - 1, to_page=last - 1)
+            part.save(str(tmp))
+        except Exception as exc:  # 写盘失败要带中文原因，别让调用方看见裸 OSError
+            raise ArgsError(f"保存切片失败：{exc}") from exc
+        finally:
+            part.close()
+        try:
+            os.replace(tmp, target)
+        except OSError as exc:
+            raise ArgsError(f"写入切片失败：{exc}") from exc
+        return {"ok": True, "path": str(target), "pages": last - first + 1,
+                "from": first, "to": last}
+    finally:
+        doc.close()
+
+
 def _build_sample_pdf(path):
     """现场生成一张自检用 PDF：标题 + 正文 + 一张图 + 图注 + 书签。"""
     doc = fitz.open()
@@ -1061,8 +1210,10 @@ def self_test():
     rot_items = rot_figures.get("figures") if rot_figures.get("ok") else None
     if not isinstance(rot_items, list) or len(rot_items) != 1:
         return fail(f"旋转页 figures 检查失败：{rot_figures.get('error') or '没取到图（坐标没跟着旋转）'}")
-    if abs(rot_items[0].get("x", 0) - 90) > 3 or abs(rot_items[0].get("x2", 0) - 210) > 3:
-        return fail("旋转页 figures 检查失败：bbox 还是未旋转坐标")
+    # 旋转后图片的渲染框宽 ≈ 原图高（120）加两侧留白；未转换的话宽会是 200
+    rot_w = float(rot_items[0].get("width") or 0)
+    if abs(rot_items[0].get("x", 0) - 90) > 8 or abs(rot_items[0].get("x2", 0) - 210) > 8 or rot_w > 140:
+        return fail(f"旋转页 figures 检查失败：bbox 还是未旋转坐标（{rot_items[0].get('x')}→{rot_items[0].get('x2')} w={rot_w}）")
     two_column = [
         {"x": 10, "y": 20, "x2": 270, "y2": 32, "text": "header"},
         {"x": 10, "y": 60, "x2": 130, "y2": 72, "text": "L1"},
@@ -1075,6 +1226,25 @@ def self_test():
     expect = ["header", "L1", "L2", "R1", "R2", "footer"]
     if ordered != expect:
         return fail(f"order_blocks 检查失败：{ordered}（期望先左栏后右栏 {expect}）")
+    clip_text = cmd_clip_text({"path": str(sample), "page": 1,
+                               "rects": [[70, 58, 320, 88], [70, 278, 320, 300]]})
+    clip_texts = clip_text.get("texts") if clip_text.get("ok") else None
+    if not isinstance(clip_texts, list) or len(clip_texts) != 2:
+        return fail(f"clip_text 检查失败：{clip_text.get('error') or '返回条数不对'}")
+    if "Self Test Title" not in (clip_texts[0] or ""):
+        return fail(f"clip_text 检查失败：标题框取到 {clip_texts[0]!r}")
+    if "sample image" not in (clip_texts[1] or ""):
+        return fail(f"clip_text 检查失败：图注框没取到文字 {clip_texts[1]!r}")
+    lines = cmd_page_lines({"path": str(sample), "page": 1})
+    line_items = lines.get("lines") if lines.get("ok") else None
+    if not isinstance(line_items, list) or len(line_items) < 3:
+        return fail(f"page_lines 检查失败：{lines.get('error') or '行数不对'}")
+    if lines.get("width") != 400 or lines.get("height") != 360:
+        return fail(f"page_lines 检查失败：页尺寸 {lines.get('width')}x{lines.get('height')}（期望 400x360）")
+    cut = base / "pb-selftest-split.pdf"
+    split = cmd_split({"path": str(sample), "from": 1, "to": 1, "out": str(cut)})
+    if not split.get("ok") or split.get("pages") != 1 or not cut.is_file():
+        return fail(f"split 检查失败：{split.get('error') or '没有生成切片'}")
     checks = [f"info: pages={pages} hasText={info['hasText']} toc={len(info['toc'])}",
               f"text: page1 blocks={len(blocks)}",
               f"render: bytes={len(data)} {render['width']}x{render['height']}",
@@ -1082,12 +1252,16 @@ def self_test():
               f"figures: {len(items)} items label={items[0].get('label')}",
               f"render clip: bytes={len(clip_data)} {clip['width']}x{clip['height']}",
               f"rotated figures: {len(rot_items)} items page={rot_items[0].get('page')}",
+              f"clip_text: {len(clip_texts)} rects title={clip_texts[0][:24]!r}",
+              f"page_lines: {len(line_items)} lines {lines['width']}x{lines['height']}",
+              f"split: pages={split['pages']} bytes={cut.stat().st_size}",
               f"sample={sample}"]
     return {"ok": True, "checks": checks, "ms": int((time.perf_counter() - started) * 1000)}
 
 
 HANDLERS = {"info": cmd_info, "text": cmd_text, "outline": cmd_outline,
-            "render": cmd_render, "figures": cmd_figures}
+            "render": cmd_render, "figures": cmd_figures,
+            "clip_text": cmd_clip_text, "page_lines": cmd_page_lines, "split": cmd_split}
 
 
 def main(argv):
@@ -1096,7 +1270,7 @@ def main(argv):
         if "--self-test" in argv[1:]:
             payload = self_test()
         elif not command:
-            payload = fail("缺少命令（info | text | outline | render | figures）")
+            payload = fail("缺少命令（info | text | outline | render | figures | clip_text | page_lines | split）")
         elif command not in HANDLERS:
             payload = fail(f"未知命令：{command}")
         else:

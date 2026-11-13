@@ -208,6 +208,40 @@ DSH 侧栏按会话的工作目录分组。插件不再按每篇 PDF 所在目�
 - 用 `PB_DB_PATH` 可以换库位置；`PB_DB_ENGINE=json` 强制走 JSON 退化实现（Node < 22.5 或想手工看内容时）。
 - 备份/拷贝/清理前先让插件关库（`closeDb()`），WAL 会在库旁边留 `-wal` / `-shm`。
 
+## 版面解析（可选，PP-StructureV3）
+
+文本层切段落是「按字号/缩进猜」：单栏论文一章可能只有一两段，图里的标签会被当正文，
+整页表格会变成几百个脚注。**版面解析**把 PDF 交给 PaddleOCR 的版面模型
+（`PP-StructureV3`），直接拿它的块级结果：阅读顺序、`paragraph_title`/`text`/`figure_title`/
+`table`/`formula`/`footnote` 标签、每个块的 bbox。图表位置、公式 LaTeX、表格 HTML 都在里面。
+
+结构走模型、文字走文本层：模型只用来定「块在哪、是什么类型」，每个块的正文仍然按 bbox
+从 PDF 文本层重新抠一遍（`pdf_tool clip_text/page_lines`）—— 服务端 OCR 认字有错
+（`tokns`、`ReTRo[OF]`），原生 PDF 的文本层是准的，不能把错字带进对照视图和翻译。
+
+跑一次：
+
+```bash
+# 命令行（会提示确认；PDF 会整本上传、按页计费）
+node scripts/layout.mjs <论文 id>            # 结果写 papers/<id>/layout.json
+```
+
+面板里也有入口：对照工具栏的 **`版面`** 按钮（先弹确认，说明会上传 PDF、耗时与计费），
+解析完自动重建文档模型与配图清单。设置页没有单独开关——**默认不解析**，
+因为这是收费的第三方云调用，不应该在你不知情的时候发生。
+
+解析后：
+
+- 对照视图按模型的阅读顺序分段，图/表渲染在**自己原来的位置**（不再按「图 N」字样猜着挂）；
+- 表格显示裁剪图，下面可以展开「表格文字」（HTML 转文本）；
+- 公式显示 LaTeX 源码，不送翻译；
+- `doc.get` 的 `source` 变成 `layout`，`layoutAt` 记录解析时间；PDF 换版本（size/mtime 变了）会自动退回文本层；
+- 想退回文本层：调一次 `layout.clear`（或删掉 `layout.json`），下次打开会重建。
+
+已知取舍：公式只显示 LaTeX 源码、不做 KaTeX 排版；表格是「图 + 文字」，不能逐格选中；
+版面模型对双栏论文的段落切分仍可能把一段拆成两段（我们用「服务端文字做证据」把掉进块缝里的首行补回来，
+但模型自己切错的地方补不了）。
+
 ## 扫描件 OCR（PaddleOCR 云端接口）
 
 扫描件（整页是图片）没有文本层，读不了、译不了、搜不了。工作台把这类 PDF 送到 **PaddleOCR 官方
@@ -248,7 +282,7 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 | 路由 | 说明 |
 | --- | --- |
 | `GET  /paper-workbench/app` | 工作台页面（主区 iframe 的内容） |
-| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`doc.get`、`ai.models`、`trans.get`、`chat.get`、`search.doc`、`figures.list`、`logs.list`、`review.run`、`trash.list`、`session.status`、`conv.list`、`vault.upsert` |
+| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`doc.get`、`ai.models`、`trans.get`、`chat.get`、`search.doc`、`figures.list`、`logs.list`、`review.run`、`trash.list`、`session.status`、`conv.list`、`vault.upsert`、`layout.status`、`layout.run`、`layout.clear` |
 | `POST /paper-workbench/ai/translate` | SSE 逐段翻译（事件 `start/delta/done/error/end`） |
 | `POST /paper-workbench/ai/chat` | SSE 对话（事件 `delta/done/error/end`） |
 | `POST /paper-workbench/ai/cancel` | 取消正在跑的流式请求（`{reqId}`） |
@@ -276,7 +310,8 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
     paper.pdf            # storage=copy 时的库内副本
     text.json            # 文本块缓存（按源 PDF mtime+size 失效）
     doc.json             # 段落/分节模型（按 PDF sha1 + 目录指纹缓存，段落 hash 是翻译的键）
-    figures.json         # 正文配图清单（页、bbox、图注、label）
+    figures.json         # 正文配图清单（页、bbox、图注、label；有 layout.json 时来自版面模型）
+    layout.json          # 版面解析结果（PP-StructureV3 的块、图表 bbox、公式/表格；可选）
     trans.json.migrated  # 老版本的译文文件（迁移进库后归档）
     chat.json            # 「本地」对话历史（最近 200 条）
     notes.json           # 高亮
@@ -338,8 +373,8 @@ docs/v3-contracts.md  v3 新增模块（db / jobs / review / figures / session�
 ## 已知限制
 
 - 扫描件要能读/译，得先走一次 OCR（「设置 → 扫描件 OCR」填 PaddleOCR Key）；OCR 结果是按页 Markdown，不还原图片位置。
-- 对照阅读的粒度是「段落」，段落由 PDF 文本层切出来：单栏/双栏都按栏内顺序排，双栏表格这类「左右不对齐」的版面仍可能顺序不完美。
-- 公式块不渲染数学（原样纯文本），也不送翻译；表格按整块图贴出，表格里的文字不能选中/翻译。
+- 对照阅读的粒度是「段落」。默认由 PDF 文本层按栏内顺序切；开了「版面解析」就按 PP-StructureV3 的块切，双栏/图表/公式都更准，代价是上传 PDF 与按页计费。
+- 公式块显示 LaTeX 源码（不做 KaTeX 排版），也不送翻译；表格按整块图贴出（可展开纯文本），文字不能逐格选中。
 - 配图裁剪靠「图注 + 空白带 + 绘图簇」，图注缺失或图与正文贴得极近时可能裁偏；极端情况宁可不贴图，也不把正文裁进去。
 - 面板内翻译是逐段"可读"译文，不做 PDF 版面重排；需要整版双语 PDF 的话本插件不提供（不做 BabelDOC/MinerU 那类子进程）。
 - PDF 深色是**反相滤镜**，不是重新排版；彩色图会跟着变色，想要原色就切回「关」。

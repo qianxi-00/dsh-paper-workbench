@@ -1,0 +1,326 @@
+/**
+ * 版面模型契约的单元测试（不联网、不碰真实库）。
+ *
+ * 跑法：node scripts/test-layout-model.mjs
+ */
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import {
+  LAYOUT_MODEL,
+  LAYOUT_VERSION,
+  cleanLatex,
+  createLayout,
+  headingLevel,
+  htmlToText,
+  labelToKind,
+  layoutSummary,
+  joinLines,
+  missingHeadPosition,
+  normalizeLayout,
+  parseLayoutJsonl,
+} from '../lib/layout.js'
+
+let pass = 0
+let fail = 0
+function check(name, condition, detail = '') {
+  if (condition) {
+    pass += 1
+    console.log(`PASS ${name}`)
+  } else {
+    fail += 1
+    console.log(`FAIL ${name}${detail ? ' — ' + detail : ''}`)
+  }
+}
+function equal(name, actual, expected) {
+  check(name, JSON.stringify(actual) === JSON.stringify(expected),
+    `期望 ${JSON.stringify(expected)}，实际 ${JSON.stringify(actual)}`)
+}
+
+const A4 = { n: 1, w: 595, h: 842 }
+const SIZE_1191 = { width: 1191, height: 1684 }
+
+function block(label, content, bbox) {
+  return { block_label: label, block_content: content, block_bbox: bbox }
+}
+
+function page1(blocks) {
+  return { n: 1, ...SIZE_1191, blocks }
+}
+
+// ---------------------------------------------------------------- 纯函数
+
+equal('labelToKind 基本映射', ['text', 'paragraph_title', 'figure_title', 'formula', 'table', 'image'].map(labelToKind),
+  ['body', 'heading', 'caption', 'formula', 'table', 'figure'])
+equal('labelToKind 丢弃 header/footer/number', [labelToKind('header'), labelToKind('footer'), labelToKind('number')],
+  [null, null, null])
+equal('labelToKind 未知标签当正文', labelToKind('something_new'), 'body')
+
+equal('joinLines 行尾连字符', joinLines(['text-', 'only works']), 'text-only works')
+equal('joinLines 中文不插空格', joinLines(['本文提出了一种', '新的方法。']), '本文提出了一种新的方法。')
+equal('joinLines 英文插空格', joinLines(['hello', 'world']), 'hello world')
+equal('missingHeadPosition 缺段首时给出位置',
+  missingHeadPosition('Over the past few years, the performance of E2E models has surpassed', 'models has surpassed') > 0, true)
+equal('missingHeadPosition 完整时不报警',
+  missingHeadPosition('Over the past few years, models has surpassed', 'Over the past few years, models has surpassed'), -1)
+equal('cleanLatex $$…$$', cleanLatex('$$E=mc^2$$'), 'E=mc^2')
+equal('cleanLatex \\[…\\]', cleanLatex('\\[ a+b \\]'), 'a+b')
+equal('cleanLatex equation 环境', cleanLatex('\\begin{equation}x=1\\end{equation}'), 'x=1')
+equal('cleanLatex CDATA', cleanLatex('<![CDATA[y=2]]>'), 'y=2')
+
+equal('htmlToText 两行', htmlToText('<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td></td></tr></table>'),
+  'a | b\nc')
+equal('htmlToText 非表格 HTML', htmlToText('<p>hello <b>world</b></p>'), 'hello world')
+
+equal('headingLevel 2.1', headingLevel('2.1. Training dataset'), 2)
+equal('headingLevel 2', headingLevel('2 Method'), 1)
+equal('headingLevel 无编号', headingLevel('Method'), null)
+
+const jsonl = [
+  { result: { layoutParsingResults: [{ prunedResult: { ...SIZE_1191, parsing_res_list: [block('text', 'x', [0, 0, 10, 10])] } }] } },
+].map(row => JSON.stringify(row)).join('\n')
+const parsed = parseLayoutJsonl(jsonl)
+equal('parseLayoutJsonl 一页', [parsed.pages.length, parsed.skipped, parsed.pages[0].blocks.length], [1, 0, 1])
+
+const parsedBad = parseLayoutJsonl(jsonl + '\nnot json\n{"result":{}}\n')
+equal('parseLayoutJsonl 坏行计数', [parsedBad.pages.length, parsedBad.skipped], [1, 2])
+
+let threw = false
+try {
+  parseLayoutJsonl('')
+} catch {
+  threw = true
+}
+check('parseLayoutJsonl 空内容抛错', threw)
+
+const two = parseLayoutJsonl(JSON.stringify({
+  result: {
+    layoutParsingResults: [
+      { prunedResult: { ...SIZE_1191, parsing_res_list: [block('text', 'p1', [0, 0, 10, 10])] } },
+      { prunedResult: { ...SIZE_1191, parsing_res_list: [block('text', 'p2', [0, 0, 10, 10])] } },
+    ],
+  },
+}))
+equal('parseLayoutJsonl 一行两页连续编号', two.pages.map(page => page.n), [1, 2])
+
+// ---------------------------------------------------------------- normalizeLayout
+
+const layout = normalizeLayout([
+  page1([
+    block('header', 'arXiv:2601.21957v1 [cs.CV]', [10, 10, 1100, 60]),
+    block('paragraph_title', '2 Method', [100, 200, 700, 260]),
+    block('text', '服务端 OCR 有错的一句话', [100, 280, 1000, 500]),
+    block('image', '', [215, 600, 1005, 900]),
+    block('figure_title', 'Figure 2 | Overview of the model.', [215, 910, 1005, 950]),
+    block('formula', '$$E=mc^2$$', [300, 1000, 800, 1080]),
+    block('table', '<table><tr><td>a</td><td>b</td></tr></table>', [80, 1100, 1100, 1600]),
+    block('table_title', 'Table 3 | Results.', [80, 1610, 1100, 1650]),
+    block('number', '7', [500, 1660, 600, 1680]),
+  ]),
+], {
+  pageSizes: [A4],
+  pageCount: 1,
+  textFor: (page, index) => (index === 2 ? '用文本层取到的正文' : (index === 7 ? 'Table 3 | Results.' : '')),
+})
+
+equal('normalizeLayout 版本与模型', [layout.version, layout.model], [LAYOUT_VERSION, LAYOUT_MODEL])
+equal('normalizeLayout 丢弃 header/number', layout.blocks.map(item => item.kind),
+  ['heading', 'body', 'figure', 'caption', 'formula', 'table', 'caption'])
+equal('normalizeLayout 正文优先文本层', layout.blocks[1].text, '用文本层取到的正文')
+equal('normalizeLayout 公式带 latex 且无正文', [layout.blocks[4].text, layout.blocks[4].latex], ['', 'E=mc^2'])
+equal('normalizeLayout 表格有 html 和纯文本', [layout.blocks[5].html.startsWith('<table>'), layout.blocks[5].text],
+  [true, 'a | b'])
+equal('normalizeLayout bbox 按两轴缩放到 A4',
+  [layout.blocks[1].bbox.x, layout.blocks[1].bbox.width],
+  [Math.round(100 * 595 / 1191 * 100) / 100, Math.round(900 * 595 / 1191 * 100) / 100])
+equal('normalizeLayout 顺序连续', layout.blocks.map(item => item.order), [0, 1, 2, 3, 4, 5, 6])
+equal('normalizeLayout 标题层级', layout.blocks[0].level, 1)
+
+equal('normalizeLayout 图与表格各归各的图注',
+  layout.figures.map(item => [item.kind, item.caption, item.captionOrder]),
+  [['figure', 'Figure 2 | Overview of the model.', 3], ['table', 'Table 3 | Results.', 6]])
+equal('normalizeLayout figureIndex 指向 figures', [layout.blocks[2].figureIndex, layout.blocks[5].figureIndex], [0, 1])
+equal('normalizeLayout 页尺寸不给时用服务尺寸（无告警）',
+  normalizeLayout([page1([block('text', 'x', [0, 0, 10, 10])])], { pageCount: 1 }).warnings, [])
+check('normalizeLayout 宽高比不一致有告警',
+  normalizeLayout([page1([block('text', 'x', [0, 0, 10, 10])])], { pageSizes: [{ n: 1, w: 612, h: 792 }] }).warnings.length === 1)
+
+const offset = normalizeLayout([page1([block('text', 'x', [0, 0, 10, 10])])], { pageOffset: 50, pageCount: 60 })
+equal('normalizeLayout 分片页号偏移', [offset.blocks[0].page, offset.figures.length], [51, 0])
+
+const captionPick = normalizeLayout([page1([
+  block('text', '正文', [10, 10, 900, 60]),
+  block('figure_title', 'Figure 5: An illustration of the model.', [10, 70, 900, 90]),
+  block('text', 'PDF 层掉字距的废文本 P f F t d A t P ll l T', [10, 100, 900, 160]),
+  block('text', '', [10, 170, 900, 200]),
+])], {
+  pageSizes: [A4],
+  pageCount: 1,
+  textFor: (page, index) => {
+    if (index === 0) return '文本层正文'
+    if (index === 1) return 'Figure5: Anillustrationofthemodel.'   // PDF 层掉了词间空格
+    if (index === 2) return 'P f F t d A t P ll l T f f N t i'
+    return ''
+  },
+})
+equal('图注优先用服务端文字（空格没丢）', captionPick.blocks.find(item => item.kind === 'caption').text,
+  'Figure 5: An illustration of the model.')
+equal('文本层是废字时退回服务端文字', captionPick.blocks[2].text, 'PDF 层掉字距的废文本 P f F t d A t P ll l T')
+equal('空正文块被丢掉', captionPick.blocks.some(item => item.text === ''), false)
+
+const summary = layoutSummary(layout)
+equal('layoutSummary 统计', [summary.blocks, summary.figures, summary.byKind.body, summary.byKind.caption],
+  [7, 2, 1, 2])
+
+// ---------------------------------------------------------------- createLayout（假依赖）
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-layout-model-'))
+const paperDir = path.join(root, 'paper-x')
+fs.mkdirSync(paperDir, { recursive: true })
+const pdfPath = path.join(paperDir, 'paper.pdf')
+fs.writeFileSync(pdfPath, 'fake pdf')
+
+const calls = []
+const fakeStore = {
+  paperFile: (id, name) => path.join(root, id, name),
+  getMeta: async id => ({ id, title: '样例' }),
+  resolvePdf: async () => ({ path: pdfPath, meta: { id: 'paper-x' } }),
+  getConfig: async () => ({ ocr: { token: 'token-1', layoutModel: '' } }),
+  readJson: async (file, fallback) => {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch {
+      return fallback
+    }
+  },
+  writeJsonAtomic: async (file, value) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(value))
+  },
+}
+const fakePdf = {
+  callTool: async (command, payload) => {
+    calls.push([command, payload])
+    if (command === 'info') return { ok: true, pages: 1, sizes: [A4] }
+    if (command === 'split') {
+      fs.writeFileSync(payload.out, 'part')
+      return { ok: true, pages: 1 }
+    }
+    if (command === 'page_lines') {
+      return {
+        ok: true,
+        page: payload.page,
+        lines: [
+          { x: 52, y: 52, x2: 448, y2: 70, text: '1 Introduction' },
+          { x: 52, y: 92, x2: 498, y2: 110, text: '第一行正文' },
+          { x: 52, y: 120, x2: 498, y2: 138, text: '第二行正文' },
+        ],
+      }
+    }
+    throw new Error('未预期的命令：' + command)
+  },
+}
+const events = []
+const fakeOcr = {
+  submitJob: async options => {
+    events.push(['submit', options.model, path.basename(options.filePath)])
+    return { jobId: 'job-1' }
+  },
+  pollJob: async options => {
+    options.onProgress({ state: 'running', jobId: options.jobId, totalPages: 1, extractedPages: 0 })
+    return { state: 'done', jsonUrl: 'http://example.com/x.jsonl' }
+  },
+  fetchResults: async options => {
+    events.push(['fetch', options.withRaw])
+    const text = JSON.stringify({
+      result: {
+        layoutParsingResults: [{
+          prunedResult: {
+            ...SIZE_1191,
+            parsing_res_list: [
+              block('paragraph_title', '服务端标题', [100, 100, 900, 160]),
+              block('text', '服务端文字', [100, 180, 1000, 400]),
+            ],
+          },
+        }],
+      },
+    })
+    return { pages: [], skipped: 0, text }
+  },
+}
+
+const runner = createLayout({ store: fakeStore, pdf: fakePdf, ocr: fakeOcr })
+const built = await runner.runLayout('paper-x', { onProgress: event => events.push(['emit', event.phase]) })
+equal('runLayout 命令顺序', calls.map(item => item[0]), ['info', 'split', 'page_lines'])
+equal('runLayout 只上传切片', events.find(item => item[0] === 'submit').slice(1), [LAYOUT_MODEL, 'p1-1.pdf'])
+equal('runLayout 取原始结果', events.find(item => item[0] === 'fetch')[1], true)
+equal('runLayout 正文按行回填文本层', built.blocks.map(item => item.text),
+  ['1 Introduction', '第一行正文第二行正文'])
+check('runLayout 落盘 layout.json', fs.existsSync(path.join(paperDir, 'layout.json')))
+const reread = await runner.readLayout('paper-x')
+equal('readLayout 读回同一份', reread.blocks.length, 2)
+check('clearLayout 删得掉', (await runner.clearLayout('paper-x')) && !fs.existsSync(path.join(paperDir, 'layout.json')))
+
+let tokenError = ''
+try {
+  const noToken = createLayout({
+    store: { ...fakeStore, getConfig: async () => ({ ocr: { token: '' } }) },
+    pdf: fakePdf,
+    ocr: fakeOcr,
+  })
+  await noToken.runLayout('paper-x')
+} catch (error) {
+  tokenError = error.message
+}
+check('没填 Key 时给中文提示', tokenError.includes('API Key'), tokenError)
+
+// 分片：3 页 + 每批 2 页 ⇒ 切两次（1-2、3-3），页号要连续
+const batchCalls = []
+const batchPdf = {
+  callTool: async (command, payload) => {
+    batchCalls.push([command, payload.from, payload.to])
+    if (command === 'info') return { ok: true, pages: 3, sizes: [A4, A4, A4] }
+    if (command === 'split') {
+      fs.writeFileSync(payload.out, 'part')
+      return { ok: true, pages: payload.to - payload.from + 1 }
+    }
+    if (command === 'page_lines') {
+      return {
+        ok: true,
+        page: payload.page,
+        lines: [{ x: 10, y: 12, x2: 300, y2: 28, text: '第' + payload.page + '页正文' }],
+      }
+    }
+    throw new Error('未预期的命令：' + command)
+  },
+}
+let batchSpan = 1
+const batchOcr = {
+  submitJob: async options => {
+    const match = /p(\d+)-(\d+)\.pdf$/.exec(path.basename(options.filePath))
+    batchSpan = match ? Number(match[2]) - Number(match[1]) + 1 : 1
+    return { jobId: 'job-b' }
+  },
+  pollJob: async () => ({ state: 'done', jsonUrl: 'http://example.com/b.jsonl' }),
+  fetchResults: async () => ({
+    pages: [],
+    skipped: 0,
+    text: JSON.stringify({
+      result: {
+        layoutParsingResults: Array.from({ length: batchSpan }, () => ({
+          prunedResult: { ...SIZE_1191, parsing_res_list: [block('text', '页', [10, 10, 900, 60])] },
+        })),
+      },
+    }),
+  }),
+}
+const batchRunner = createLayout({ store: fakeStore, pdf: batchPdf, ocr: batchOcr })
+const batched = await batchRunner.runLayout('paper-x', { batchPages: 2 })
+equal('分片：3 页按 2 页一批切两次', batchCalls.filter(item => item[0] === 'split').map(item => [item[1], item[2]]),
+  [[1, 2], [3, 3]])
+equal('分片：页号连续', batched.blocks.map(item => item.page), [1, 2, 3])
+
+fs.rmSync(root, { recursive: true, force: true })
+
+console.log(`\n${pass} PASS / ${fail} FAIL`)
+process.exit(fail === 0 ? 0 : 1)

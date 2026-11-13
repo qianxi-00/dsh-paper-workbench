@@ -93,6 +93,7 @@ const state = {
   logs: { open: false, events: [], lastSeq: 0, timer: null, busy: false },
   review: null,
   reviewBusy: false,
+  layoutBusy: false,
   figures: [],
   figuresByKey: {},
   chatMode: 'session', // session = 落进真正的 DSH 会话；local = 插件自绘（老宿主兜底）
@@ -2131,9 +2132,42 @@ function sameHeading(text, title) {
   return a === b || a.includes(b) || b.includes(a)
 }
 
+function figureUrl(position) {
+  return API + 'figure?id=' + encodeURIComponent(state.current.meta.id) + '&index=' + position
+}
+
+/** 版面模型给的图/表块：图就显示在自己那一格，表格默认显示裁剪图，可展开文字。 */
+function renderFigureParagraph(paragraph) {
+  const kind = paragraph.kind || 'figure'
+  const position = Number(paragraph.figureIndex)
+  if (!Number.isFinite(position) || position < 0) {
+    return h('div', { class: 'para kind-body', id: 'para-' + paragraph.id }, paragraph.text || '')
+  }
+  const src = figureUrl(position)
+  const figure = h(
+    'figure',
+    { class: 'inline-fig block-fig kind-' + kind, id: 'para-' + paragraph.id, 'data-page': paragraph.page || 1 },
+    h('img', {
+      src,
+      alt: (kind === 'table' ? '表 ' : '图 ') + (position + 1),
+      loading: 'lazy',
+      title: '点击看大图',
+      onclick: () => window.open(src, '_blank', 'noopener'),
+    }),
+  )
+  if (kind === 'table' && paragraph.text) {
+    figure.append(
+      h('details', { class: 'table-text' }, h('summary', {}, '表格文字'),
+        h('pre', {}, paragraph.text)),
+    )
+  }
+  return figure
+}
+
 function renderParagraph(paragraph) {
   const kind = paragraph.kind || 'body'
   const id = 'para-' + paragraph.id
+  if (kind === 'figure' || kind === 'table') return renderFigureParagraph(paragraph)
   if (kind === 'heading') {
     const level = Math.min(4, Math.max(2, (paragraph.level || 2) + 1))
     return h('h' + level, { class: 'para kind-heading level-' + level, id }, paragraph.text)
@@ -2156,13 +2190,11 @@ function renderParagraph(paragraph) {
     h('div', { class: 'para-orig' }, paragraph.text),
   )
   if (kind === 'formula') {
-    para.append(
-      h(
-        'div',
-        { class: 'para-zh formula-note' },
-        '（公式/表格段，见原文页 p.' + (paragraph.page || '?') + '）',
-        h('button', { class: 'link', onclick: () => jumpToPage(paragraph.page || 1) }, '打开原文页'),
-      ),
+    para.classList.add('kind-formula')
+    para.replaceChildren(
+      h('div', { class: 'para-latex', 'data-tex': paragraph.latex || '' }, paragraph.latex || paragraph.text || ''),
+      h('button', { class: 'link formula-link', onclick: () => jumpToPage(paragraph.page || 1) },
+        '见原文页 p.' + (paragraph.page || '?')),
     )
     return para
   }
@@ -2244,6 +2276,7 @@ function renderCompareToolbar() {
       ? h('button', { id: 'retry-failed', title: '重新请求这些翻译失败的段落', onclick: retryFailedSegments }, '重试失败 ' + retryable.length)
       : null,
     h('button', { id: 'review-run', disabled: !docReady || !hostReady() || state.reviewBusy, title: hostReady() ? '检查空译文、截断、残留英文、公式残留等可疑段落' : '重启桌面端后可用', onclick: () => runReview('static') }, state.reviewBusy ? '自检中…' : '自检'),
+    h('button', { id: 'layout-run', class: 'ghost', disabled: !docReady || !hostReady() || state.layoutBusy, title: hostReady() ? '用 PaddleOCR 的 PP-StructureV3 版面模型重新切段：会上传 PDF、按页计费' : '重启桌面端后可用', onclick: runLayoutParse }, state.layoutBusy ? '解析中…' : '版面'),
     h('button', { id: 'logs-toggle', class: 'ghost' + (state.logs.open ? ' active' : ''), disabled: !hostReady(), title: hostReady() ? '任务日志（翻译 / OCR / 自检）' : '重启桌面端后可用', onclick: toggleLogs }, '日志'),
   )
 }
@@ -3508,6 +3541,9 @@ function buildFiguresByKey() {
   const map = {}
   state.figuresByKey = map
   const paragraphs = (state.doc && state.doc.paragraphs) || []
+  // 版面模型给的图已经按位置渲染在「图块自己那一段」里了，不用再按图注/正文猜着挂
+  const figures = (state.figures || []).filter(item => item.attachOrder === undefined || item.attachOrder === null)
+  if (figures.length === 0) return
   const labelOf = (text) => {
     const match = /(?:图|圖|Figure|Fig\.?)\s*([0-9]+|[IVXLC]+)/i.exec(String(text || ''))
     if (!match) return null
@@ -3530,13 +3566,13 @@ function buildFiguresByKey() {
     if (!label) continue
     const key = paragraphKey(paragraph)
     if (!key) continue
-    const position = state.figures.findIndex(
+    const position = figures.findIndex(
       (figure, index) => !used.has(index) && Number(figure.label) === label &&
         Number(figure.page) === Number(paragraph.page))
     if (position < 0) continue
     used.add(position)
     if (!map[key]) map[key] = []
-    map[key].push({ ...state.figures[position], position })
+    map[key].push({ ...figures[position], position })
   }
   // ② 正文提到「图 N / Figure N」的段落
   for (const paragraph of paragraphs) {
@@ -3586,6 +3622,52 @@ function renderInlineFigure(figure, ownCaption = false) {
   )
   if (!ownCaption) node.append(h('figcaption', {}, caption))
   return node
+}
+
+// --- 版面解析（PP-StructureV3）
+
+/**
+ * 跑一次版面解析。会花钱、会上传 PDF，所以：先查有没有 Key，再明确确认一次。
+ * 结果落 layout.json，doc/figures 由服务端优先读它，前端只要重载这两样。
+ */
+async function runLayoutParse() {
+  const meta = state.current && state.current.meta
+  if (!meta) return
+  if (!hostReady()) {
+    needRestart()
+    return
+  }
+  if (state.layoutBusy) return
+  let status = null
+  try {
+    status = await rpc('layout.status', { id: meta.id })
+  } catch (error) {
+    toast('查版面状态失败：' + error.message)
+    return
+  }
+  if (status && status.ready === false) {
+    toast('还没填 PaddleOCR 的 API Key：设置 → PaddleOCR 里填一次')
+    return
+  }
+  const current = status && status.layout
+  const question = current
+    ? '这篇已经解析过（' + current.blocks + ' 块 / ' + current.figures + ' 图，' + current.model + '）。\n重新解析会再上传一次 PDF、再花一次配额，确定？'
+    : '版面解析会把整篇 PDF 上传到百度 AI Studio，用 PP-StructureV3 按页计费。\n解析后对照视图按真实版面切段，图表原位显示。继续？'
+  if (!window.confirm(question)) return
+  state.layoutBusy = true
+  render()
+  try {
+    const result = await rpc('layout.run', { id: meta.id })
+    const summary = (result && result.layout) || {}
+    toast('版面解析完成：' + (summary.blocks || 0) + ' 块 / ' + (summary.figures || 0) + ' 图')
+    await loadFigures()
+    await loadDoc(meta.id)
+  } catch (error) {
+    toast('版面解析失败：' + error.message)
+  } finally {
+    state.layoutBusy = false
+    render()
+  }
 }
 
 // --- 翻译自检
