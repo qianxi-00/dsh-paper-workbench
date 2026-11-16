@@ -434,6 +434,85 @@ async function run() {
     assertFrame({ status: 'completed' }, { kind: 'done' })
   })
 
+  await check('normalizeFrame ⑦：真实宿主的外层帧（event.data.message / snapshot.records）', () => {
+    const assistant = normalizeFrame({
+      type: 'event',
+      event: {
+        type: 'assistant/message',
+        seq: 12,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            role: 'assistant',
+            content: [
+              { type: 'reasoning', text: '用户在问 1+1' },
+              { type: 'text', text: '2 的 10 次方 = **1024**' },
+            ],
+          },
+        },
+      },
+    })
+    assert.equal(assistant.kind, 'message')
+    assert.equal(assistant.role, 'assistant')
+    assert.equal(assistant.text, '2 的 10 次方 = **1024**')
+    assert.deepEqual(assistant.blocks.map((b) => b.type), ['reasoning', 'text'])
+
+    // 工作区指令/技能目录/时间采样也走 user/message，面板不能当成人话显示
+    const real = normalizeFrame({
+      type: 'event',
+      event: { type: 'user/message', data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '完整问题' }] } },
+    })
+    assert.equal(real.kind, 'message')
+    assert.equal(real.role, 'user')
+    assert.equal(real.text, '完整问题')
+    const reminder = normalizeFrame({
+      type: 'event',
+      event: { type: 'user/message', data: { source: { kind: 'system-reminder' }, content: [{ type: 'text', text: '<system-reminder>' }] } },
+    })
+    assert.equal(reminder.kind, 'meta')
+
+    const delta = normalizeFrame({ type: 'event', event: { type: 'delta', data: { text: '增量' } } })
+    assert.equal(delta.kind, 'delta')
+    assert.equal(delta.text, '增量')
+
+    // 重开面板要靠 snapshot.records 把历史补回来
+    const snapshot = normalizeFrame({
+      type: 'snapshot',
+      records: [
+        { type: 'event', event: { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '问' }] } } },
+        { type: 'event', event: { type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: '答' }] } } } },
+        { type: 'event', event: { type: 'turn/start', data: { turn: 1 } } },
+      ],
+    })
+    assert.equal(snapshot.kind, 'snapshot')
+    assert.deepEqual(snapshot.messages.map((m) => m.role + ':' + m.text), ['user:问', 'assistant:答'])
+  })
+
+  await check('normalizeFrame ⑧：assistant-stream 的 reasoning/text 增量分开', () => {
+    const thinking = normalizeFrame({
+      type: 'assistant-stream',
+      frame: { type: 'chunk', chunk: { type: 'reasoning-delta', index: 0, text: '用户在问概念' } },
+    })
+    assert.equal(thinking.kind, 'delta')
+    assert.equal(thinking.part, 'reasoning')
+    assert.equal(thinking.text, '用户在问概念')
+    const answer = normalizeFrame({
+      type: 'assistant-stream',
+      frame: { type: 'chunk', chunk: { type: 'text-delta', index: 1, text: '梯度下降' } },
+    })
+    assert.equal(answer.kind, 'delta')
+    assert.equal(answer.part, 'text')
+    // start / block-start / usage 这些控制帧不能当成正文
+    for (const frame of [
+      { type: 'assistant-stream', frame: { type: 'start', attemptId: 'x' } },
+      { type: 'assistant-stream', frame: { type: 'chunk', chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } } },
+      { type: 'assistant-stream', frame: { type: 'chunk', chunk: { type: 'usage', usage: { totalTokens: 3 } } } },
+    ]) {
+      assert.equal(normalizeFrame(frame).kind, 'other')
+    }
+  })
+
   await check('normalizeFrame：null/字符串/数组/数字/无文本消息/会抛的 getter 都不抛', () => {
     for (const input of [null, undefined, 'plain string', 42, [], [{ type: 'text', text: 'x' }], true]) {
       const out = normalizeFrame(input)

@@ -181,6 +181,12 @@ Windows 用户没有 `npm` 也没关系：桌面端 → 论文工作台 → `⚙
   所以图片不能直接"看"，只能以文件形式交给 agent 读。
 - 会话 id 是 `pb-conv-<对话id>`；对话元数据（标题、论文清单、附件清单）存在 `chats.json`，
   对话内容本身在 DSH 会话库里。
+- **历史与思考过程**：面板直接解析宿主的会话流（`snapshot.records` + `assistant/message` +
+  `assistant-stream` 的 `reasoning-delta` / `text-delta`），所以重开面板能看到之前的问答，
+  模型的思考过程渲染成可折叠的「思考过程」块，正文照常 Markdown；系统注入的
+  `system-reminder`（工作区指令、技能目录、时间采样）不会当成人话显示。
+  呈现分层参考了 DeepSeek 开源的 [chat-demo](https://github.com/deepseek-ai/chat-demo)
+  （它是持有 API Key 的独立 SPA，不能直接嵌进来；我们只借用它的分层思路）。
 
 ### 工作区：所有会话都在「论文」下
 

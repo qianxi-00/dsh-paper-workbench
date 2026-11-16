@@ -4289,15 +4289,23 @@ function sessionMessages() {
   let live = null
   for (const frame of state.session.frames) {
     if (!frame) continue
+    if (frame.kind === 'snapshot') {
+      // snapshot 是会话的历史事件流：重开面板时靠它把之前的消息补回来
+      out.length = 0
+      live = null
+      for (const item of frame.messages || []) out.push({ role: item.role, text: item.text, blocks: item.blocks })
+      continue
+    }
     if (frame.kind === 'message') {
-      out.push({ role: frame.role || 'assistant', text: frame.text || '' })
+      out.push({ role: frame.role || 'assistant', text: frame.text || '', blocks: frame.blocks })
       live = null
     } else if (frame.kind === 'delta') {
       if (!live) {
-        live = { role: 'assistant', text: '', streaming: true }
+        live = { role: 'assistant', text: '', reasoning: '', streaming: true }
         out.push(live)
       }
-      live.text += frame.text || ''
+      if (frame.part === 'reasoning') live.reasoning = (live.reasoning || '') + (frame.text || '')
+      else live.text += frame.text || ''
     } else if (frame.kind === 'done') {
       if (live) live.streaming = false
       live = null
@@ -4337,21 +4345,66 @@ function pruneSessionFrames() {
  * 每帧 render() 会换掉 #chat-input，用户正在输入的字会丢焦点。
  * 没有这条气泡时（新一轮回答刚开始）也只补一条，不整页重绘。
  */
+/**
+ * 会话里的「思考过程」与工具调用：宿主把一次回答拆成 reasoning/text 部件。
+ * 思考默认折叠（和 DeepSeek 官方客户端一样），工具调用只显示名字，点开看摘要。
+ */
+function renderSessionBlocks(message) {
+  const blocks = Array.isArray(message.blocks) ? message.blocks : []
+  const liveReasoning = String(message.reasoning || '').trim()
+  if (blocks.length === 0 && liveReasoning === '') return null
+  const reasoning = (blocks.filter((b) => b.type === 'reasoning').map((b) => b.text).join('\n\n') || liveReasoning).trim()
+  const tools = blocks.filter((b) => b.type === 'tool')
+  if (reasoning === '' && tools.length === 0) return null
+  const wrap = h('div', { class: 'msg-extra' })
+  if (tools.length > 0) {
+    const names = tools.map((t) => t.name || '工具').join(' · ')
+    wrap.append(
+      h(
+        'details',
+        { class: 'msg-tools' },
+        h('summary', {}, '工具调用 ' + tools.length + ' 次'),
+        h('pre', { class: 'tool-body' }, names + '\n\n' + tools.map((t) => (t.name ? t.name + ': ' : '') + (t.text || '')).join('\n\n')),
+      ),
+    )
+  }
+  if (reasoning !== '') {
+    wrap.append(h('details', { class: 'msg-think' }, h('summary', {}, '思考过程'), h('pre', { class: 'think-body' }, reasoning)))
+  }
+  return wrap
+}
+
 function paintSessionLive() {
   const messages = sessionMessages()
   const live = messages.length > 0 ? messages[messages.length - 1] : null
   if (!live || !live.streaming) return false
   const list = document.querySelector('.chat-messages')
   if (!list) return false
-  let body = document.getElementById('session-live-body')
-  if (!body) {
-    body = h('div', { class: 'msg-body streaming', id: 'session-live-body' })
-    list.append(h('div', { class: 'msg assistant' }, body))
+  let wrap = document.getElementById('session-live')
+  if (!wrap) {
+    wrap = h('div', { class: 'msg assistant', id: 'session-live' })
+    wrap.append(h('div', { class: 'msg-extra' }))
+    wrap.append(h('div', { class: 'msg-body streaming', id: 'session-live-body' }))
+    list.append(wrap)
     const hint = list.querySelector('.chat-hint')
     if (hint) hint.remove()
   }
+  const extra = wrap.querySelector('.msg-extra')
+  const reasoning = String(live.reasoning || '')
+  if (reasoning !== '') {
+    let think = extra.querySelector('.msg-think')
+    if (!think) {
+      think = h('details', { class: 'msg-think', open: true }, h('summary', {}, '思考过程'), h('pre', { class: 'think-body' }))
+      extra.append(think)
+    }
+    const body = think.querySelector('.think-body')
+    const atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 24
+    body.textContent = reasoning
+    if (atEnd) body.scrollTop = body.scrollHeight
+  }
+  const body = document.getElementById('session-live-body')
   body.innerHTML = renderAssistantHtml(live.text) + '<span class="caret"></span>'
-  list.scrollTop = list.scrollHeight
+  if (list.scrollHeight - list.scrollTop - list.clientHeight < 80) list.scrollTop = list.scrollHeight
   return true
 }
 
@@ -4369,12 +4422,34 @@ async function startSessionStream(force = false) {
   state.session.streaming = true
   const controller = new AbortController()
   state.session.abort = controller
+  // 代次令牌：连了两条流（发送后自动重连 + 面板重绘触发）时，旧流的帧不能再写进列表，
+  // 否则一条提问会出现两个气泡、回答也会重复。
+  const seq = (state.session.seq || 0) + 1
+  state.session.seq = seq
   render()
   try {
     await streamSseGet(
       '/paper-workbench/session/follow?conv=' + encodeURIComponent(id),
       {
         frame: (frame) => {
+          if (state.session.seq !== seq) return
+          if (frame && frame.kind === 'snapshot') {
+            // 历史消息一次性铺开，不参与后面的增量拼接。
+            // 没有历史时保留本地乐观回显（用户刚发出去的那句），别把气泡弄丢。
+            if ((frame.messages || []).length > 0) {
+              state.session.frames = [{ kind: 'snapshot', messages: frame.messages }]
+              render()
+            }
+            return
+          }
+          // 同一条消息可能既有 snapshot 又有 user/message 事件（宿主补发），
+          // 相邻重复就直接丢掉，否则一次提问会出现三个气泡。
+          if (frame && frame.kind === 'message') {
+            // 用展开后的消息列表比较：snapshot 里的历史也要算进来
+            const recent = sessionMessages()
+            const last = recent.length > 0 ? recent[recent.length - 1] : null
+            if (last && last.role === frame.role && last.text === frame.text) return
+          }
           state.session.frames.push(frame)
           pruneSessionFrames()
           // 增量帧只补最后一口气泡；只有消息边界与流结束才整页重绘，
@@ -4906,7 +4981,21 @@ function renderSessionChat(aside) {
     const body = h('div', { class: 'msg-body' + (message.streaming ? ' streaming' : ''), id: message.streaming ? 'session-live-body' : undefined })
     body.innerHTML = renderAssistantHtml(message.text)
     if (message.streaming) body.append(h('span', { class: 'caret' }))
-    list.append(h('div', { class: 'msg assistant' }, body, h('div', { class: 'msg-actions' }, h('button', { class: 'link', onclick: () => copyText(message.text) }, '复制'))))
+    const extra = renderSessionBlocks(message)
+    list.append(
+      h(
+        'div',
+        { class: 'msg assistant' },
+        extra || '',
+        body,
+        h(
+          'div',
+          { class: 'msg-actions' },
+          h('button', { class: 'link', onclick: () => copyText(message.text) }, '复制'),
+          h('button', { class: 'link', onclick: () => sendSessionMessage('请重新回答上一条，并换一种更简洁的说法。') }, '重新生成'),
+        ),
+      ),
+    )
   }
   aside.append(list)
   const input = h('textarea', {

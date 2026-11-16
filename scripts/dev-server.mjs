@@ -119,21 +119,47 @@ function mockSessionController() {
     follow(options) {
       const sessionId = String((options && options.address && options.address.sessionId) || '')
       const signal = options && options.signal
+      // 尽量照真实宿主的帧形状发：外层 snapshot / event / assistant-stream，
+      // 这样 normalizeFrame 的外层解包、思考部件、历史回放都能在假环境里被测到。
+      const userEvent = (text) => ({
+        type: 'event',
+        event: { type: 'user/message', seq: 1, data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] } },
+      })
+      const assistantEvent = (reasoning, text) => ({
+        type: 'event',
+        event: {
+          type: 'assistant/message',
+          seq: 2,
+          data: { message: { role: 'assistant', content: [{ type: 'reasoning', text: reasoning }, { type: 'text', text }] } },
+        },
+      })
       return (async function* frames() {
         const list = prompts.get(sessionId) || []
-        for (const item of list) yield { kind: 'message', message: { role: item.role, content: [{ type: 'text', text: item.text }] } }
+        yield {
+          type: 'snapshot',
+          records: list.map((item) => (item.role === 'user' ? userEvent(item.text) : assistantEvent(item.reasoning || '', item.text))),
+        }
         const last = list[list.length - 1]
         if (!last || last.role !== 'user') return
+        yield userEvent(last.text)
         const reply = '（假会话回答）收到「' + last.text.slice(0, 40) + '」。这条会话是假的，只用来验证多篇论文/附件/多轮在界面上的表现 [p.1]。'
+        const reasoning = '用户在问一个问题，我按论文上下文回答；顺手演示一下「思考过程」折叠块。'
+        yield { type: 'assistant-stream', frame: { type: 'start', attemptId: 'mock:1' } }
+        for (const part of reasoning.match(/[\s\S]{1,8}/g) || []) {
+          if (signal && signal.aborted) return
+          await sleep(10)
+          yield { type: 'assistant-stream', frame: { type: 'chunk', chunk: { type: 'reasoning-delta', text: part } } }
+        }
         for (const part of reply.match(/[\s\S]{1,10}/g) || []) {
           if (signal && signal.aborted) return
           await sleep(15)
-          yield { kind: 'assistant-delta', text: part }
+          yield { type: 'assistant-stream', frame: { type: 'chunk', chunk: { type: 'text-delta', text: part } } }
         }
+        yield assistantEvent(reasoning, reply)
         // 记下回复，下次 follow 重放历史时才像真会话（多轮）
-        list.push({ role: 'assistant', text: reply })
+        list.push({ role: 'assistant', text: reply, reasoning })
         prompts.set(sessionId, list)
-        yield { kind: 'finish', reason: { kind: 'stop' } }
+        yield { type: 'event', event: { type: 'turn/end', seq: 3, data: { turn: 1 } } }
       })()
     },
   }

@@ -1043,3 +1043,26 @@ table.lit-table tbody tr:nth-child(even) td { background: rgba(127, 127, 127, 0.
   outline-offset: -6px;
   background: rgba(79, 140, 255, 0.06);
 }
+
+/* 会话里的思考过程与工具调用（对齐 DeepSeek 官方客户端的呈现分层） */
+.msg-extra { margin-bottom: 6px; }
+.msg-think, .msg-tools {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 10px;
+  margin-bottom: 6px;
+  background: rgba(127, 127, 127, 0.045);
+  font-size: 12.5px;
+}
+.msg-think summary, .msg-tools summary { cursor: pointer; color: var(--muted); }
+.msg-think[open] summary, .msg-tools[open] summary { margin-bottom: 6px; }
+.think-body, .tool-body {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  color: var(--muted);
+  line-height: 1.6;
+}
