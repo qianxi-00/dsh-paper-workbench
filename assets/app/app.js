@@ -100,6 +100,7 @@ const state = {
   layoutJob: null,
   layoutResumable: false,
   layoutSavedPages: 0,
+  layoutApplied: false,
   figures: [],
   figuresByKey: {},
   chatMode: 'session', // session = 落进真正的 DSH 会话；local = 插件自绘（老宿主兜底）
@@ -796,6 +797,15 @@ function translateHandlers(job) {
       paintTranslation(key)
       paintTranslateChrome()
     },
+    skipped(data) {
+      if (!live()) return
+      const key = normalizeKey(data && data.key)
+      if (!key) return
+      // 模型把名单/符号原样返回：不写译文，标一条说明，别在英文下面再贴一遍英文
+      state.streams.set(key, { status: 'skipped', text: '', message: String((data && data.reason) || '无需翻译') })
+      paintTranslation(key)
+      paintTranslateChrome()
+    },
     error(data) {
       if (!live()) return
       const key = normalizeKey(data && data.key)
@@ -809,6 +819,12 @@ function translateHandlers(job) {
       if (!live()) return
       state.translateBusy = false
       paintTranslateChrome()
+      if (job.mode === 'titles' && job.done.size === 0 && !state.translateError) {
+        const skipped = (data && data.skipped) || 0
+        toast(skipped > 0
+          ? '目录里 ' + skipped + ' 个标题和原文一样，没有可翻的内容'
+          : '没有翻到任何标题：先确认「版面/文档模型」已经建好，再点一次目录翻译', 6000)
+      }
       if (data && data.ok === false) {
         state.translateError =
           job.mode === 'titles'
@@ -927,9 +943,9 @@ function translateTitles() {
     done: new Set(),
     failed: new Set(),
   }
-  // 只翻标题：额外带一个空 keys，让宿主把段落池收成空（只传 titles 会被当成整篇段落翻译）。
-  // 这是宿主 lib/ai.js 的当前语义，写在请求里比依赖后端改更稳。
-  runTranslate({ id: state.current.meta.id, titles: true, keys: [] }, job)
+  // 只翻目录标题：titles:true 已经让宿主把段落池收成空（见 lib/ai.js 的 titlesWanted），
+  // 千万别再带空的 keys —— [] 会被当成「指定了这些 key」，把标题全过滤掉。
+  runTranslate({ id: state.current.meta.id, titles: true }, job)
 }
 
 function translateKeys(keys) {
@@ -1035,12 +1051,26 @@ function ensureShowZh() {
   if (compare && !compare.classList.contains('show-zh')) compare.classList.add('show-zh')
 }
 
+/** 和 lib/ai.js 的 sameText 同义：去空白/标点/大小写后比较，用来识别「译文就是原文」。 */
+function sameTextLoose(a, b) {
+  const flat = (value) => String(value === undefined || value === null ? '' : value)
+    .toLowerCase()
+    .replace(/[\s　]+/g, '')
+    .replace(/[.,;:!?、，。；：！？"'“”‘’()（）\[\]【】—-]/g, '')
+  const left = flat(a)
+  const right = flat(b)
+  return Boolean(left) && left === right
+}
+
 function zhContent(key, text, stream) {
   if (text) return [h('div', { class: 'zh-text' }, text)]
   if (stream && stream.status === 'streaming') {
     return [h('div', { class: 'zh-text' }, stream.text || ''), h('span', { class: 'caret' })]
   }
   if (stream && stream.status === 'pending') return [h('span', { class: 'muted' }, '翻译中…')]
+  if (stream && stream.status === 'skipped') {
+    return [h('span', { class: 'muted' }, stream.message)]
+  }
   if (stream && stream.status === 'error') {
     return [h('span', { class: 'error' }, stream.message), h('button', { class: 'link', onclick: () => retryKey(key) }, '重试')]
   }
@@ -1345,6 +1375,7 @@ async function openPaper(id, options = {}) {
     state.layoutJob = null
     state.layoutResumable = false
     state.layoutSavedPages = 0
+    state.layoutApplied = false
     state.layoutBusy = false
     state.zhMode = false
     state.zhStatus = null
@@ -1359,6 +1390,7 @@ async function openPaper(id, options = {}) {
         state.layoutJob = status.job || null
         state.layoutResumable = Boolean(status.resumable)
         state.layoutSavedPages = status.savedPages || 0
+        state.layoutApplied = Boolean(status.layout && status.layout.applied)
         const running = status.job && status.job.state === 'running'
         state.layoutBusy = Boolean(running)
         render()
@@ -1438,7 +1470,22 @@ async function loadDoc(id, seq) {
     state.docError = state.doc ? '' : 'doc.get 没有返回文档模型'
     state.trans = {}
     const entries = (value && value.trans && value.trans.entries) || {}
-    for (const [key, entry] of Object.entries(entries)) state.trans[String(key).toLowerCase()] = entry
+    // 老版本可能把「模型原样返回英文」的名单段存成了译文：这里藏掉，免得原文下面再贴一遍英文
+    const byHash = new Map()
+    for (const paragraph of (state.doc && state.doc.paragraphs) || []) {
+      if (paragraph && paragraph.hash) byHash.set(String(paragraph.hash).toLowerCase(), paragraph.text)
+    }
+    let hidden = 0
+    for (const [key, entry] of Object.entries(entries)) {
+      const lower = String(key).toLowerCase()
+      const source = byHash.get(lower)
+      if (source && entry && entry.zh && sameTextLoose(entry.zh, source)) {
+        hidden += 1
+        continue
+      }
+      state.trans[lower] = entry
+    }
+    if (hidden > 0) console.info('[paper-workbench] 隐藏了 ' + hidden + ' 条与原文相同的译文')
   } catch (error) {
     if (stale()) return
     state.doc = null
@@ -2397,6 +2444,15 @@ function renderCompareToolbar() {
     }, state.layoutBusy
       ? '解析中… ' + ((state.layoutJob && state.layoutJob.pages) || 0) + '/' + ((state.layoutJob && state.layoutJob.totalPages) || '?')
       : state.layoutResumable ? '续跑版面 ' + state.layoutSavedPages + ' 页' : '版面'),
+    state.layoutApplied
+      ? h('button', {
+        id: 'layout-refill',
+        class: 'ghost',
+        disabled: !docReady || !hostReady() || state.layoutBusy,
+        title: '用 PDF 文本层重新回填文字（比如摘要段被服务端 OCR 认错时用），不上传、不花配额',
+        onclick: refillLayoutText,
+      }, '重填文字')
+      : null,
     h('button', { id: 'logs-toggle', class: 'ghost' + (state.logs.open ? ' active' : ''), disabled: !hostReady(), title: hostReady() ? '任务日志（翻译 / OCR / 自检）' : '重启桌面端后可用', onclick: toggleLogs }, '日志'),
   )
 }
@@ -2800,6 +2856,7 @@ function renderChat() {
   }
   if (sessionMode) {
     renderSessionChat(aside)
+    setupDropZone(aside)
     return aside
   }
   aside.append(
@@ -2843,6 +2900,7 @@ function renderChat() {
       : h('button', { class: 'primary', id: 'chat-send', onclick: sendChatDraft }, '发送'),
   )
   aside.append(h('div', { class: 'chat-composer' }, input, actions))
+  setupDropZone(aside)
   return aside
 }
 
@@ -3866,6 +3924,7 @@ async function pollLayoutJob(id) {
     state.layoutJob = job || null
     state.layoutResumable = Boolean(status && status.resumable)
     state.layoutSavedPages = (status && status.savedPages) || 0
+    state.layoutApplied = Boolean(status && status.layout && status.layout.applied)
     // interrupted 也是终态：磁盘上写着 running 但进程已经重启过，再轮询也等不到结果
     const settled = !job || job.state === 'done' || job.state === 'failed' ||
       job.state === 'cancelled' || job.state === 'interrupted'
@@ -3888,6 +3947,30 @@ async function pollLayoutJob(id) {
     layoutPollTimer = setTimeout(tick, 2000)
   }
   await tick()
+}
+
+async function refillLayoutText() {
+  const meta = state.current && state.current.meta
+  if (!meta) return
+  if (!hostReady()) {
+    needRestart()
+    return
+  }
+  if (state.layoutBusy) return
+  state.layoutBusy = true
+  render()
+  try {
+    const result = await rpc('layout.refill', { id: meta.id })
+    await loadDoc(meta.id)
+    toast(result.changed > 0
+      ? '重填了 ' + result.changed + ' 块文字（' + result.pages + ' 页从 PDF 文本层取）'
+      : '文字已经是最新的（没有需要重填的块）')
+  } catch (error) {
+    toast('重填文字失败：' + error.message, 5000)
+  } finally {
+    state.layoutBusy = false
+    render()
+  }
 }
 
 async function runLayoutParse() {
@@ -4583,6 +4666,62 @@ function renderConvMenu() {
   return menu
 }
 
+/**
+ * 把这条对话交给 DSH 原生会话界面。
+ *
+ * 面板里这套 UI 只能发文本（prompt 接口只收 {type:'text'}），真正的附件上传、
+ * 工具调用展开、模型/权限切换都在宿主会话页上。所以这里用 postMessage 请宿主
+ * （lib/client.js）调 uiWorkspace.openSession 跳过去，能力立刻完整。
+ */
+function openConvInDsh() {
+  const conv = activeConv()
+  if (!conv || !conv.sessionId) {
+    toast('这条对话还没有会话：先发一句话，等会话建好再打开', 'warn')
+    return
+  }
+  if (window.parent === window) {
+    toast('面板是嵌在 DSH 里的，单独打开这个页面没法跳转', 'warn')
+    return
+  }
+  window.parent.postMessage({ __pb: true, type: 'open-session', sessionId: conv.sessionId }, window.location.origin)
+  toast('正在主界面打开这条会话…', 'info')
+}
+
+window.addEventListener('message', (event) => {
+  if (event.origin !== window.location.origin) return
+  const data = event.data
+  if (!data || data.__pb !== true || data.type !== 'opened') return
+  if (data.ok) toast('已在主界面打开，附件与工具调用都在那边', 'ok')
+  else toast(data.message || '打开会话失败', 'warn')
+})
+
+/** 把文件拖进对话面板就能当附件（和 DSH 输入框的拖拽一致）。 */
+function setupDropZone(node) {
+  let depth = 0
+  node.addEventListener('dragenter', (event) => {
+    if (!event.dataTransfer || !Array.from(event.dataTransfer.types || []).includes('Files')) return
+    event.preventDefault()
+    depth += 1
+    node.classList.add('drop-hot')
+  })
+  node.addEventListener('dragover', (event) => {
+    if (!event.dataTransfer || !Array.from(event.dataTransfer.types || []).includes('Files')) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  })
+  node.addEventListener('dragleave', () => {
+    depth = Math.max(0, depth - 1)
+    if (depth === 0) node.classList.remove('drop-hot')
+  })
+  node.addEventListener('drop', (event) => {
+    if (!event.dataTransfer || !event.dataTransfer.files || !event.dataTransfer.files.length) return
+    event.preventDefault()
+    depth = 0
+    node.classList.remove('drop-hot')
+    attachFiles(event.dataTransfer.files).catch((error) => toast(String(error && error.message ? error.message : error), 'warn'))
+  })
+}
+
 function renderConvBar() {
   const conv = activeConv()
   const bar = h('div', { class: 'conv-bar' })
@@ -4606,6 +4745,15 @@ function renderConvBar() {
       h('span', { class: 'spacer' }),
       state.attachBusy ? h('span', { class: 'hint' }, '上传中…') : null,
       h('button', { class: 'ghost', title: '上传附件（把本地文件路径告诉 agent）', onclick: pickFiles }, '📎'),
+      h(
+        'button',
+        {
+          class: 'ghost',
+          title: '在 DSH 原生会话界面里打开（附件、工具调用、模型选择都在那边）',
+          onclick: openConvInDsh,
+        },
+        '↗',
+      ),
     ),
   )
   if (state.convMenu) bar.append(renderConvMenu())

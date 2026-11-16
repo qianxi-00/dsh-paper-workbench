@@ -21,6 +21,7 @@ import {
   joinLines,
   looksLikeFormulaText,
   missingHeadPosition,
+  needsPdfText,
   normalizeLayout,
   parseLayoutJsonl,
   tableQuality,
@@ -632,6 +633,64 @@ fs.rmSync(dualRoot, { recursive: true, force: true })
 fs.rmSync(tableRoot, { recursive: true, force: true })
 
 fs.rmSync(root, { recursive: true, force: true })
+
+// ---------------------------------------------------------------- refillText（不重新上传）
+// abstract 早期不在 TEXT_LABELS 里，存下的是服务端 OCR 的错字版；refill 要用文本层换回来。
+equal('abstract 也要走 PDF 文本层', needsPdfText('abstract'), true)
+equal('header 仍然不取文本层', needsPdfText('header'), false)
+
+const refillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-layout-refill-'))
+const refillPdfPath = path.join(refillRoot, 'paper.pdf')
+fs.writeFileSync(refillPdfPath, 'fake pdf')
+const refillFile = path.join(refillRoot, 'paper-r', 'layout.json')
+fs.mkdirSync(path.dirname(refillFile), { recursive: true })
+fs.writeFileSync(refillFile, JSON.stringify({
+  version: LAYOUT_VERSION,
+  at: '2026-01-01T00:00:00.000Z',
+  model: LAYOUT_MODEL,
+  source: { size: 8, mtimeMs: 1 },
+  pageCount: 1,
+  servicePages: 1,
+  warnings: [],
+  blocks: [
+    { order: 0, page: 1, label: 'abstract', kind: 'body',
+      bbox: { x: 50, y: 90, width: 450, height: 40 }, text: 'rnibenoder dctkns' },
+    { order: 1, page: 1, label: 'image', kind: 'figure',
+      bbox: { x: 50, y: 200, width: 200, height: 100 }, text: '' },
+  ],
+  figures: [],
+}))
+const refillCalls = []
+const refillRunner = createLayout({
+  store: {
+    paperFile: (id, name) => path.join(refillRoot, id, name),
+    resolvePdf: async () => ({ path: refillPdfPath }),
+    readJson: async (file, fallback) => {
+      try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return fallback }
+    },
+    writeJsonAtomic: async (file, value) => { fs.writeFileSync(file, JSON.stringify(value)) },
+  },
+  pdf: {
+    callTool: async (command, payload) => {
+      refillCalls.push([command, payload.page])
+      if (command !== 'page_lines') throw new Error('refill 不该调用 ' + command)
+      return { ok: true, page: payload.page, lines: [
+        { x: 52, y: 92, x2: 498, y2: 110, text: 'we enhance auto-regressive language models' },
+        { x: 52, y: 112, x2: 498, y2: 130, text: 'with a differentiable encoder' },
+      ] }
+    },
+  },
+})
+const refilled = await refillRunner.refillText('paper-r')
+equal('refill 只查文本层、不重新上传', refillCalls, [['page_lines', 1]])
+equal('refill 换掉了错字版', refilled.changed, 1)
+const refillSaved = JSON.parse(fs.readFileSync(refillFile, 'utf8'))
+equal('refill 用 PDF 文本层拼回正文', refillSaved.blocks[0].text,
+  'we enhance auto-regressive language models with a differentiable encoder')
+check('refill 后 at 更新（doc 缓存会失效）', refillSaved.at !== '2026-01-01T00:00:00.000Z',
+  refillSaved.at)
+equal('refill 不碰图块', refillSaved.blocks[1].text, '')
+fs.rmSync(refillRoot, { recursive: true, force: true })
 
 console.log(`\n${pass} PASS / ${fail} FAIL`)
 process.exit(fail === 0 ? 0 : 1)

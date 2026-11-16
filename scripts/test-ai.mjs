@@ -571,6 +571,58 @@ async function main() {
     eq(trans.entries[ai.titleKey(s2)].zh, '标题-2 Method')
   })
 
+  await check('目录翻译：keys 传空数组时也照样翻标题（不能静默 0 条）', async () => {
+    const s1 = makeSection({ id: 's1', title: '1 Introduction' })
+    await store.writeDoc('tr8b', makeDoc({ sections: [s1], paragraphs: [] }))
+    const llm = fakeLlm(titleReply)
+    const events = await collect(
+      ai.createAi({ store, ...fakeServices(llm) }).translate({ id: 'tr8b', titles: true, keys: [] }),
+    )
+    const doneEvents = events.filter((event) => event.event === 'done')
+    eq(llm.calls.length, 1)
+    eq(doneEvents.length, 1)
+    eq(doneEvents[0].data.key, ai.titleKey(s1))
+  })
+
+  await check('作者名单不当正文翻译（不进请求池）', async () => {
+    const section = makeSection({ id: 's1' })
+    const byline = makeParagraph({
+      id: 'p0', order: 0,
+      text: 'Sebastian Borgeaud†, Arthur Mensch†, Jordan Hoffmann†, Trevor Cai, Eliza Rutherford, Katie Millican',
+    })
+    const body = makeParagraph({ id: 'p1', order: 1, text: 'We show that retrieval improves language models.' })
+    await store.writeDoc('tr8c', makeDoc({ sections: [section], paragraphs: [byline, body] }))
+    const llm = fakeLlm(echoBatch)
+    await collect(ai.createAi({ store, ...fakeServices(llm) }).translate({ id: 'tr8c' }))
+    const seen = llm.calls.map(call => JSON.stringify(call.messages || call))
+    ok(seen.every(text => !text.includes('Borgeaud')), '只把正文送模型')
+    const trans = await store.readTrans('tr8c')
+    eq(trans.entries[byline.hash], undefined)
+    ok(Boolean(trans.entries[body.hash]), '正文照常翻译')
+  })
+
+  await check('模型把原文原样返回 → skipped，不写译文', async () => {
+    const section = makeSection({ id: 's1' })
+    // 正常正文（不是名单），但模型「翻译」后和原文一模一样
+    const source = 'We show that retrieval improves language models.'
+    const paragraph = makeParagraph({ id: 'p0', order: 0, text: source })
+    await store.writeDoc('tr8d', makeDoc({ sections: [section], paragraphs: [paragraph] }))
+    // 回复格式是 [{id, zh}]；这里故意让 zh 与原文完全相同
+    const reply = () => [
+      { type: 'text-delta', text: JSON.stringify([{ id: paragraph.id, zh: source }]) },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]
+    const llm = fakeLlm(reply)
+    const events = await collect(
+      ai.createAi({ store, ...fakeServices(llm) }).translate({ id: 'tr8d', keys: [paragraph.hash] }),
+    )
+    ok(events.some(event => event.event === 'skipped'), '发了 skipped 事件')
+    const end = events[events.length - 1]
+    eq(end.data.skipped, 1)
+    const trans = await store.readTrans('tr8d')
+    eq(trans.entries[paragraph.hash], undefined)
+  })
+
   await check('sectionIds 超过 400 段：截断并 end.truncated:true', async () => {
     const section = makeSection({ id: 's1' })
     const paragraphs = Array.from({ length: 401 }, (_, n) => makeParagraph({ id: 'p' + n, order: n, text: 't' + n }))

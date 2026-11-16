@@ -27,7 +27,7 @@ PDF 页图、笔记与 Obsidian 卡片，最右侧是**面板内对话**。
 - **任务日志**：`日志` 抽屉记录翻译 / OCR / 自检的进度与失败原因，2.5 秒轮询刷新，可清空。
 - **模型可选**：设置 → AI 里给「翻译」和「对话」分别指定 DSH 模型（默认跟随当前模型），温度可调。
 - **原文页**：整篇**上下滚动连续阅读**（页与页首尾相接，只加载视口附近的页图，页码随滚动更新，输入页码可跳转）、缩放；PDF 书签目录（没有则按字号启发式）。
-- **对话（多篇论文 + 附件）**：对话抽屉顶部可以新建 / 切换 / 改名 / 删除对话；一个对话可以挂多篇论文（`＋ 论文`）和多个附件（`📎`，单个上限 40MB），多轮问答天然持久，关掉面板回主界面还能接着聊。
+- **对话（多篇论文 + 附件）**：对话抽屉顶部可以新建 / 切换 / 改名 / 删除对话；一个对话可以挂多篇论文（`＋ 论文`）和多个附件（`📎` 或直接把文件拖进面板，单个上限 40MB），多轮问答天然持久，关掉面板回主界面还能接着聊。点 `↗` 可以把这条会话交给 DSH 原生会话界面（附件上传、工具调用展开、模型/权限切换都在那边，能力最完整）。
 - **正文配图**：把 PDF 里的位图按「图 N / Figure N」挂到提到它的段落下方（矢量图抽不到，见已知限制）。
 - **在线检索**：arXiv / OpenAlex，支持关键词、arXiv ID、DOI；一键下载开放 PDF 入库。
 - **理解与整理**：划词问 agent、双击段落解释、精读报告（摘要 / 方法 / 贡献 / 局限 / 可复现要点）、多篇勾选后生成对比综述（这些仍走会话，结果落回本地库与 Obsidian）。
@@ -151,6 +151,8 @@ Windows 用户没有 `npm` 也没关系：桌面端 → 论文工作台 → `⚙
   公式/图表段不送翻译，只提示「见原文页 p.N」。
 - **批量与容错**：一批最多 6 段、2000 字符；模型回的不是合法 JSON 时自动退化成逐段重发；被 `max-tokens` 截断就把预算翻倍重试一次。
 - **缓存**：译文按 hash 存进 SQLite（`translations` 表），默认不覆盖（想重翻按 `重新翻译`）；标题另存 `t:<hash>`，`目录翻译` 一次请求翻一批。
+- **名单不翻**：作者/机构那一行（带 `†`、逗号连排人名、没有句末标点）不进翻译请求；模型把原文原样返回时记为 `skipped`，不会在英文下面再贴一遍英文。
+- **版面解析后可以「重填文字」**：`PP-StructureV3` 的 OCR 文字有错字（`rnibenoder` 这类），我们只借它的结构、正文一律回填 PDF 文本层；早期解析出来的 `layout.json` 用工具栏的「重填文字」（`layout.refill`）就地换掉，不上传、不花配额。
 - **划词翻译**：选中原文点 `翻译`，译文**直接贴在那一段下面**（不经过对话）。它是独立小工具：每次都是全新的一次模型请求，
   读不到段落模型时（原文页 / 纯文本页）走 `/ai/translate` 的一次性通道，不写译文库、不写对话、不进上下文。
 - **公式卫生**：prompt 明确要求行内公式只写一次 `$...$`；返回的译文还会过一遍 `tidyMath`（去 MathML、`\(...\)`/`\[...\]` → `$...$`、公式内换行压平）。
@@ -323,7 +325,7 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 | 路由 | 说明 |
 | --- | --- |
 | `GET  /paper-workbench/app` | 工作台页面（主区 iframe 的内容） |
-| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`doc.get`、`ai.models`、`trans.get`、`chat.get`、`search.doc`、`figures.list`、`logs.list`、`review.run`、`trash.list`、`session.status`、`conv.list`、`vault.upsert`、`layout.status`、`layout.run`、`layout.clear`、`layout.tables`、`zhpdf.status`、`zhpdf.build`、`zhpdf.clear` |
+| `POST /paper-workbench/api/<method>` | JSON RPC，如 `library.list`、`pdf.text`、`doc.get`、`ai.models`、`trans.get`、`chat.get`、`search.doc`、`figures.list`、`logs.list`、`review.run`、`trash.list`、`session.status`、`conv.list`、`vault.upsert`、`layout.status`、`layout.run`、`layout.clear`、`layout.refill`、`layout.tables`、`zhpdf.status`、`zhpdf.build`、`zhpdf.clear` |
 | `POST /paper-workbench/ai/translate` | SSE 逐段翻译（事件 `start/delta/done/error/end`） |
 | `POST /paper-workbench/ai/chat` | SSE 对话（事件 `delta/done/error/end`） |
 | `POST /paper-workbench/ai/cancel` | 取消正在跑的流式请求（`{reqId}`） |
@@ -445,6 +447,7 @@ docs/v3-contracts.md  v3 新增模块（db / jobs / review / figures / session�
 - PDF 深色是**反相滤镜**，不是重新排版；彩色图会跟着变色，想要原色就切回「关」。
 - 翻译自检是启发式：静态规则会误报（短标题、刻意省略），模型批检也可能漏；它只提示，不改你的译文。
 - 原生会话依赖宿主的 `sessionController`；没有就自动退回「本地」自绘对话，功能不受影响，只是不落进主会话。
+- 对话面板是自绘的轻量视图（直接对接宿主的 `sessionController`）：它只能发文本，所以没有原生输入框的附件上传、工具调用折叠、模型/权限选择；这些请点面板顶部的 `↗` 到 DSH 原生会话界面里用（同一条会话，消息共享）。
 - 对话里的附件是以**文件路径**交给 agent 的：宿主 `sessionController.prompt` 只收文本，所以图片不能被"直接看见"，只能由 agent 用文件工具读（能读文字类文件；图片取决于 agent 有没有读图工具）。
 - 一个对话对应一条 DSH 会话，对话删掉只从工作台移除，DSH 里的会话记录仍在（要清理请去会话列表删）。
 - 对话附件上限 40 个、单个 40 MB；附件以路径交给 agent，不会内联进提示词（避免一次塞爆上下文）。
