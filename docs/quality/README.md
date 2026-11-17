@@ -52,6 +52,8 @@ python scripts/quality/test_cli.py
 
 `node scripts/quality/score-layout.mjs <paperId> [--data=<数据根>]` 用 PDF 文本层做参照，输出字符比、行覆盖率、重复率与质量状态；实测记录见 [BASELINE.md](BASELINE.md)。它只用于同一篇论文不同版本的相对比较，不能替代本页下面的人工 gold 评测。
 
+规则改进后可以用已归档的原始响应离线重建：`node scripts/quality/rebuild-layout.mjs <paperId>`（默认 dry-run；`--apply` 才发布为新 revision，不重新上传、不产生费用）。
+
 ## 人工采样与盲测
 
 先确认30份原论文和至少240个不同原始物理页。使用 `source_sha256 + page_index_0based` 去重；扫描、编码变体不能额外计入独立论文数或原始页数。按整篇family切分，所有相邻页与变体必须继承split。候选预先固定24 dev / 6 holdout；盲测只表示预留，尚未建立或运行盲测gold。

@@ -49,7 +49,8 @@
     "fix:library": "node scripts/fix-library.mjs",
     "selftest:pdf": "python assets/pdf_tool.py --self-test",
     "layout": "node scripts/layout.mjs",
-    "quality:score": "node scripts/quality/score-layout.mjs"
+    "quality:score": "node scripts/quality/score-layout.mjs",
+    "quality:rebuild": "node scripts/quality/rebuild-layout.mjs"
   },
   "keywords": [
     "deepseek-harness",

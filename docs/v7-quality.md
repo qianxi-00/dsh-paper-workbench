@@ -46,6 +46,18 @@ PDF
 - `layout-data/legacy/<sha>.json`：第一次发布前备份旧版 layout.json。
 - `clear` 只清指针与投影，不删除 raw/历史；原始证据可用于离线重放。
 
+### 离线重建（不重新上传）
+
+模型改进或正文投影规则升级后，可以用已归档的 raw JSONL 在本地重建同一篇的 schemaVersion 2 版面，
+不调用云端、不产生费用。默认只打印摘要，`--apply` 才发布为新 revision（旧 revision 永久保留）：
+
+```bash
+node scripts/quality/rebuild-layout.mjs <paperId>            # dry-run
+node scripts/quality/rebuild-layout.mjs <paperId> --apply    # 发布新 revision
+```
+
+当前版本要求该论文恰好有一个 raw JSONL（正常单次解析就是如此）；多批上传的论文需要重新解析或后续扩展。
+
 ## 质量语义
 
 - 服务模型的块框偶尔从第二行开始；`assignLines` 会把块框上方 28pt 内、文字高度相似且水平对齐的 PDF 行救回该块，并记 `rescued-pdf-line`，避免正文被拆成孤立块。

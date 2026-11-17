@@ -262,6 +262,7 @@ node scripts/layout.mjs <论文 id>            # 结果写 papers/<id>/layout.js
 - 想退回文本层：调一次 `layout.clear`（或删掉 `layout.json`），下次打开会重建。
 - 只补表格结构（不重新上传、不花额度）：`layout.tables`，给老的 `layout.json` 回填。
 - 查看质量报告：`layout.report`（或工具栏「质量」按钮），列出每页状态、问题数和被排除的块。
+- 规则升级后想就地重建：`node scripts/quality/rebuild-layout.mjs <论文 id>`（默认 dry-run，不重新上传、不花额度；加 `--apply` 才发布为新 revision，旧版本保留）。
 - 缺页兜底：`layout.start({maxCloudPages:N})` 且 PP-StructureV3 整页缺失时，才用 `PaddleOCR-VL-1.6` 补一轮（默认 0，不额外计费）。
 
 已知取舍：被模型标成正文、其实是一整行公式的块，仍会按普通文字显示（符号顺序可能错，
