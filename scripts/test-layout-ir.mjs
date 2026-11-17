@@ -339,3 +339,14 @@ test('selected mathematical glyphs preserve superscripts and styled letters', ()
 test('source sha256 is mandatory for version two identities', () => {
   assert.throws(() => build({ ...fixture([], []), source: {} }), /source\.sha256/)
 })
+
+test('a PDF line just above a service block is rescued, not orphaned', () => {
+  const r = build(fixture(
+    [raw('p', 'text', 'First line continues here.\nSecond line continues here.', [10, 50, 200, 100])],
+    [line('First line continues here.', 10, 36, 190, 48), line('Second line continues here.', 10, 52, 190, 64)],
+  ))
+  assert.equal(r.blocks.length, 1)
+  assert.equal(r.blocks[0].sourceBlockIds.length, 1)
+  assert.equal(r.blocks[0].quality.issues.some(i => i.code === 'unmatched-pdf-line'), false)
+  assert.match(r.blocks[0].text, /First line continues here/)
+})

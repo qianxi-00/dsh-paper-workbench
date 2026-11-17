@@ -37,7 +37,7 @@ try {
 }
 
 const { callTool } = await import('../../lib/pdf.js')
-const norm = text => String(text || '').normalize('NFC').replace(/\s+/g, '')
+const norm = text => String(text || '').normalize('NFKC').replace(/\s+/g, '')
 const pages = new Map()
 for (const block of layout.blocks || []) {
   const n = Number(block.page) || 1
@@ -50,6 +50,8 @@ let layoutChars = 0
 let lineTotal = 0
 let lineHit = 0
 let lineCharsHit = 0
+let charHit = 0
+let charTotal = 0
 let duplicates = 0
 const seen = new Set()
 for (const blockText of layout.blocks || []) {
@@ -69,6 +71,14 @@ for (let n = 1; n <= pageCount; n++) {
   }
   const text = norm((pages.get(n) || []).join('\n'))
   layoutChars += text.length
+  const pageChars = new Map()
+  for (const ch of text) pageChars.set(ch, (pageChars.get(ch) || 0) + 1)
+  const pdfCharsOnPage = new Map()
+  for (const line of result.lines || []) for (const ch of norm(line.text)) pdfCharsOnPage.set(ch, (pdfCharsOnPage.get(ch) || 0) + 1)
+  for (const [ch, count] of pdfCharsOnPage) {
+    charTotal += count
+    charHit += Math.min(count, pageChars.get(ch) || 0)
+  }
   for (const line of result.lines || []) {
     const value = norm(line.text)
     if (value.length < 4) continue
@@ -92,6 +102,7 @@ const report = {
   charRatio: ratio(layoutChars, pdfChars),
   lineCoverage: ratio(lineHit, lineTotal),
   charRecall: ratio(lineCharsHit, pdfChars),
+  charMultisetRecall: ratio(charHit, charTotal),
   duplicateRate: ratio(duplicates, Math.max(1, (layout.blocks || []).length)),
   quality: layout.quality ? layout.quality.status : null,
   note: '参照是 PDF 文本层，不是人工 gold；扫描页没有文本层时这些指标不适用。',
