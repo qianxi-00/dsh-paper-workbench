@@ -973,7 +973,8 @@ def _heuristic_outline(doc):
     threshold = _clustered_body_size(size_chars) * HEURISTIC_RATIO
     candidates = [row for row in rows if row[1] >= threshold and len(row[2]) <= MAX_TITLE_LEN
                   and not (NUMERIC_PAGE_RE.match(row[2]) or CHINESE_PAGE_RE.match(row[2])
-                           or ROMAN_PAGE_RE.match(row[2]))]
+                           or ROMAN_PAGE_RE.match(row[2])
+                           or re.match(r"^(?:arxiv|doi|https?://|www\.)", row[2], re.IGNORECASE))]
     reps = []
     for size in sorted({row[1] for row in candidates}, reverse=True):
         if not reps or size < reps[-1] * SIZE_TOLERANCE:

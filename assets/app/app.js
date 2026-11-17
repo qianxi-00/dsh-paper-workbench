@@ -14,6 +14,7 @@
 const API = '/paper-workbench/api/'
 const TRANSLATE_URL = '/paper-workbench/ai/translate'
 const CHAT_URL = '/paper-workbench/ai/chat'
+const NATIVE_READER = new URLSearchParams(window.location.search).get('native') === '1'
 const app = document.getElementById('app')
 const toastEl = document.getElementById('toast')
 
@@ -70,7 +71,6 @@ const state = {
   translateReqId: '',
   translateTask: 0, // 翻译任务令牌：切论文后旧流的 finally 不能再动新论文的 state
   chat: { messages: [], busy: false, abort: null, error: '', draft: '' },
-  chatDraft: '',
   card: null,
   settings: null,
   aiDraft: null,
@@ -80,9 +80,8 @@ const state = {
   // 环境自检（设置页）：旧宿主没有 doctor.run，静默降级成一行提示
   doctor: { loading: false, report: null, error: '', unsupported: false },
   busy: '',
-  online: { q: '', source: 'both', items: [], loading: false, error: '' },
+  online: { q: '', source: 'both', items: [], warnings: [], loading: false, error: '' },
   ocr: null,
-  ocrPages: [],
   ocrBusy: '',
   ocrToken: '',
   ocrClear: false,
@@ -90,7 +89,7 @@ const state = {
   search: { open: false, q: '', hits: [], active: 0, busy: false, error: '' },
   dark: loadDark(),
   trash: { open: false, items: [], busy: false, error: '' },
-  logs: { open: false, events: [], lastSeq: 0, timer: null, busy: false },
+  logs: { open: false, events: [], lastSeq: 0, timer: null },
   review: null,
   reviewBusy: false,
   layoutBusy: false,
@@ -114,9 +113,125 @@ const state = {
   convMenu: false,
   convPicker: { open: false, q: '' },
   attachBusy: false,
+  native: { available: null, open: false, conversationId: '', blockId: '', pending: new Set() },
 }
 
 let pendingScrollReset = false
+let readerStateKey = ''
+
+function postNative(type, fields = {}) {
+  if (NATIVE_READER && window.parent !== window) window.parent.postMessage({ __pb: true, v: 2, type, ...fields }, location.origin)
+}
+
+function notifyReaderState() {
+  if (!NATIVE_READER) return
+  const meta = state.current && state.current.meta
+  const paper = meta ? {
+    id: meta.id,
+    title: String(meta.title || ''),
+    revision: String((state.doc && state.doc.revision) || ''),
+    page: state.page,
+    sectionId: state.sectionId || (sectionsOf()[0] && sectionsOf()[0].id) || null,
+    ...(state.native.blockId ? { blockId: state.native.blockId } : {}),
+  } : null
+  const key = JSON.stringify(paper)
+  if (key === readerStateKey) return
+  readerStateKey = key
+  postNative('reader-state', { paper })
+}
+
+// 阅读器只负责论文定位和快捷提问；消息、附件、草稿由宿主原生会话管理。
+function askNative(text, context = {}) {
+  const comparing = context.scope === 'papers' && Array.isArray(context.paperIds) && context.paperIds.length > 1
+  const general = context.scope === 'general'
+  if (!state.current && !comparing && !general) { toast('先打开一篇论文'); return }
+  if (state.native.available !== true) { toast('原生会话尚未连接，请在右侧选择或新建对话'); return }
+  const paper = state.current?.meta || {}
+  const isSelection = Boolean(context.selection) || context.scope === 'selection'
+  const remembered = selectionMemory.text === context.selection && selectionMemory.paperId === paper.id && Date.now() - selectionMemory.at < SELECTION_MEMORY_MS
+  const source = isSelection ? (context.explicitSource || (remembered ? selectionMemory.source : readerSelectionSource())) : null
+  const requestId = crypto.randomUUID()
+  state.native.pending.add(requestId)
+  if (state.native.pending.size > 200) state.native.pending.delete(state.native.pending.values().next().value)
+  postNative('paper-ask', {
+    requestId,
+    text: String(text),
+    scope: isSelection ? 'selection' : context.scope || 'section',
+    paperId: comparing || general ? null : paper.id,
+    ...(comparing ? { paperIds: context.paperIds } : {}),
+    page: general ? null : (source?.page || context.page || state.page),
+    sectionId: general ? null : (source?.sectionId || context.sectionId || state.sectionId || null),
+    blockId: general ? null : (source?.blockId || null),
+    revision: general ? null : (source?.revision || state.doc?.revision || null),
+  })
+  toast('正在发送到当前论文对话…')
+}
+
+function flashNode(node) {
+  if (!node) return
+  node.classList.add('flash')
+  setTimeout(() => node.classList.remove('flash'), 1800)
+}
+
+let readerNavigation = 0
+async function navigateReader(target) {
+  if (!target || !/^[a-z0-9][a-z0-9._-]{0,79}$/.test(target.paperId || '') || !Number.isSafeInteger(target.page) || target.page < 1) return
+  const epoch = ++readerNavigation
+  const changing = state.current?.meta.id !== target.paperId
+  const openSeq = state.openSeq + (changing ? 1 : 0)
+  if (changing) await openPaper(target.paperId)
+  if (epoch !== readerNavigation || openSeq !== state.openSeq || state.current?.meta.id !== target.paperId) return
+  const revisionMatch = !target.revision || target.revision === state.doc?.revision
+  const paragraph = target.revision && target.revision === state.doc?.revision && target.blockId
+    ? state.doc.paragraphs.find(item => item.blockId === target.blockId) : null
+  if (paragraph) {
+    state.tab = 'compare'
+    state.page = paragraph.page
+    state.sectionId = paragraph.section
+    state.native.blockId = paragraph.blockId
+    render(true)
+    const node = document.getElementById('para-' + paragraph.id) || (paragraph.section ? document.getElementById('sec-' + paragraph.section) : null)
+    node?.scrollIntoView({ block: 'center' })
+    flashNode(node)
+    saveSession()
+  } else if (!target.blockId && target.sectionId && revisionMatch && sectionsOf().some(item => item.id === target.sectionId)) {
+    const section = sectionsOf().find(item => item.id === target.sectionId)
+    state.tab = 'compare'
+    state.page = section?.page || target.page
+    state.sectionId = target.sectionId
+    state.native.blockId = ''
+    render(true)
+    const heading = document.getElementById('sec-' + target.sectionId)
+    heading?.scrollIntoView({ block: 'start' })
+    flashNode(heading)
+    saveSession()
+  } else {
+    state.native.blockId = ''
+    jumpToPage(target.page)
+    if (target.blockId || (target.revision && !revisionMatch)) toast('这条引用的段落版本已变化，已定位到原文页')
+  }
+  notifyReaderState()
+}
+
+window.addEventListener('message', event => {
+  if (!NATIVE_READER || event.source !== window.parent || event.origin !== location.origin) return
+  const message = event.data
+  if (!message || message.__pb !== true || message.v !== 2) return
+  if (message.type === 'native-state') {
+    state.native.available = message.available === true
+    state.native.open = message.open === true
+    state.native.conversationId = String(message.conversationId || '')
+    const button = document.querySelector('[data-pane="chat"]')
+    if (button) button.classList.toggle('active', state.native.open)
+    const status = document.getElementById('native-reader-status')
+    if (status) status.textContent = nativeReaderStatus()
+    for (const action of document.querySelectorAll('[data-native-ask]')) action.disabled = !state.native.available
+  } else if (message.type === 'paper-result' && state.native.pending.delete(message.requestId)) {
+    toast(message.message || (message.ok ? '已发送' : '发送失败，请查看右侧状态'))
+  } else if (message.type === 'reader-navigate') {
+    navigateReader(message).catch(error => toast(error.message))
+  }
+})
 
 // ---------------------------------------------------------------- 小工具
 
@@ -151,12 +266,13 @@ async function rpc(method, args = {}) {
 
 let toastTimer = null
 function toast(message, ms = 3200) {
+  const duration = typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? ms : 3200
   toastEl.textContent = message
   toastEl.hidden = false
   clearTimeout(toastTimer)
   toastTimer = setTimeout(() => {
     toastEl.hidden = true
-  }, ms)
+  }, duration)
 }
 
 function escapeHtml(text) {
@@ -261,9 +377,56 @@ function genId() {
   return (window.crypto && crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random().toString(16).slice(2)
 }
 
+function extractCleanSelection(selection, anchorElement) {
+  const raw = selection ? String(selection) : ''
+  if (!raw || !selection || selection.rangeCount === 0) return raw
+  const range = typeof selection.getRangeAt === 'function' ? selection.getRangeAt(0) : null
+  if (!range || typeof range.cloneContents !== 'function') return raw
+  const inCompare = anchorElement?.closest?.('.compare')
+  if (!inCompare) return raw
+  const ancestor = range.commonAncestorContainer
+  const ancestorEl = ancestor && (ancestor.nodeType === 1 ? ancestor : ancestor.parentElement)
+  const texOwner = ancestorEl?.closest?.('[data-tex]')
+  if (texOwner && typeof texOwner.getAttribute === 'function') {
+    const directTex = texOwner.getAttribute('data-tex')
+    if (directTex) return directTex
+  }
+  const onlyZh = Boolean(inCompare.classList?.contains('only-zh'))
+  const startedInZh = Boolean(anchorElement?.closest?.('.para-zh'))
+  const fragment = range.cloneContents()
+  const chunks = []
+  const visit = (node) => {
+    if (!node) return
+    if (node.nodeType === 3) {
+      chunks.push(node.textContent || '')
+      return
+    }
+    if (node.nodeType !== 1) return
+    if (!startedInZh && !onlyZh && node.classList?.contains('para-zh')) return
+    if ((startedInZh || onlyZh) && node.classList?.contains('para-orig')) return
+    if (node.classList?.contains('formula-link')) return
+    const tex = typeof node.getAttribute === 'function' ? node.getAttribute('data-tex') : null
+    if (tex) {
+      chunks.push(tex)
+      return
+    }
+    const children = node.childNodes || node.children || []
+    for (const child of children) visit(child)
+    if (node.classList?.contains('para') || node.classList?.contains('sec-head') || /^(P|DIV|H[1-4]|FIGURE|BLOCKQUOTE)$/.test(node.tagName || '')) {
+      if (chunks.length > 0 && !/\n$/.test(chunks[chunks.length - 1])) chunks.push('\n')
+    }
+  }
+  visit(fragment)
+  const cleaned = chunks.join('').replace(/\n{3,}/g, '\n\n').trim()
+  return cleaned || raw
+}
+
 function selectionText() {
   const selection = window.getSelection()
-  return selection ? String(selection).trim() : ''
+  if (!selection) return ''
+  const anchor = selection.anchorNode
+  const element = anchor && (anchor.nodeType === 1 ? anchor : anchor.parentElement)
+  return extractCleanSelection(selection, element)
 }
 
 /**
@@ -272,19 +435,48 @@ function selectionText() {
  * - 重渲染换掉正文节点时，Chrome 会把选择区挪到新节点上，留下一段「不是用户选的东西」。
  * 所以拖选过程中（selectionchange）持续记住最后一次像样的选区文本，取文时优先用它。
  */
-let selectionMemory = { text: '', at: 0 }
+let selectionMemory = { text: '', at: 0, keys: [], host: null }
 const SELECTION_MEMORY_MS = 5 * 60 * 1000
+
+function selectionHostNode() {
+  const selection = window.getSelection()
+  const anchor = selection && selection.anchorNode
+  const start = anchor && (anchor.nodeType === 1 ? anchor : anchor.parentElement)
+  return start && start.closest ? start.closest('.blocks > *, .page-pane p, .markdown p, .para') : null
+}
+
+function readerSelectionSource() {
+  const selection = window.getSelection()
+  const range = selection && selection.rangeCount > 0 && typeof selection.getRangeAt === 'function' ? selection.getRangeAt(0) : null
+  const node = range?.startContainer || selection?.anchorNode
+  const element = (node?.nodeType === 1 ? node : node?.parentElement)?.closest?.('.para')
+  const paragraph = state.doc?.paragraphs?.find(item => 'para-' + item.id === element?.id)
+  return { page: paragraph?.page || state.page, sectionId: paragraph?.section || state.sectionId || null,
+    blockId: paragraph?.blockId || null, revision: state.doc?.revision || null }
+}
+
+function rememberReaderSelection(text) {
+  if (text.trim().length < 2 || !state.current) return
+  selectionMemory = {
+    text,
+    at: Date.now(),
+    paperId: state.current.meta.id,
+    source: readerSelectionSource(),
+    keys: selectionParagraphKeys(),
+    host: selectionHostNode(),
+  }
+}
 
 /** 用户此刻选中的正文（只在阅读区里算数，输入框/按钮里的选择不算）。 */
 function liveReaderSelection() {
   const selection = window.getSelection()
   if (!selection || selection.rangeCount === 0) return ''
-  const text = String(selection).trim()
-  if (!text) return ''
   const anchor = selection.anchorNode
   const element = anchor && (anchor.nodeType === 1 ? anchor : anchor.parentElement)
   if (!element || !element.closest) return ''
-  return element.closest('.compare, .page-pane, .markdown, .blocks') ? text : ''
+  if (!element.closest('.compare, .page-pane, .markdown, .blocks')) return ''
+  const text = extractCleanSelection(selection, element)
+  return text.trim() ? text : ''
 }
 
 /** 取「用户想讲解的那段」：优先当前选区，选区被塌掉/换掉时退回刚才记住的那段。 */
@@ -411,9 +603,14 @@ function saveSessionSoon(extra) {
 function loadAiState() {
   try {
     const raw = JSON.parse(localStorage.getItem(AI_KEY) || '{}')
-    return { translateOn: raw.translateOn === true, onlyZh: raw.onlyZh === true }
+    return {
+      translateOn: raw.translateOn === true,
+      onlyZh: raw.onlyZh === true,
+      hideZh: raw.hideZh === true,
+      sideBySide: raw.sideBySide === true,
+    }
   } catch {
-    return { translateOn: false, onlyZh: false }
+    return { translateOn: false, onlyZh: false, hideZh: false, sideBySide: false }
   }
 }
 
@@ -431,7 +628,7 @@ const shellColumns = (layout) => {
   const tracks = []
   if (layout.sideOpen) tracks.push(layout.side + 'px', '6px')
   tracks.push('minmax(0,1fr)')
-  if (layout.chatOpen) tracks.push('6px', layout.chat + 'px')
+  if (!NATIVE_READER && layout.chatOpen) tracks.push('6px', layout.chat + 'px')
   return tracks.join(' ')
 }
 
@@ -459,6 +656,7 @@ function closePane(kind) {
 }
 
 function togglePane(kind) {
+  if (NATIVE_READER && kind === 'chat') { postNative('native-toggle'); return }
   state.layout[kind + 'Open'] = !state.layout[kind + 'Open']
   saveLayout()
   render()
@@ -1033,10 +1231,23 @@ function toggleTranslate() {
   }
 }
 
-function toggleOnlyZh() {
-  state.ai.onlyZh = !state.ai.onlyZh
+function currentReadMode() {
+  if (state.ai.onlyZh) return 'zh'
+  if (state.ai.hideZh) return 'orig'
+  if (state.ai.sideBySide) return 'side'
+  return 'bilingual'
+}
+
+function setReadMode(mode) {
+  state.ai.onlyZh = mode === 'zh'
+  state.ai.hideZh = mode === 'orig'
+  state.ai.sideBySide = mode === 'side'
   saveAiState()
   render()
+}
+
+function toggleOnlyZh() {
+  setReadMode(state.ai.onlyZh ? 'bilingual' : 'zh')
 }
 
 function paintTranslation(key, nodes) {
@@ -1051,6 +1262,7 @@ function paintTranslation(key, nodes) {
 /** 译文是在 render 之后才到的：.compare 的 show-zh 是渲染时算的，
  * 不补这一步，划词/单段翻译完成后段落下面的中文会被 display:none 藏起来。 */
 function ensureShowZh() {
+  if (state.ai.hideZh) return
   const compare = document.querySelector('.compare')
   if (compare && !compare.classList.contains('show-zh')) compare.classList.add('show-zh')
 }
@@ -1104,16 +1316,26 @@ function paintAllTranslations() {
 }
 
 function paintTranslateChrome() {
+  const docReady = !!(state.doc && Array.isArray(state.doc.paragraphs) && state.doc.paragraphs.length > 0)
   const status = document.getElementById('translate-status')
   if (status) {
     status.textContent = state.translateError || progressText()
     status.classList.toggle('error', state.translateError !== '')
   }
   const stop = document.getElementById('translate-stop')
-  if (stop) stop.disabled = !state.translateBusy
+  if (stop) {
+    stop.hidden = !state.translateBusy
+    stop.disabled = !state.translateBusy
+  }
+  const retryable = failedSegmentKeys()
+  const retry = document.getElementById('retry-failed')
+  if (retry) {
+    retry.hidden = retryable.length === 0
+    retry.textContent = '重试失败 ' + retryable.length
+  }
   for (const id of ['translate-all', 'translate-section', 'translate-titles']) {
     const button = document.getElementById(id)
-    if (button) button.disabled = !state.doc || state.translateBusy
+    if (button) button.disabled = !docReady || state.translateBusy
   }
 }
 
@@ -1137,6 +1359,7 @@ function chatContext(extra = {}) {
 }
 
 async function sendChat(content, context = {}) {
+  if (NATIVE_READER) return askNative(content, context)
   const text = String(content || '').trim()
   if (!text) return
   if (!state.current) {
@@ -1222,6 +1445,7 @@ function sendChatDraft() {
 }
 
 function sendQuick(text, extra) {
+  if (NATIVE_READER) return askNative(text, chatContext(extra))
   if (!state.current) {
     toast('先打开一篇论文')
     return
@@ -1338,20 +1562,24 @@ async function openPaper(id, options = {}) {
   // 请求代次：快速切论文时，旧请求（library.get / pdf.text / doc.get / chat.get）可能后回来，
   // 每个 await 之后都对一次代次，对不上就整段丢弃（不写 state、不 render、不 saveSession）。
   const seq = ++state.openSeq
+  let loaded = false
   abortPaperWork()
+  stopLayoutPoll()
+  stopLogPoll()
+  hideFloating()
   try {
     state.busy = 'open'
     render()
     const value = await rpc('library.get', { id })
     if (seq !== state.openSeq) return
     state.current = value
+    loaded = true
     const wantedPage = restore && Number(restore.page) > 0 ? Number(restore.page) : value.meta.lastReadPage || 1
     state.page = Math.max(1, Math.min(wantedPage, value.meta.pageCount || 1))
     state.pageInfo = null
     state.blocks = []
     state.card = null
     state.ocr = value.ocr || null
-    state.ocrPages = []
     state.ocrBusy = ''
     state.tab = (restore && restore.tab) || 'compare'
     state.doc = null
@@ -1374,7 +1602,8 @@ async function openPaper(id, options = {}) {
     // 上一篇的页尺寸与「刚才选中的那段」不能带进新论文：页尺寸会让占位比例用错页，
     // 选区记忆会让划词菜单在没有选区时翻出上一篇的原文。
     state.pageDims = {}
-    selectionMemory = { text: '', at: 0 }
+    selectionMemory = { text: '', at: 0, keys: [], host: null }
+    state.native.blockId = ''
     stopLayoutPoll()
     state.layoutJob = null
     state.layoutResumable = false
@@ -1418,12 +1647,14 @@ async function openPaper(id, options = {}) {
     if (seq === state.openSeq) {
       state.busy = ''
       render()
-      if (restore && Number.isFinite(Number(restore.scrollTop))) {
-        const scroller = document.querySelector('.compare-scroll')
-        if (scroller) scroller.scrollTop = Number(restore.scrollTop)
+      if (loaded) {
+        if (restore && Number.isFinite(Number(restore.scrollTop))) {
+          const scroller = document.querySelector('.compare-scroll')
+          if (scroller) scroller.scrollTop = Number(restore.scrollTop)
+        }
+        saveSession({ paperId: id, tab: state.tab, page: state.page, sectionId: state.sectionId })
+        if (state.session.available && state.layout.chatOpen) startSessionStream(true)
       }
-      saveSession({ paperId: id, tab: state.tab, page: state.page, sectionId: state.sectionId })
-      if (state.session.available && state.layout.chatOpen) startSessionStream(true)
     }
   }
 }
@@ -1500,37 +1731,51 @@ async function loadDoc(id, seq) {
     state.docError = error.message
     state.trans = {}
   } finally {
-    if (seq === undefined || seq === state.openSeq) state.docBusy = false
+    if (seq !== undefined ? seq === state.openSeq : Boolean(state.current && state.current.meta.id === id)) {
+      state.docBusy = false
+    }
   }
 }
 
 async function rebuildDoc() {
   if (!state.current || state.docBusy) return
+  const id = state.current.meta.id
+  const seq = state.openSeq
+  const stale = () => seq !== state.openSeq || !state.current || state.current.meta.id !== id
   state.docBusy = true
   render()
   try {
-    await rpc('doc.build', { id: state.current.meta.id })
-    await loadDoc(state.current.meta.id)
+    await rpc('doc.build', { id })
+    if (stale()) return
+    await loadDoc(id, seq)
+    if (stale()) return
     toast('文档模型已重建')
   } catch (error) {
+    if (stale()) return
     state.docError = '重建失败：' + error.message
     toast('重建失败：' + error.message)
   } finally {
-    state.docBusy = false
-    render()
+    if (!stale()) {
+      state.docBusy = false
+      render()
+    }
   }
 }
 
 async function loadCard() {
   if (!state.current) return
+  const id = state.current.meta.id
+  const seq = state.openSeq
   try {
-    state.card = await rpc('vault.read', { id: state.current.meta.id })
+    const card = await rpc('vault.read', { id })
+    if (seq === state.openSeq && state.current && state.current.meta.id === id) state.card = card
   } catch {
-    state.card = null
+    if (seq === state.openSeq && state.current && state.current.meta.id === id) state.card = null
   }
 }
 
 async function loadChat(id, seq) {
+  if (NATIVE_READER) return
   const stale = () => (seq !== undefined && seq !== state.openSeq) || !state.current || state.current.meta.id !== id
   try {
     const value = await rpc('chat.get', { id })
@@ -1561,16 +1806,6 @@ async function saveNotes(highlights) {
 
 // ---------------------------------------------------------------- OCR（扫描件，保留原文页入口）
 
-async function loadOcrText() {
-  if (!state.current) return
-  try {
-    const value = await rpc('ocr.text', { id: state.current.meta.id, pages: 'all' })
-    state.ocrPages = value.pages || []
-  } catch {
-    state.ocrPages = []
-  }
-}
-
 async function runOcr() {
   if (!state.current || state.ocrBusy) return
   const id = state.current.meta.id
@@ -1599,13 +1834,11 @@ async function runOcr() {
       throw new Error('等了 40 分钟还没完成，任务可能仍在云端跑；稍后回到这篇按「OCR 识别」查状态。')
     }
     if (status.state === 'failed') throw new Error(status.error || 'OCR 任务失败')
-    await loadOcrText()
-    if (stale()) return
     // 扫描件 OCR 完成后，对照视图用新的 ocr → doc；但绝不能把这篇的 doc 写到别的论文上
     if (!state.current || state.current.meta.id !== id) return
     await loadDoc(id)
     if (stale()) return
-    toast('OCR 完成：' + (status.pages || state.ocrPages.length) + ' 页')
+    toast('OCR 完成：' + (status.pages || status.extractedPages || 0) + ' 页')
   } catch (error) {
     if (!stale()) toast('OCR 失败：' + error.message)
   } finally {
@@ -1706,6 +1939,7 @@ function render(force = false) {
   const chatList = document.querySelector('.chat-messages')
   if (chatList) chatList.scrollTop = chatList.scrollHeight
   setupSectionObserver()
+  notifyReaderState()
 }
 
 function renderShell() {
@@ -1713,7 +1947,7 @@ function renderShell() {
   const children = []
   if (layout.sideOpen) children.push(renderSide(), makeSplitter('side'))
   children.push(renderMain())
-  if (layout.chatOpen) children.push(makeSplitter('chat'), renderChat())
+  if (!NATIVE_READER && layout.chatOpen) children.push(makeSplitter('chat'), renderChat())
   return h('div', { class: 'shell', style: { gridTemplateColumns: shellColumns(layout) } }, ...children)
 }
 
@@ -1844,7 +2078,7 @@ function renderSide() {
                           },
                         }),
                       ),
-                      h('span', { class: 'dot ' + (paper.notesCount ? 'note' : paper.status || '') }),
+                      h('span', { class: ['dot', paper.status || '', paper.notesCount ? 'note' : ''].filter(Boolean).join(' ') }),
                       h(
                         'span',
                         {},
@@ -1912,12 +2146,42 @@ function renderMain() {
   if (state.convPicker.open) overlays.push(renderConvPicker())
   if (state.layoutReport) overlays.push(renderLayoutReport())
   if (state.showSettings) return h('section', { class: 'main' }, renderTopbar(), h('div', { class: 'content' }, renderSettings()), ...overlays)
-  const content = state.tab === 'online' || (!state.current && state.online.items.length > 0) ? renderOnline() : !state.current ? renderEmpty() : renderReader()
-  return h('section', { class: 'main' }, renderTopbar(), content, ...overlays)
+  const isOnline = state.tab === 'online' || (!state.current && state.online.items.length > 0)
+  const content = isOnline ? renderOnline() : !state.current ? renderEmpty() : renderReader()
+  const showNativeSubbar = NATIVE_READER && state.current && !isOnline && state.tab !== 'compare'
+  return h('section', { class: 'main' }, renderTopbar(), showNativeSubbar ? renderNativeActions() : null, content, ...overlays)
+}
+
+function nativeReaderStatus() {
+  if (!state.native.available) return '原生会话尚未连接'
+  return state.native.conversationId ? '' : '右侧可新建对话'
+}
+
+function nativeQuickGroup(includeSelection = true) {
+  const meta = state.current && state.current.meta
+  const action = (label, title, onclick) =>
+    h('button', { class: 'ai-chip', 'data-native-ask': '', disabled: !state.native.available, title, onclick }, label)
+  return h(
+    'div',
+    { class: 'toolbar-group ai-quick-group', role: 'group', 'aria-label': 'AI 导读与提问' },
+    action('导读', '3 分钟把握论文背景、核心直觉与重点阅读路线', () => sendQuick(meta ? P.guide(meta) : '请给我一份这篇论文的 3 分钟导读。', { scope: 'paper' })),
+    action('总结全文', '提炼研究问题、核心方法、关键结果与局限并附引用', () => sendQuick(meta ? P.summarize(meta) : '请总结这篇论文的研究问题、方法和主要结论，并提供原文引用。', { scope: 'paper' })),
+    action('讲解本节', '深入拆解当前章节的推导、架构设计与论证逻辑', () => explainSection(state.sectionId || sectionsOf()[0]?.id)),
+    includeSelection ? action('讲解选中', '针对划选正文逐句拆解（双击段落也可触发）', () => askSelection(pickedText())) : null,
+  )
+}
+
+function renderNativeActions() {
+  return h(
+    'div',
+    { class: 'toolbar sub-ai-toolbar' },
+    nativeQuickGroup(state.tab !== 'card'),
+    h('span', { id: 'native-reader-status', class: 'hint', role: 'status', 'aria-live': 'polite' }, nativeReaderStatus()),
+  )
 }
 
 function paneButton(kind, label) {
-  const open = state.layout[kind + 'Open']
+  const open = NATIVE_READER && kind === 'chat' ? state.native.open : state.layout[kind + 'Open']
   return h(
     'button',
     {
@@ -1966,29 +2230,42 @@ function renderTopbar() {
       'div',
       { class: 'topbar-actions' },
       paneButton('side', '文献库'),
-    h('button', { class: 'ghost' + (state.layout.outlineOpen ? ' active' : ''), disabled: sections.length === 0, 'data-pane': 'outline', onclick: () => togglePane('outline'), title: '目录（与拖动目录分隔条是同一个开关）' }, '目录'),
-    paneButton('chat', '对话'),
-    meta ? h('button', { class: 'ghost', 'data-act': 'search', disabled: !hostReady(), title: hostReady() ? '文内搜索（Ctrl+F）' : '重启桌面端后可用', onclick: openSearch }, '🔍') : null,
-    h('button', { class: 'ghost', 'data-act': 'dark', title: 'PDF 深色（三档：关/柔和/强）', onclick: cycleDark }, state.dark === 0 ? '◐' : state.dark === 1 ? '◑' : '◒'),
-    h('button', { class: 'ghost', 'data-act': 'trash', disabled: !hostReady(), title: hostReady() ? '回收站' : '重启桌面端后可用', onclick: openTrash }, '🗑'),
-    meta
-      ? h(
-          'button',
-          {
-            class: 'ghost',
-            title: '移入回收站（PDF 不删）',
-            onclick: async () => {
-              if (!window.confirm('把这篇文章移出文献库？（PDF 不会删除，只会移入 .trash）')) return
-              await rpc('library.remove', { id: meta.id }).catch((error) => toast(error.message))
-              state.current = null
-              state.doc = null
-              await loadLibrary()
+      h('button', { class: 'ghost' + (state.layout.outlineOpen ? ' active' : ''), disabled: sections.length === 0, 'data-pane': 'outline', onclick: () => togglePane('outline'), title: '目录（与拖动目录分隔条是同一个开关）' }, '目录'),
+      paneButton('chat', '对话'),
+      h('span', { class: 'topbar-sep', 'aria-hidden': 'true' }),
+      meta ? h('button', { class: 'ghost', 'data-act': 'search', disabled: !hostReady(), title: hostReady() ? '文内搜索（Ctrl+F）' : '重启桌面端后可用', onclick: openSearch }, '🔍') : null,
+      h('button', { class: 'ghost', 'data-act': 'dark', title: 'PDF 深色（三档：关/柔和/强）', onclick: cycleDark }, state.dark === 0 ? '◐' : state.dark === 1 ? '◑' : '◒'),
+      h('button', { class: 'ghost', 'data-act': 'trash', disabled: !hostReady(), title: hostReady() ? '回收站' : '重启桌面端后可用', onclick: openTrash }, '🗑'),
+      meta
+        ? h(
+            'button',
+            {
+              class: 'ghost danger-subtle',
+              title: '将当前论文移入回收站（原 PDF 文件不会删除）',
+              onclick: async () => {
+                if (!window.confirm('把这篇文章移出文献库？（PDF 不会删除，只会移入 .trash）')) return
+                try {
+                  await rpc('library.remove', { id: meta.id })
+                } catch (error) {
+                  toast('移出失败：' + error.message)
+                  return
+                }
+                state.openSeq += 1
+                abortPaperWork()
+                stopLayoutPoll()
+                stopLogPoll()
+                hideFloating()
+                state.current = null
+                state.doc = null
+                await loadLibrary()
+                saveSession({ paperId: null })
+                render(true)
+              },
             },
-          },
-          '✕',
-        )
-      : null,
-      h('button', { class: 'ghost', onclick: openSettings, title: '设置' }, '⚙'),
+            '移出',
+          )
+        : null,
+      h('button', { class: 'ghost', onclick: openSettings, title: '设置与环境自检' }, '⚙'),
     ),
   )
 }
@@ -2012,14 +2289,14 @@ function renderEmpty() {
     h(
       'div',
       { class: 'empty' },
-      h('h2', {}, '论文工作台 v2：对照阅读 + 面板内翻译与对话'),
+      h('h2', {}, '论文工作台：对照阅读 + 原生会话'),
       h(
         'ol',
         {},
         h('li', {}, '左侧导入本地 PDF，或点「在线检索」按关键词 / arXiv 号 / DOI 找开放获取论文；'),
         h('li', {}, '打开论文后默认进入「对照」：节标题 + 原文段 + 中文译文连续滚动，目录点击只跳转；'),
         h('li', {}, '工具栏的「译」开关逐段翻译当前节，「整篇翻译」按节串行推进，「停止」随时中断；'),
-        h('li', {}, '右侧对话抽屉流式回答，回答里的 [p.N] 可点开原文页；翻译/对话模型在设置里选。'),
+        h('li', {}, NATIVE_READER ? '右侧是原生 DSH 会话：模型、附件和工具由原生输入框管理；翻译在论文段落下方独立显示。' : '右侧对话流式回答，回答里的页码引用可点开原文页；翻译与对话分别选择模型。'),
       ),
     ),
   )
@@ -2108,6 +2385,10 @@ function jumpToSection(section) {
     const target = document.getElementById('sec-' + section.id)
     if (target) target.scrollIntoView({ block: 'start', behavior: 'smooth' })
     state.sectionId = section.id
+    state.page = section.page || state.page
+    state.native.blockId = ''
+    notifyReaderState()
+    saveSessionSoon()
     paintOutlineActive()
   } else if (state.tab === 'page') {
     loadPage(section.page || 1).then(() => render())
@@ -2116,11 +2397,15 @@ function jumpToSection(section) {
 
 function explainSection(sectionId) {
   const section = sectionsOf().find((item) => item.id === sectionId)
-  if (!state.layout.chatOpen) {
+  if (!NATIVE_READER && !state.layout.chatOpen) {
     state.layout.chatOpen = true
     saveLayout()
   }
-  sendChat('讲解本节：' + (section ? section.title : sectionId), chatContext({ sectionId }))
+  const targetPage = section?.page || state.page || 1
+  const prompt = section
+    ? '请深入讲解本节《' + section.title + '》：梳理核心思路、关键公式或架构设计细节、与前后文的逻辑衔接，并标注原文引用。'
+    : '请讲解当前阅读页（第 ' + targetPage + ' 页）的核心内容与关键细节，并标注原文引用。'
+  sendChat(prompt, chatContext({ sectionId: section ? section.id : sectionId || null, page: targetPage, scope: 'section' }))
 }
 
 function setupSectionObserver() {
@@ -2141,6 +2426,10 @@ function setupSectionObserver() {
       const sectionId = top.target.getAttribute('data-section')
       if (sectionId && sectionId !== state.sectionId) {
         state.sectionId = sectionId
+        state.page = sectionsOf().find(item => item.id === sectionId)?.page || state.page
+        state.native.blockId = ''
+        notifyReaderState()
+        saveSessionSoon()
         paintOutlineActive()
       }
     },
@@ -2174,10 +2463,11 @@ function renderCompare() {
     if (!bySection.has(sid)) bySection.set(sid, [])
     bySection.get(sid).push(paragraph)
   }
-  // 只要已有译文或正在翻译就展示译文层：点「译本节 / 整篇翻译」时译开关可能是关的
-  const hasZh = state.ai.translateOn || state.ai.onlyZh || Object.keys(state.trans).length > 0 || state.streams.size > 0
+  // 只要已有译文或正在翻译就展示译文层（除非用户切到了「原文」模式）
+  const hasZh = !state.ai.hideZh && (state.ai.translateOn || state.ai.onlyZh || Object.keys(state.trans).length > 0 || state.streams.size > 0)
+  const sideMode = state.ai.sideBySide && !state.ai.onlyZh && !state.ai.hideZh
   const compare = h('div', {
-    class: 'compare' + (hasZh ? ' show-zh' : '') + (state.ai.onlyZh ? ' only-zh' : ''),
+    class: 'compare' + (hasZh ? ' show-zh' : '') + (state.ai.onlyZh ? ' only-zh' : '') + (sideMode ? ' side-by-side' : ''),
   })
   for (const section of sections) {
     const titleKey = section.hash ? 't:' + String(section.hash).toLowerCase() : ''
@@ -2314,12 +2604,13 @@ function renderTableGrid(paragraph) {
 function renderInlineMath(text) {
   const value = String(text || '')
   const box = h('div', { class: 'para-orig' })
-  const pattern = /\$([^$\n]{1,300})\$/g
+  const pattern = /\$(?!\s)([^$\n]{1,240}?)(?<!\s)\$/g
   let last = 0
   let match = null
   while ((match = pattern.exec(value)) !== null) {
+    if (/^\d+(?:[.,]\d+)?(?:\s|\)|,|\b\s+(?:and|or|to|vs\.?)\b)/i.test(match[1])) continue
     if (match.index > last) box.append(document.createTextNode(value.slice(last, match.index)))
-    const span = h('span', { class: 'inline-math' })
+    const span = h('span', { class: 'inline-math', 'data-tex': '$' + match[1] + '$' })
     const katex = typeof window !== 'undefined' ? window.katex : null
     let ok = false
     if (katex && typeof katex.render === 'function') {
@@ -2340,7 +2631,7 @@ function renderInlineMath(text) {
 }
 
 function renderFormula(tex) {
-  const box = h('div', { class: 'para-latex', 'data-tex': tex })
+  const box = h('div', { class: 'para-latex', 'data-tex': '$$' + tex + '$$' })
   const katex = typeof window !== 'undefined' ? window.katex : null
   if (tex === '') return box
   if (katex && typeof katex.render === 'function') {
@@ -2372,6 +2663,10 @@ function renderParagraph(paragraph) {
   }
   const key = paragraphKey(paragraph)
   const entry = key ? state.trans[key] : null
+  const textValue = String(kind === 'formula' ? (paragraph.latex || paragraph.text || '') : (paragraph.text || ''))
+  const origNode = (kind === 'caption' || kind === 'body' || kind === 'list' || kind === 'footnote') && textValue.includes('$')
+    ? renderInlineMath(textValue)
+    : h('div', { class: 'para-orig' }, textValue)
   const para = h(
     'div',
     {
@@ -2381,15 +2676,26 @@ function renderParagraph(paragraph) {
       'data-section': paragraph.section || '',
       'data-page': paragraph.page || 1,
       ondblclick: () => {
-        const selected = selectionText()
-        askSelection(selected || paragraph.text)
+        hideFloating()
+        const selected = liveReaderSelection()
+        const singleWord = selected && !/\s/.test(selected.trim()) && selected.trim().length < 36 && textValue.length > selected.trim().length
+        if (selected && !singleWord) {
+          askSelection(selected)
+        } else {
+          askSelection(textValue, {
+            blockId: paragraph.blockId || null,
+            page: paragraph.page || state.page,
+            sectionId: paragraph.section || state.sectionId || null,
+            revision: state.doc?.revision || null,
+          })
+        }
       },
     },
-    kind === 'caption' ? renderInlineMath(paragraph.text) : h('div', { class: 'para-orig' }, paragraph.text),
+    origNode,
   )
   if (kind === 'formula') {
     para.classList.add('kind-formula')
-    const tex = String(paragraph.latex || paragraph.text || '').trim()
+    const tex = textValue.trim()
     para.replaceChildren(
       renderFormula(tex),
       h('button', { class: 'link formula-link', onclick: () => jumpToPage(paragraph.page || 1) },
@@ -2412,7 +2718,7 @@ function jumpToPage(page) {
   state.tab = 'page'
   state.page = target
   state.pendingPage = target
-  loadPage(target).then(() => render())
+  loadPage(target).then(() => render(true))
 }
 
 function renderDocMissing() {
@@ -2438,73 +2744,105 @@ function renderCompareToolbar() {
   const status = state.translateError || progressText()
   // 重试入口不能只看 job.failed：整篇在开流前就失败时 failed 是空的，但段落停在 error 状态
   const retryable = failedSegmentKeys()
+  const mode = currentReadMode()
+  const modeBtn = (key, label, title, id) =>
+    h(
+      'button',
+      {
+        ...(id ? { id } : {}),
+        class: 'seg-btn' + (mode === key ? ' active' : ''),
+        role: 'radio',
+        'aria-checked': mode === key ? 'true' : 'false',
+        title,
+        onclick: () => setReadMode(key),
+      },
+      label,
+    )
+  const moreDirty = Boolean(
+    state.layoutBusy ||
+      state.layoutResumable ||
+      state.reviewBusy ||
+      state.logs.open ||
+      (state.layoutApplied && state.layoutSchemaVersion >= 2 && state.layoutQuality !== 'passed'),
+  )
   return h(
     'div',
     { class: 'toolbar compare-toolbar' },
     h(
-      'button',
-      {
-        id: 'translate-toggle',
-        class: 'switch' + (state.ai.translateOn ? ' on' : ''),
-        role: 'switch',
-        'aria-checked': state.ai.translateOn ? 'true' : 'false',
-        title: '打开后对当前节逐段翻译',
-        onclick: toggleTranslate,
-      },
-      '译',
+      'div',
+      { class: 'toolbar-group trans-group', role: 'group', 'aria-label': '全文与章节翻译' },
+      h(
+        'button',
+        {
+          id: 'translate-toggle',
+          class: 'switch' + (state.ai.translateOn ? ' on' : ''),
+          role: 'switch',
+          'aria-checked': state.ai.translateOn ? 'true' : 'false',
+          title: '打开后对当前节逐段翻译（存入本地 SQLite，不进对话历史）',
+          onclick: toggleTranslate,
+        },
+        '译',
+      ),
+      h('button', { id: 'translate-section', disabled: !docReady || state.translateBusy, onclick: () => translateSection(state.sectionId || (sectionsOf()[0] && sectionsOf()[0].id)) }, '译本节'),
+      h('button', { id: 'translate-all', disabled: !docReady || state.translateBusy, onclick: confirmTranslateAll }, '整篇翻译'),
+      h('button', { id: 'translate-stop', hidden: !state.translateBusy, disabled: !state.translateBusy, onclick: stopTranslate }, '停止'),
+      h('button', { id: 'retry-failed', hidden: retryable.length === 0, title: '重新请求这些翻译失败的段落', onclick: retryFailedSegments }, '重试失败 ' + retryable.length),
+      status ? h('span', { class: 'translate-status' + (status === state.translateError ? ' error' : ''), id: 'translate-status' }, status) : h('span', { class: 'translate-status', id: 'translate-status' }, ''),
     ),
-    h('button', { id: 'translate-section', disabled: !docReady || state.translateBusy, onclick: () => translateSection(state.sectionId || (sectionsOf()[0] && sectionsOf()[0].id)) }, '译本节'),
-    h('button', { id: 'translate-all', disabled: !docReady || state.translateBusy, onclick: confirmTranslateAll }, '整篇翻译'),
-    h('button', { id: 'translate-stop', disabled: !state.translateBusy, onclick: stopTranslate }, '停止'),
-    h('span', { class: 'translate-status' + (status === state.translateError && status ? ' error' : ''), id: 'translate-status' }, status),
+    h(
+      'div',
+      { class: 'seg-group', role: 'radiogroup', 'aria-label': '阅读排版模式' },
+      modeBtn('bilingual', '双语', '上英下中学术对照'),
+      modeBtn('side', '并排', '宽屏左右双栏对照'),
+      modeBtn('orig', '原文', '暂时隐藏译文，专注英文原文'),
+      modeBtn('zh', '只看译文', '隐藏英文原文，只看中文译文', 'only-zh-toggle'),
+    ),
+    NATIVE_READER ? nativeQuickGroup(true) : null,
+    NATIVE_READER
+      ? h('span', { id: 'native-reader-status', class: 'hint native-inline-status', role: 'status', 'aria-live': 'polite' }, nativeReaderStatus())
+      : null,
     h('span', { class: 'spacer' }),
     h(
-      'button',
-      {
-        id: 'only-zh-toggle',
-        class: 'switch' + (state.ai.onlyZh ? ' on' : ''),
-        role: 'switch',
-        'aria-checked': state.ai.onlyZh ? 'true' : 'false',
-        title: '隐藏原文，只看中文译文',
-        onclick: toggleOnlyZh,
-      },
-      '只看译文',
+      'details',
+      { class: 'more-tools' + (moreDirty ? ' has-badge' : '') },
+      h('summary', { title: '目录翻译、译文自检、版面重排与任务日志' }, state.layoutBusy ? '解析中…' : '工具 ▾'),
+      h(
+        'div',
+        { class: 'more-tools-menu' },
+        h('button', { id: 'translate-titles', disabled: !docReady || state.translateBusy, title: '批量翻译节标题，目录显示英文/中文两行', onclick: translateTitles }, '目录翻译'),
+        h('button', { id: 'review-run', disabled: !docReady || !hostReady() || state.reviewBusy, title: hostReady() ? '检查空译文、截断、残留英文、公式残留等可疑段落' : '重启桌面端后可用', onclick: () => runReview('static') }, state.reviewBusy ? '自检中…' : '译文自检'),
+        h('button', {
+          id: 'layout-run',
+          class: 'ghost' + (state.layoutResumable && !state.layoutBusy ? ' dirty' : ''),
+          disabled: !docReady || !hostReady(),
+          title: hostReady()
+            ? '用 PaddleOCR 的 PP-StructureV3 版面模型切段：会上传 PDF、按页计费；结果存 layout.json，下次不用重跑'
+            : '重启桌面端后可用',
+          onclick: state.layoutBusy ? cancelLayoutParse : runLayoutParse,
+        }, state.layoutBusy
+          ? '解析中… ' + ((state.layoutJob && state.layoutJob.pages) || 0) + '/' + ((state.layoutJob && state.layoutJob.totalPages) || '?')
+          : state.layoutResumable ? '续跑版面 ' + state.layoutSavedPages + ' 页' : '版面解析'),
+        state.layoutApplied
+          ? h('button', {
+            id: 'layout-refill',
+            class: 'ghost',
+            disabled: !docReady || !hostReady() || state.layoutBusy,
+            title: '用 PDF 文本层重新回填文字（比如摘要段被服务端 OCR 认错时用），不上传、不花配额',
+            onclick: refillLayoutText,
+          }, '重填文字')
+          : null,
+        state.layoutApplied && state.layoutSchemaVersion >= 2
+          ? h('button', {
+            id: 'layout-quality',
+            class: 'ghost' + (state.layoutQuality === 'passed' ? '' : ' dirty'),
+            disabled: !hostReady(),
+            title: '查看版面质量报告：哪些页需要看原页',
+            onclick: openLayoutReport,
+          }, state.layoutQuality === 'passed' ? '版面质量 ✓' : '版面质量 ' + state.layoutBadPages)
+          : null,
+        h('button', { id: 'logs-toggle', class: 'ghost' + (state.logs.open ? ' active' : ''), disabled: !hostReady(), title: hostReady() ? '任务日志（翻译 / OCR / 自检）' : '重启桌面端后可用', onclick: toggleLogs }, state.logs.open ? '收起日志' : '任务日志'),
+      ),
     ),
-    h('button', { id: 'translate-titles', disabled: !docReady || state.translateBusy, title: '批量翻译节标题，目录显示英文/中文两行', onclick: translateTitles }, '目录翻译'),
-    retryable.length
-      ? h('button', { id: 'retry-failed', title: '重新请求这些翻译失败的段落', onclick: retryFailedSegments }, '重试失败 ' + retryable.length)
-      : null,
-    h('button', { id: 'review-run', disabled: !docReady || !hostReady() || state.reviewBusy, title: hostReady() ? '检查空译文、截断、残留英文、公式残留等可疑段落' : '重启桌面端后可用', onclick: () => runReview('static') }, state.reviewBusy ? '自检中…' : '自检'),
-    h('button', {
-      id: 'layout-run',
-      class: 'ghost' + (state.layoutResumable && !state.layoutBusy ? ' dirty' : ''),
-      disabled: !docReady || !hostReady(),
-      title: hostReady()
-        ? '用 PaddleOCR 的 PP-StructureV3 版面模型切段：会上传 PDF、按页计费；结果存 layout.json，下次不用重跑'
-        : '重启桌面端后可用',
-      onclick: state.layoutBusy ? cancelLayoutParse : runLayoutParse,
-    }, state.layoutBusy
-      ? '解析中… ' + ((state.layoutJob && state.layoutJob.pages) || 0) + '/' + ((state.layoutJob && state.layoutJob.totalPages) || '?')
-      : state.layoutResumable ? '续跑版面 ' + state.layoutSavedPages + ' 页' : '版面'),
-    state.layoutApplied
-      ? h('button', {
-        id: 'layout-refill',
-        class: 'ghost',
-        disabled: !docReady || !hostReady() || state.layoutBusy,
-        title: '用 PDF 文本层重新回填文字（比如摘要段被服务端 OCR 认错时用），不上传、不花配额',
-        onclick: refillLayoutText,
-      }, '重填文字')
-      : null,
-    state.layoutApplied && state.layoutSchemaVersion >= 2
-      ? h('button', {
-        id: 'layout-quality',
-        class: 'ghost' + (state.layoutQuality === 'passed' ? '' : ' dirty'),
-        disabled: !hostReady(),
-        title: '查看版面质量报告：哪些页需要看原页',
-        onclick: openLayoutReport,
-      }, state.layoutQuality === 'passed' ? '质量 ✓' : '质量 ' + state.layoutBadPages)
-      : null,
-    h('button', { id: 'logs-toggle', class: 'ghost' + (state.logs.open ? ' active' : ''), disabled: !hostReady(), title: hostReady() ? '任务日志（翻译 / OCR / 自检）' : '重启桌面端后可用', onclick: toggleLogs }, '日志'),
   )
 }
 
@@ -2638,6 +2976,8 @@ function setupPageScroll(stage) {
         if (input) input.value = String(page)
         const label = document.querySelector('.statusbar .cur-page')
         if (label) label.textContent = '第 ' + page + ' 页'
+        state.native.blockId = ''
+        notifyReaderState()
         saveSessionSoon({ page })
       }
     },
@@ -2692,7 +3032,7 @@ function renderPagePane() {
       h('button', { onclick: () => setZoom(1), title: '适合宽度' }, Math.round(state.zoom * 100) + '%'),
       h('button', { onclick: () => setZoom(state.zoom + 0.15) }, '＋'),
       h('span', { class: 'sep' }),
-      h('button', { onclick: openSearch, title: '全文检索' }, '🔍 检索'),
+      h('button', { onclick: runPageSearch, title: '全文检索（Ctrl+F）' }, '🔍 检索'),
       h('button', { onclick: () => explainPage() }, '讲解本页'),
       h('button', {
         class: state.zhMode ? 'on' : 'ghost',
@@ -2725,7 +3065,11 @@ function renderPagePane() {
     state.pendingPage = state.page
     render()
   }
-  function openSearch() {
+  function runPageSearch() {
+    if (hostReady()) {
+      openSearch()
+      return
+    }
     const query = window.prompt('全文检索关键词：')
     if (!query) return
     rpc('pdf.search', { id: meta.id, query })
@@ -2770,11 +3114,11 @@ function ocrBar() {
 }
 
 function explainPage() {
-  if (!state.layout.chatOpen) {
+  if (!NATIVE_READER && !state.layout.chatOpen) {
     state.layout.chatOpen = true
     saveLayout()
   }
-  sendChat('讲解第 ' + state.page + ' 页', chatContext({ page: state.page }))
+  sendChat('请详细讲解第 ' + state.page + ' 页的核心内容、图表/公式含义与上下文逻辑，并附原文引用。', chatContext({ page: state.page, scope: 'section' }))
 }
 
 // ---------------------------------------------------------------- 笔记 / 卡片
@@ -2804,8 +3148,8 @@ function renderNotesPane() {
           'div',
           { class: 'row' },
           h('button', { onclick: () => jumpToPage(highlight.page) }, '跳回原文'),
-          h('button', { onclick: () => askSelection(highlight.text) }, '问 AI'),
-          h('button', { onclick: () => insertPrompt(P.askSelection(state.current.meta, highlight.text)) }, '插入会话'),
+          h('button', { onclick: () => askSelection(highlight.text, { page: highlight.page || 1 }) }, NATIVE_READER ? '发送到会话' : '问 AI'),
+          !NATIVE_READER ? h('button', { onclick: () => insertPrompt(P.askSelection(state.current.meta, highlight.text)) }, '插入会话') : null,
           h(
             'button',
             {
@@ -2843,6 +3187,7 @@ function renderCardPane() {
       { class: 'toolbar', style: { borderBottom: 'none', padding: '0 0 8px' } },
       h('span', { class: 'muted', title: state.card.path }, state.card.path.split(/[\\/]/).slice(-2).join('/')),
       h('span', { class: 'spacer' }),
+      h('button', { onclick: () => insertPrompt(P.syncCard(state.current.meta)), title: '让会话重新提炼并更新卡片关键字段' }, '更新卡片（交给会话）'),
       h('button', { onclick: () => rpc('vault.open', { path: state.card.path }).catch((error) => toast(error.message)) }, '在 Obsidian 打开'),
       h('button', { onclick: () => loadCard().then(() => render()) }, '刷新'),
     ),
@@ -2915,7 +3260,7 @@ function renderChat() {
       'div',
       { class: 'chat-quick' },
       h('button', { class: 'ghost', onclick: () => sendQuick('讲解本节', { scope: 'section' }) }, '讲解本节'),
-      h('button', { class: 'ghost', onclick: () => { const text = pickedText(); if (text.length < 2) { toast('先在正文里选中一段文字'); return } sendQuick('讲解这段选中的原文：\n> ' + text.slice(0, 800), { scope: 'section', selection: text.slice(0, 2000) }) } }, '讲解选中段落'),
+      h('button', { class: 'ghost', onclick: () => { const text = pickedText(); if (text.length < 2) { toast('先在正文里选中一段文字'); return } sendQuick('讲解这段选中的原文：\n> ' + text, { scope: 'selection', selection: text }) } }, '讲解选中段落'),
       h('button', { class: 'ghost', onclick: () => sendQuick('总结全文', { scope: 'paper' }) }, '总结全文'),
     ),
   )
@@ -3128,9 +3473,9 @@ function renderSettings() {
         h('option', { value: 'copy', selected: config.storage === 'copy' }, 'copy：复制进库（移动原文件也不怕）'),
       ),
     ),
-    h('div', { class: 'divider' }, 'AI（翻译 / 对话）'),
+    h('div', { class: 'divider' }, NATIVE_READER ? 'AI 翻译' : 'AI（翻译 / 对话）'),
     modelSelect('ai-translate-model', '翻译模型', 'translateModel'),
-    modelSelect('ai-chat-model', '对话模型', 'chatModel'),
+    NATIVE_READER ? h('p', { class: 'hint' }, '聊天模型与思考程度在右侧原生输入框中选择。') : modelSelect('ai-chat-model', '对话模型', 'chatModel'),
     h(
       'div',
       { class: 'field' },
@@ -3273,10 +3618,13 @@ function renderOnline() {
         h('option', { value: 'openalex', selected: state.online.source === 'openalex' }, '仅 OpenAlex'),
       ),
       h('button', { class: 'primary', onclick: doSearch, disabled: state.online.loading }, state.online.loading ? '检索中…' : '检索'),
-      h('button', { onclick: () => insertPrompt(P.vaultSearch(state.online.q || '论文')) }, '问笔记库'),
+      h('button', { onclick: () => insertGeneralPrompt(P.vaultSearch(state.online.q || '论文')) }, '问笔记库'),
     ),
   )
   if (state.online.error) box.append(h('div', { class: 'error' }, state.online.error))
+  if (Array.isArray(state.online.warnings) && state.online.warnings.length > 0) {
+    box.append(h('div', { class: 'hint' }, '提示：' + state.online.warnings.join('；')))
+  }
   for (const item of state.online.items) {
     box.append(
       h(
@@ -3312,7 +3660,7 @@ function renderOnline() {
             item.pdfUrl ? '下载并入库' : '无开放 PDF',
           ),
           item.url || item.absUrl ? h('button', { onclick: () => window.open(item.url || item.absUrl, '_blank', 'noopener') }, '打开原文页') : null,
-          h('button', { onclick: () => insertPrompt('帮我找并读一下这篇论文：' + item.title + (item.doi ? '（DOI ' + item.doi + '）' : '')) }, '让 agent 读'),
+          h('button', { onclick: () => insertGeneralPrompt('帮我查找并研读这篇论文：' + item.title + (item.doi ? '（DOI ' + item.doi + '）' : '') + '，提炼研究动机、方法设计与核心结论。') }, '让 agent 读'),
         ),
       ),
     )
@@ -3328,10 +3676,12 @@ async function doSearch() {
   if (!query) return
   state.online.loading = true
   state.online.error = ''
+  state.online.warnings = []
   render()
   try {
     const value = await rpc('search.online', { query, source: state.online.source, limit: 10 })
     state.online.items = value.items || []
+    state.online.warnings = Array.isArray(value.warnings) ? value.warnings : []
   } catch (error) {
     state.online.error = '检索失败：' + error.message
   } finally {
@@ -3346,7 +3696,8 @@ function comparePicked() {
     toast('至少选 2 篇才能对比')
     return
   }
-  insertPrompt(P.compare(items))
+  if (NATIVE_READER) askNative(P.compare(items), { scope: 'papers', paperIds: items.map(paper => paper.id) })
+  else insertPrompt(P.compare(items))
 }
 
 // ---------------------------------------------------------------- 导入（保留）
@@ -3390,6 +3741,7 @@ async function importFromVault() {
     const value = await rpc('library.importFromVault')
     toast('扫描 ' + value.scanned + ' 张卡片，新入库 ' + value.imported.length + ' 篇，跳过 ' + value.skipped.length + ' 篇')
     await loadLibrary()
+    render()
   } catch (error) {
     toast('导入失败：' + error.message)
   }
@@ -3412,42 +3764,84 @@ function showFloating(x, y, text) {
   hideFloating()
   const meta = state.current && state.current.meta
   if (!meta) return
-  state.selection = { text }
+  rememberReaderSelection(text)
+  const snapshot = {
+    keys: selectionMemory.keys || [],
+    host: selectionMemory.host || null,
+  }
+  state.selection = { text, ...snapshot }
   floatingShownAt = Date.now()
+  const vw = Number(window.innerWidth) || 1200
+  const vh = Number(window.innerHeight) || 800
+  const safeX = Number.isFinite(x) ? x : 16
+  const safeY = Number.isFinite(y) ? y : 64
+  const left = Math.max(8, Math.min(Math.max(8, vw - 360), safeX))
+  const desiredTop = safeY < 56 ? Math.max(8, safeY) + 26 : safeY - 46
+  const top = Math.max(8, Math.min(Math.max(8, vh - 48), desiredTop))
   floating = h(
     'div',
-    { class: 'floating-menu', style: { left: Math.min(window.innerWidth - 340, x) + 'px', top: Math.max(8, y - 44) + 'px' } },
-    h('button', { onclick: () => { const selected = text; hideFloating(); askSelection(selected) } }, '问 AI'),
-    h('button', { onclick: () => { const selected = text; hideFloating(); translateSelection(selected) } }, '翻译'),
+    {
+      class: 'floating-menu',
+      style: { left: left + 'px', top: top + 'px' },
+      onmousedown: (event) => event.preventDefault(),
+    },
+    NATIVE_READER
+      ? h('button', { class: 'primary-soft', onclick: () => { const selected = text; hideFloating(); askSelection(selected) } }, '发送到会话')
+      : h('button', { onclick: () => { const selected = text; hideFloating(); askSelection(selected) } }, '问 AI'),
+    h('button', { onclick: () => { const selected = text; hideFloating(); explainTermsSelection(selected) } }, '解释公式/术语'),
+    h('button', { onclick: () => { const selected = text; hideFloating(); translateSelection(selected, snapshot) } }, '翻译'),
     h('button', { onclick: () => { addHighlight(text); hideFloating() } }, '高亮'),
     h('button', { onclick: () => { copyText(text); hideFloating() } }, '复制'),
-    h('button', { onclick: () => { const selected = text; hideFloating(); insertPrompt(P.askSelection(meta, selected)) } }, '插入会话'),
+    !NATIVE_READER
+      ? h('button', { onclick: () => { const selected = text; hideFloating(); insertPrompt(P.askSelection(meta, selected)) } }, '插入会话')
+      : null,
   )
   document.body.append(floating)
 }
 
-function askSelection(text) {
+function askSelection(text, explicitSource = null) {
   if (!state.current) return
   if (String(text || '').trim().length < 2) {
     toast('没拿到选中的正文，请重新划选一段再点')
     return
   }
-  if (!state.layout.chatOpen) {
+  if (!NATIVE_READER && !state.layout.chatOpen) {
     state.layout.chatOpen = true
     saveLayout()
   }
-  sendChat('讲解这段选中的原文：\n> ' + String(text).slice(0, 1200), chatContext({ selection: String(text).slice(0, 2000) }))
+  sendChat('讲解这段选中的原文：\n> ' + String(text), chatContext({ selection: String(text), ...(explicitSource ? { explicitSource } : {}) }))
+}
+
+function explainTermsSelection(text) {
+  if (!state.current) return
+  if (String(text || '').trim().length < 2) {
+    toast('没拿到选中的正文，请重新划选一段再点')
+    return
+  }
+  if (!NATIVE_READER && !state.layout.chatOpen) {
+    state.layout.chatOpen = true
+    saveLayout()
+  }
+  sendChat(
+    '请逐一拆解下面选中原文中的学术术语、数学符号与公式物理/直觉含义，并说明它在本节中的作用（附原文引用）：\n> ' + String(text),
+    chatContext({ selection: String(text) }),
+  )
 }
 
 /** 划词翻译：只触发这几次模型请求，不进对话、不留对话历史；译文贴在原文段下面。 */
-function translateSelection(text) {
-  const keys = selectionParagraphKeys()
+function translateSelection(text, snapshot = null) {
+  const liveKeys = selectionParagraphKeys()
+  const rememberedKeys =
+    selectionMemory.paperId === state.current?.meta?.id && Date.now() - selectionMemory.at < SELECTION_MEMORY_MS
+      ? selectionMemory.keys || []
+      : []
+  const keys = liveKeys.length ? liveKeys : (snapshot?.keys?.length ? snapshot.keys : rememberedKeys)
   if (keys.length) {
     translateKeys(keys)
     return
   }
   // 没有段落模型（原文页 / 纯文本块）时退化成一次性小工具：结果贴在选区附近，不进对话
-  translateSelectionCard(String(text || ''))
+  translateSelectionCard(String(text || ''), snapshot?.host || selectionMemory.host || null)
 }
 
 /** 选区覆盖到的段落 key（对照视图才有；跨段拖选会命中多段）。 */
@@ -3473,7 +3867,7 @@ function selectionParagraphKeys() {
  * 一次性划词翻译（原文页 / 无段落模型时用）：/ai/translate 的 ad-hoc 分支，
  * 宿主不读缓存、不写 trans.json、不碰 chat.json，每次都是全新请求。
  */
-async function translateSelectionCard(text) {
+async function translateSelectionCard(text, fallbackHost = null) {
   const value = text.trim()
   if (value.length < 2 || !state.current) return
   // 老宿主没有 ad-hoc 通道：带 text 但没 keys 的请求会被当成「整篇翻译」，绝不能发。
@@ -3481,11 +3875,7 @@ async function translateSelectionCard(text) {
     toast('原文页划词翻译要重启桌面端后才生效；对照页的划词翻译现在就能用')
     return
   }
-  let host = null
-  const selection = window.getSelection()
-  const anchor = selection && selection.anchorNode
-  const start = anchor && (anchor.nodeType === 1 ? anchor : anchor.parentElement)
-  if (start && start.closest) host = start.closest('.blocks > *, .page-pane p, .markdown p, .para')
+  const host = selectionHostNode() || fallbackHost
   const old = document.querySelector('.sel-trans')
   if (old) old.remove()
   const body = h('div', { class: 'zh-text' }, '翻译中…')
@@ -3495,8 +3885,8 @@ async function translateSelectionCard(text) {
     h('div', { class: 'sel-trans-head' }, '划词译文', h('button', { class: 'link', onclick: () => card.remove() }, '关闭')),
     body,
   )
-  if (host && host.parentElement) host.parentElement.insertBefore(card, host.nextSibling)
-  else (document.querySelector('.content') || document.body).append(card)
+  if (host && host.parentElement && host.isConnected !== false) host.parentElement.insertBefore(card, host.nextSibling)
+  else (document.querySelector('.page-pane .stage, .compare, .pane, .blocks') || document.body).prepend(card)
   let accumulated = ''
   try {
     await streamSse(
@@ -3545,30 +3935,51 @@ async function addHighlight(text) {
 // ---------------------------------------------------------------- 会话注入（次要通道）
 
 function insertPrompt(text) {
+  if (NATIVE_READER) return askNative(text, { scope: 'paper' })
+  window.parent.postMessage({ __pb: true, type: 'insert-prompt', text }, location.origin)
+  toast('已写入当前会话输入框，回到对话里发送即可')
+}
+
+function insertGeneralPrompt(text) {
+  if (NATIVE_READER) return askNative(text, { scope: 'general' })
   window.parent.postMessage({ __pb: true, type: 'insert-prompt', text }, location.origin)
   toast('已写入当前会话输入框，回到对话里发送即可')
 }
 
 const P = {
+  guide: (m) =>
+    '请给我一份论文《' + m.title + '》（id="' + m.id + '"）的「3 分钟阅读导览」：\n' +
+    '1. 先用 paper_doc（id="' + m.id + '"，sections="outline"）与 paper_read 查看摘要、引言和结论；\n' +
+    '2. 按四个层次简洁输出：\n' +
+    '   - 核心痛点：现有工作卡在哪里？\n' +
+    '   - 核心直觉（Aha Moment）：这篇论文最关键的设计巧思是什么？\n' +
+    '   - 关键证据：最能支撑结论的 2-3 组实验/消融是什么（严禁编造数字）？\n' +
+    '   - 阅读路线建议：哪些章节/图表最值得精读，哪些可略读？\n' +
+    '3. 每条关键判断后保留工具返回的完整论文引用链接（或 [p.N]）。',
+  summarize: (m) =>
+    '请系统总结论文《' + m.title + '》（id="' + m.id + '"）的研究问题、核心方法架构、主要实验结论与局限性：\n' +
+    '- 按需调用 paper_doc / paper_read 核对正文与实验表，严禁凭记忆猜数字；\n' +
+    '- 涉及核心公式或机制时保留原符号并用通俗直觉解释；\n' +
+    '- 每条结论后附完整论文引用链接（或 [p.N]），点击即可跳回阅读器对应位置。',
   deepRead: (m) =>
-    '请精读这篇论文并把结果落到 Obsidian。\n标题：《' + m.title + '》\n库内 id：' + m.id + '\n\n步骤：\n1. 调用 paper_read（id="' + m.id + '"，先 pages="1-6"，需要再往后读）读完全文；\n2. 用中文输出七节报告：摘要、研究问题、方法、主要贡献、实验与结论、局限、可复现要点；\n3. 调用 paper_obsidian（id="' + m.id + '"，report=<报告全文>）把报告写进卡片。\n\n要求：每条结论后面用 [p.N] 标注原文页码；不要编造实验数字。',
+    '请精读这篇论文并把结构化研读报告落到 Obsidian。\n标题：《' + m.title + '》\n库内 id：' + m.id + '\n\n步骤：\n1. 调用 paper_doc / paper_read（id="' + m.id + '"，按章节完整覆盖摘要、方法、实验与局限）读透全文；\n2. 用中文输出七节报告：摘要、研究问题与动机、核心方法（含关键公式与符号解释）、主要贡献、实验设置与核心结论、局限与边界条件、可复现实现要点；\n3. 调用 paper_obsidian（id="' + m.id + '"，report=<报告全文>）把报告写进卡片。\n\n要求：每条事实与实验结论后标注页码引用（如 [p.N]），绝不编造实验指标或对比基线。',
   askSelection: (m, text) =>
-    '关于论文《' + m.title + '》（id="' + m.id + '"），我选中了这段原文：\n> ' + String(text).slice(0, 1200) + '\n\n请用中文解释它的含义，并说明它在论文论证里的作用；必要时用 paper_read（id="' + m.id + '"）回看上下文，回答里标 [p.N]。',
+    '关于论文《' + m.title + '》（id="' + m.id + '"），我选中了这段原文：\n> ' + String(text) + '\n\n请用中文准确拆解它的技术含义、关键符号/术语定义，以及它在整篇论文论证链条中的作用；必要时用 paper_doc / paper_read（id="' + m.id + '"）回看上下文，并附上可点击的原文引用。',
   syncCard: (m) =>
-    '请把论文《' + m.title + '》（id="' + m.id + '"）的知识化字段写进 Obsidian 卡片：\n先用 paper_read 读全文，然后调用 paper_obsidian（id="' + m.id + '", sections={"一句话结论": "...", "研究问题": "...", "方法线索": "...", "应用场景": "...", "局限线索": "..."}）。\n每个字段 1-2 句，忠于原文，不要空话。',
+    '请把论文《' + m.title + '》（id="' + m.id + '"）的知识化字段写进 Obsidian 卡片：\n先用 paper_doc / paper_read 核对全文核心内容，然后调用 paper_obsidian（id="' + m.id + '", sections={"一句话结论": "...", "研究问题": "...", "方法线索": "...", "应用场景": "...", "局限线索": "..."}）。\n每个字段 1-2 句，信息密度高、忠于原文实验与方法细节，不要空话套话。',
   compare: (items) =>
-    '请对比下面几篇论文，写一篇中文主题综述（不是逐篇摘要）：\n' +
+    '请对比下面几篇论文，写一篇高质量中文主题综述（注重脉络演进与横向洞察，不要写成孤立的逐篇摘要拼接）：\n' +
     items.map((m, i) => i + 1 + '. 《' + m.title + '》 id="' + m.id + '"').join('\n') +
-    '\n\n步骤：\n1. 用 paper_read 逐篇读（每篇至少读摘要+方法+实验）；\n2. 先给一张对比表（问题设定 / 方法 / 数据与评测 / 主要结论 / 局限）；\n3. 再写研究脉络：共识、分歧、还没解决的问题；\n4. 最后用 paper_obsidian（action="survey", topic="<主题名>", markdown=<综述全文>）写入「方向综述」。',
+    '\n\n步骤：\n1. 用 paper_doc / paper_read 逐篇核对摘要、方法骨架与主实验表；\n2. 先给一张清晰的多维对比表（问题设定 / 核心机制 / 复杂度或代价 / 数据集与关键指标 / 适用边界）；\n3. 再分析技术演进脉络：核心共识、路线分歧、trade-off 以及尚未解决的开放问题；\n4. 引用具体结论时明确标出所属论文与页码引用；最后用 paper_obsidian（action="survey", topic="<主题名>", markdown=<综述全文>）写入「方向综述」。',
   vaultSearch: (query) =>
-    '请在 Obsidian 论文知识库里检索与「' + query + '」相关的卡片（paper_obsidian action="search", query="' + query + '"），然后用中文总结：这个主题下已经有哪些论文、各自的结论是什么、还缺什么。',
+    '请在 Obsidian 论文知识库里检索与「' + query + '」相关的卡片（paper_obsidian action="search", query="' + query + '"），按技术路线归纳已有论文的核心结论、方法异同与当前知识空白。',
 }
 
 // ---------------------------------------------------------------- 全局事件
 
 document.addEventListener('selectionchange', () => {
-  const text = selectionText()
-  if (text.length >= 2) selectionMemory = { text, at: Date.now() }
+  const text = liveReaderSelection()
+  rememberReaderSelection(text)
   flushDeferredRender()
 })
 
@@ -3578,7 +3989,7 @@ document.addEventListener('mouseup', (event) => {
   const target = event.target
   // 划词只对正文/对话区域生效；点在按钮、输入框、目录上不弹菜单
   const inText = target && target.closest && target.closest('.compare, .page-pane, .markdown, .blocks, .chat-messages')
-  if (inText && text.length >= 2 && text.length <= 4000 && state.current) {
+  if (inText && text.length >= 2 && state.current) {
     const range = window.getSelection().getRangeAt(0)
     const rect = range.getBoundingClientRect()
     showFloating(rect.left, rect.top, text)
@@ -3676,6 +4087,10 @@ function closeSearch() {
 }
 
 async function runSearch(query) {
+  if (!state.current) return
+  const id = state.current.meta.id
+  const seq = state.openSeq
+  const stale = () => seq !== state.openSeq || !state.current || state.current.meta.id !== id
   const q = String(query || '').trim()
   state.search.q = q
   state.search.error = ''
@@ -3687,14 +4102,17 @@ async function runSearch(query) {
   state.search.busy = true
   render()
   try {
-    const value = await rpc('search.doc', { id: state.current.meta.id, query: q, limit: 120 })
+    const value = await rpc('search.doc', { id, query: q, limit: 120 })
+    if (stale()) return
     state.search.hits = Array.isArray(value.hits) ? value.hits : []
     state.search.active = 0
     if (state.search.hits.length === 0) state.search.error = '没有命中'
   } catch (error) {
+    if (stale()) return
     state.search.hits = []
     state.search.error = error.message
   }
+  if (stale()) return
   state.search.busy = false
   render()
   if (state.search.hits.length) gotoSearchHit(0)
@@ -3935,12 +4353,13 @@ function stopLayoutPoll() {
 function paintLayoutButton() {
   const button = document.getElementById('layout-run')
   if (!button) return
-  button.disabled = !(state.doc && state.current) || !hostReady()
+  const docReady = !!(state.doc && Array.isArray(state.doc.paragraphs) && state.doc.paragraphs.length > 0)
+  button.disabled = !(docReady && state.current) || !hostReady()
   button.className = 'ghost' + (state.layoutResumable && !state.layoutBusy ? ' dirty' : '')
   button.onclick = state.layoutBusy ? cancelLayoutParse : runLayoutParse
   button.textContent = state.layoutBusy
     ? '解析中… ' + ((state.layoutJob && state.layoutJob.pages) || 0) + '/' + ((state.layoutJob && state.layoutJob.totalPages) || '?')
-    : state.layoutResumable ? '续跑版面 ' + state.layoutSavedPages + ' 页' : '版面'
+    : state.layoutResumable ? '续跑版面 ' + state.layoutSavedPages + ' 页' : '版面解析'
   if (state.layoutJob && state.layoutBusy && state.layoutJob.stage) {
     button.title = state.layoutJob.stage
   }
@@ -4046,8 +4465,9 @@ async function pollLayoutJob(id) {
       stopLayoutPoll()
       render()
       if (job && job.state === 'done') {
-        await loadFigures()
         await loadDoc(id)
+        await loadFigures()
+        render()
       } else if (job && job.state === 'failed') {
         toast('版面解析失败：' + (job.error || '未知原因'))
       }
@@ -4070,19 +4490,26 @@ async function refillLayoutText() {
     return
   }
   if (state.layoutBusy) return
+  const id = meta.id
+  const seq = state.openSeq
+  const stale = () => seq !== state.openSeq || !state.current || state.current.meta.id !== id
   state.layoutBusy = true
   render()
   try {
-    const result = await rpc('layout.refill', { id: meta.id })
-    await loadDoc(meta.id)
+    const result = await rpc('layout.refill', { id })
+    if (stale()) return
+    await loadDoc(id, seq)
+    if (stale()) return
     toast(result.changed > 0
       ? '重填了 ' + result.changed + ' 块文字（' + result.pages + ' 页从 PDF 文本层取）'
       : '文字已经是最新的（没有需要重填的块）')
   } catch (error) {
-    toast('重填文字失败：' + error.message, 5000)
+    if (!stale()) toast('重填文字失败：' + error.message, 5000)
   } finally {
-    state.layoutBusy = false
-    render()
+    if (!stale()) {
+      state.layoutBusy = false
+      render()
+    }
   }
 }
 
@@ -4094,13 +4521,17 @@ async function runLayoutParse() {
     return
   }
   if (state.layoutBusy) return
+  const id = meta.id
+  const seq = state.openSeq
+  const stale = () => seq !== state.openSeq || !state.current || state.current.meta.id !== id
   let status = null
   try {
-    status = await rpc('layout.status', { id: meta.id })
+    status = await rpc('layout.status', { id })
   } catch (error) {
-    toast('查版面状态失败：' + error.message)
+    if (!stale()) toast('查版面状态失败：' + error.message)
     return
   }
+  if (stale()) return
   if (status && status.ready === false) {
     toast('还没填 PaddleOCR 的 API Key：设置 → PaddleOCR 里填一次')
     return
@@ -4113,15 +4544,19 @@ async function runLayoutParse() {
       ? '这篇已经解析过（' + current.blocks + ' 块 / ' + current.figures + ' 图，' + current.model + '）。\n重新解析会再上传一次 PDF、再花一次配额，确定？'
       : '版面解析会把整篇 PDF 上传到百度 AI Studio，用 PP-StructureV3 按页计费。\n解析后对照视图按真实版面切段，图表原位显示；结果会存到 layout.json，下次不用重跑。继续？'
   if (!window.confirm(question)) return
+  if (stale()) return
   state.layoutBusy = true
   render()
   try {
-    await rpc('layout.start', { id: meta.id, resume: resumable })
-    await pollLayoutJob(meta.id)
+    await rpc('layout.start', { id, resume: resumable })
+    if (stale()) return
+    await pollLayoutJob(id)
   } catch (error) {
-    state.layoutBusy = false
-    render()
-    toast('版面解析没能开始：' + error.message)
+    if (!stale()) {
+      state.layoutBusy = false
+      render()
+      toast('版面解析没能开始：' + error.message)
+    }
   }
 }
 
@@ -4151,18 +4586,25 @@ async function runReview(mode = 'static') {
     needRestart()
     return
   }
+  const id = state.current.meta.id
+  const seq = state.openSeq
+  const stale = () => seq !== state.openSeq || !state.current || state.current.meta.id !== id
   state.reviewBusy = true
   render()
   try {
-    const value = await rpc('review.run', { id: state.current.meta.id, mode })
+    const value = await rpc('review.run', { id, mode })
+    if (stale()) return
     state.review = value.review || null
     const count = (state.review && state.review.issues ? state.review.issues.length : 0)
     toast(count ? '自检发现 ' + count + ' 处可疑译文' : '自检通过：没发现明显问题')
   } catch (error) {
-    toast('自检失败：' + error.message)
+    if (!stale()) toast('自检失败：' + error.message)
+  } finally {
+    if (!stale()) {
+      state.reviewBusy = false
+      render()
+    }
   }
-  state.reviewBusy = false
-  render()
 }
 
 function renderReviewPanel() {
@@ -4229,8 +4671,11 @@ function toggleLogs() {
 
 async function loadLogs(silent = false) {
   if (!state.current) return
+  const id = state.current.meta.id
+  const seq = state.openSeq
   try {
-    const value = await rpc('logs.list', { id: state.current.meta.id, after: 0, limit: 300 })
+    const value = await rpc('logs.list', { id, after: 0, limit: 300 })
+    if (seq !== state.openSeq || !state.current || state.current.meta.id !== id) return
     const events = Array.isArray(value.events) ? value.events : []
     const changed = events.length !== state.logs.events.length
     state.logs.events = events
@@ -4522,6 +4967,7 @@ function paintSessionLive() {
 }
 
 async function startSessionStream(force = false) {
+  if (NATIVE_READER) return
   if (!state.session.available) return
   const conv = activeConv()
   // 没有对话就先不建：用户发出第一条消息（或点了「＋ 新建」）才创建，避免每开一次面板就多一个空对话
@@ -4593,6 +5039,7 @@ function stopSessionStream() {
 }
 
 async function sendSessionMessage(text) {
+  if (NATIVE_READER) return askNative(text)
   const content = String(text || '').trim()
   if (!content) return
   if (!state.chats.available) {
@@ -4633,6 +5080,7 @@ function paperLabel(id) {
 }
 
 async function loadConversations() {
+  if (NATIVE_READER) return
   if (!state.session.available) return
   state.chats.loading = true
   try {
@@ -4993,12 +5441,14 @@ function renderConvPicker() {
   const items = state.papers.filter((paper) => {
     if (picked.has(paper.id)) return false
     if (!q) return true
-    const title = String((paper.meta && paper.meta.title) || '')
+    const title = String((paper.meta && paper.meta.title) || paper.title || '')
     return title.toLowerCase().includes(q) || paper.id.includes(q)
   })
   const list = h('div', { class: 'picker-list' })
   if (items.length === 0) list.append(h('div', { class: 'hint' }, picked.size > 0 ? '所有论文都已经在这个对话里了' : '没有匹配的论文'))
   for (const paper of items.slice(0, 200)) {
+    const title = String((paper.meta && paper.meta.title) || paper.title || paper.id)
+    const pages = (paper.meta && paper.meta.pages) || paper.pageCount || 0
     list.append(
       h(
         'button',
@@ -5009,8 +5459,8 @@ function renderConvPicker() {
             await addPaperToConversation(paper.id)
           },
         },
-        h('span', { class: 'picker-title' }, String((paper.meta && paper.meta.title) || paper.id)),
-        h('span', { class: 'picker-meta' }, (paper.meta && paper.meta.pages ? paper.meta.pages + ' 页' : '') + ' · ' + paper.id),
+        h('span', { class: 'picker-title' }, title),
+        h('span', { class: 'picker-meta' }, (pages ? pages + ' 页 · ' : '') + paper.id),
       ),
     )
   }
@@ -5067,7 +5517,7 @@ function renderSessionChat(aside) {
               toast('先在正文里选中一段文字')
               return
             }
-            sendSessionMessage('讲解这段选中的原文：\\n> ' + text.slice(0, 800))
+            sendSessionMessage('讲解这段选中的原文：\n> ' + text)
           },
         },
         '讲解选中段落',
@@ -5194,11 +5644,12 @@ async function boot() {
 async function bootInner() {
   applyDark()
   document.addEventListener('keydown', (event) => {
-    if (!(event.ctrlKey || event.metaKey) || String(event.key).toLowerCase() !== 'f') return
+    if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey || String(event.key).toLowerCase() !== 'f') return
     if (event.isComposing) return
     const target = event.target
-    // 输入框 / 可编辑区里的 Ctrl+F 交给浏览器自己的查找
-    if (target && target.closest && target.closest('input, textarea, select, [contenteditable="true"]')) return
+    // 输入框 / 可编辑区 / 设置与回收站弹层里的 Ctrl+F 交给浏览器自己的查找
+    if (target && (target.isContentEditable || (target.closest && target.closest('input, textarea, select, [contenteditable="true"]')))) return
+    if (state.showSettings || state.trash.open || state.convPicker.open) return
     // 旧宿主没有文内搜索接口：不 preventDefault，让浏览器的查找照常可用
     if (!state.current || !hostReady()) return
     event.preventDefault()
@@ -5206,7 +5657,7 @@ async function bootInner() {
   })
   render()
   await Promise.all([loadHealth(), loadAi()])
-  state.session.available = !!(state.health && state.health.session && state.health.session.available)
+  state.session.available = !NATIVE_READER && !!(state.health && state.health.session && state.health.session.available)
   if (!state.session.available) state.chatMode = 'local'
   else await loadConversations().catch(() => {})
   await loadLibrary()
@@ -5223,7 +5674,18 @@ async function bootInner() {
     }
     saveSession()
   }
+  const link = new URLSearchParams(location.search)
+  if (link.has('paper')) {
+    await navigateReader({
+      paperId: link.get('paper'),
+      page: Number(link.get('page') || 1),
+      blockId: link.get('block'),
+      sectionId: link.get('section'),
+      revision: link.get('revision'),
+    })
+  }
   if (state.session.available && state.layout.chatOpen && state.current) startSessionStream()
+  notifyReaderState()
 }
 
 // 关闭 / 切走时把当前位置记下来（pagehide 比 beforeunload 在嵌入场景更可靠）

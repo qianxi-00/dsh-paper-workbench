@@ -134,8 +134,12 @@ async function main() {
   const notes = await rpc('notes.get', { id })
   check('高亮笔记写入并读回', notes.highlights.length === 1, notes.highlights.length + ' 条')
 
-  const online = await rpc('search.online', { query: 'prompt tuning', source: 'arxiv', limit: 2 }).catch((error) => ({ error }))
-  check('在线检索（arXiv）', Boolean(online.items && online.items.length > 0), online.error ? String(online.error.message) : (online.items || []).length + ' 条')
+  const online = await rpc('search.online', { query: 'prompt tuning', source: 'both', limit: 2 }).catch((error) => ({ error }))
+  if (online.error && /HTTP 429|网络错误|请求超时/.test(String(online.error.message || ''))) {
+    console.log('SKIP  在线检索（外网限流或不可达）  ' + String(online.error.message))
+  } else {
+    check('在线检索（arXiv + OpenAlex）', Boolean(online.items && online.items.length > 0), online.error ? String(online.error.message) : (online.items || []).length + ' 条')
+  }
 
   const vault = await rpc('vault.status')
   check('Obsidian 论文知识库可识别', vault.ok === true, vault.ok ? vault.cards + ' 张卡片' : vault.error)

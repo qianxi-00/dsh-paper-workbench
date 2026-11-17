@@ -52,7 +52,7 @@ async function main() {
   await fsp.mkdir(root, { recursive: true })
   await fsp.writeFile(pdf, 'fake-pdf-bytes')
 
-  const { meta } = await store.addPaper({ title: '[test] 安全', srcPath: pdf, hasText: true })
+  const { meta } = await store.addPaper({ title: '[test] 安全', srcPath: pdf, hasText: true, pageCount: 12 })
   check('建了一篇测试论文', Boolean(meta.id), meta.id)
 
   // ---- 1) 回收站名字逃逸
@@ -61,7 +61,43 @@ async function main() {
   await expectError('purgeTrash 带路径分隔符要拒绝', () => store.purgeTrash('a/../b'))
   await expectError('purgeTrash 反斜杠路径要拒绝', () => store.purgeTrash('..\\x'))
   await expectError('purgeTrash 空名要拒绝', () => store.purgeTrash(''))
+  await expectError("restoreTrash('.') 要拒绝", () => store.restoreTrash('.'))
+  await expectError("restoreTrash('..') 要拒绝", () => store.restoreTrash('..'))
+  await expectError('restoreTrash 带路径分隔符要拒绝', () => store.restoreTrash('a/../b'))
   check('数据根还在', await exists(path.join(root, 'index.json')))
+
+  // ---- 1b) API 边界防注入：library.update 禁止篡改 srcPath，vault.open 禁止跨出知识库，upload 与 search.doc 正常可用
+  const { createApi } = await import('../lib/index.js')
+  const api = createApi()
+  await expectError('library.update 拒绝篡改 srcPath', () =>
+    api['library.update']({ id: meta.id, patch: { srcPath: path.join(root, 'config.json'), storage: 'link' } }),
+  )
+  await store.setConfig({ vault: root, kb: root })
+  await expectError('vault.open 拒绝知识库外路径', () =>
+    api['vault.open']({ path: path.resolve(root, '..', 'outside.md') }),
+  )
+  await expectError('vault.open 拒绝非 .md 文件', () =>
+    api['vault.open']({ path: path.join(root, 'index.json') }),
+  )
+  await store.writeTextCache(meta.id, {
+    pages: [{ n: 2, w: 600, h: 800, blocks: [{ x: 40, y: 100, x2: 500, y2: 120, size: 11, text: 'Prompt tuning safety probe.' }] }],
+  })
+  const docHits = await api['search.doc']({ id: meta.id, query: 'safety' })
+  check(
+    'search.doc 返回真实段落 hash 与 sectionId',
+    /^[0-9a-f]{16}$/.test(docHits.hits[0]?.key || '') && Boolean(docHits.hits[0]?.sectionId),
+    JSON.stringify(docHits.hits[0] && { key: docHits.hits[0].key, sectionId: docHits.hits[0].sectionId }),
+  )
+  // upload 端点（验证 randomUUID 与 PDF 字节流落库正常）
+  const { Readable } = await import('node:stream')
+  const uploadReq = Readable.from([Buffer.from('%PDF-1.4\n%fake\n')])
+  const uploaded = await api.upload({ req: uploadReq, url: new URL('http://127.0.0.1/paper-workbench/api/upload?name=upload-test.pdf') })
+  check('upload 端点正常生成临时文件并入库', Boolean(uploaded.meta && uploaded.meta.id), uploaded.meta && uploaded.meta.id)
+  if (uploaded.meta?.id) {
+    const upRemoved = await store.removePaper(uploaded.meta.id)
+    const upTrashed = (await store.listTrash()).find((item) => item.id === uploaded.meta.id)
+    if (upTrashed) await store.purgeTrash(upTrashed.name)
+  }
 
   // ---- 2) 并发 writeTrans 不互删
   const id = meta.id
@@ -80,7 +116,7 @@ async function main() {
   await db.jobAppend(id, { kind: 'translate', message: '开始翻译' })
   const removed = await store.removePaper(id)
   const trashed = (await store.listTrash()).find((item) => item.id === id)
-  check('论文进了回收站', Boolean(trashed), removed && removed.name)
+  check('论文进了回收站且保留页数', Boolean(trashed) && trashed.pages === 12, removed && removed.name)
   await store.purgeTrash(trashed.name)
   check('彻底删除后译文清空', Object.keys((await store.readTrans(id)).entries).length === 0)
   check('彻底删除后日志清空', db.jobList(id).events.length === 0)
