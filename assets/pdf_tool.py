@@ -741,14 +741,41 @@ def _y_span(items):
     return (min(item["y"] for item in items), max(item["y2"] for item in items))
 
 
-def _is_two_column(left, right):
-    """左右两簇块的纵向范围重叠够多才算真双栏（表格单元格也会落在左右两侧）。"""
-    if len(left) < 2 or len(right) < 2:
+def _row_aligned(left, right):
+    """两簇块是否按行成对（同一张表格的左右单元格）。
+
+    真正的双栏正文段落起点很少逐行重合；表格每行左右单元格的垂直中心几乎相同。
+    命中时不能按「整列读完再读右列」，否则会得到 A1,A2,A3,B1,B2,B3。
+    """
+    if len(left) < 3 or abs(len(left) - len(right)) > 1:
         return False
+    heights = [item["y2"] - item["y"] for item in left + right]
+    tolerance = max(2.0, statistics.median(heights) * 0.35) if heights else 2.0
+    right_centers = [(item["y"] + item["y2"]) / 2.0 for item in right]
+    matched = 0
+    for item in left:
+        center = (item["y"] + item["y2"]) / 2.0
+        if any(abs(center - other) <= tolerance for other in right_centers):
+            matched += 1
+    return matched >= max(3, int(len(left) * 0.7))
+
+
+def _is_two_column(left, right):
+    """双栏正文需要栏间空隙、足够的行宽和纵向重叠；短表格单元格保留行序。"""
+    if not left or not right:
+        return False
+    if _row_aligned(left, right):
+        return False  # 无表头宽表格：每行左右单元格垂直对齐，必须保留 (y, x)
+    if max(item["x2"] for item in left) >= min(item["x"] for item in right):
+        return False  # 缩进但水平重叠的段落仍然是单栏
+    separation = statistics.median(item["x"] for item in right) - statistics.median(item["x"] for item in left)
+    if any(statistics.median(item["x2"] - item["x"] for item in column) < separation * 0.5
+           for column in (left, right)):
+        return False  # 没有足够正文宽度的两簇短单元格不作为双栏证据
     la, lb = _y_span(left)
     ra, rb = _y_span(right)
     overlap = min(lb, rb) - max(la, ra)
-    span = max(lb, rb) - min(la, ra)
+    span = min(lb - la, rb - ra)
     return overlap > 0 and span > 0 and overlap >= 0.5 * span
 
 
@@ -758,22 +785,16 @@ def order_blocks(blocks, page_width):
     只按 (y, x) 排会让双栏论文左右交错（左右栏的行基线并不对齐），而 doc.js 的
     段落合并、翻译、搜索都按数组顺序消费，顺序错了整篇都错。
     单栏页面几乎全是全宽块（宽度 ≥ 60% 页宽），行为与原来的 (y, x) 排序一致；
-    表格那种左右都有窄块的情况会因为纵向不重叠而退回 (y, x)。
+    无全宽锚点的双栏也按栏读；短表格单元格或水平重叠的缩进段落退回 (y, x)。
     """
     if not blocks:
         return blocks
     mid = page_width / 2.0
     wide = [item for item in blocks if (item["x2"] - item["x"]) >= page_width * WIDE_BLOCK_RATIO]
     narrow = [item for item in blocks if (item["x2"] - item["x"]) < page_width * WIDE_BLOCK_RATIO]
-    if not wide or not narrow:
+    if not narrow:
         return sorted(blocks, key=lambda item: (item["y"], item["x"]))
-    left = [item for item in narrow if (item["x"] + item["x2"]) / 2 < mid]
-    right = [item for item in narrow if (item["x"] + item["x2"]) / 2 >= mid]
-    if not _is_two_column(left, right):
-        return sorted(blocks, key=lambda item: (item["y"], item["x"]))
-    wide.sort(key=lambda item: item["y"])
-    order = lambda item: (0 if (item["x"] + item["x2"]) / 2 < mid else 1, item["y"], item["x"])
-    narrow.sort(key=order)
+    wide.sort(key=lambda item: (item["y"], item["x"]))
     bands = [[] for _ in range(len(wide) + 1)]
     for block in narrow:  # 归属到它上方最近的全宽块之后
         index = 0
@@ -783,6 +804,14 @@ def order_blocks(blocks, page_width):
             else:
                 break
         bands[index].append(block)
+    for band in bands:
+        left = [item for item in band if (item["x"] + item["x2"]) / 2 < mid]
+        right = [item for item in band if (item["x"] + item["x2"]) / 2 >= mid]
+        if _is_two_column(left, right):
+            band.sort(key=lambda item: (0 if (item["x"] + item["x2"]) / 2 < mid else 1,
+                                       item["y"], item["x"]))
+        else:
+            band.sort(key=lambda item: (item["y"], item["x"]))
     ordered = []
     for position, anchor in enumerate(wide):
         ordered.extend(bands[position])

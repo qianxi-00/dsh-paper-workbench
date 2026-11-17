@@ -223,9 +223,16 @@ DSH 侧栏按会话的工作目录分组。插件不再按每篇 PDF 所在目�
 （`PP-StructureV3`），直接拿它的块级结果：阅读顺序、`paragraph_title`/`text`/`figure_title`/
 `table`/`formula`/`footnote` 标签、每个块的 bbox。图表位置、公式 LaTeX、表格 HTML 都在里面。
 
-结构走模型、文字走文本层：模型只用来定「块在哪、是什么类型」，每个块的正文仍然按 bbox
-从 PDF 文本层重新抠一遍（`pdf_tool clip_text/page_lines`）—— 服务端 OCR 认字有错
-（`tokns`、`ReTRo[OF]`），原生 PDF 的文本层是准的，不能把错字带进对照视图和翻译。
+结构走模型、文字走文本层：模型只用来定「块在哪、是什么类型」，每个块的正文由统一
+IR（`lib/layout-ir.js`）从 service / PaddleOCR-VL / PDF 文本层三类候选里逐块择优——
+服务端 OCR 认字有错（`tokns`、`ReTRo[OF]`），原生 PDF 的文本层是准的，不能把错字
+带进对照视图和翻译。
+
+每次解析的**原始响应会按内容 sha256 永久归档**（`papers/<id>/layout-data/raw/`），发布结果
+是**不可变版本**（`layout-data/revisions/<revision>.json` + `current.json` 指针），
+`layout.json` 只是兼容投影；以后规则改进可以离线重放，不必重新上传/付费。每页都会带
+`status: ready|needs_review|failed` 和问题清单：`failed` 的页不发布新版本，`needs_review`
+的页在工具栏的 **`质量`** 按钮里报告出来，点页号直接跳原页核对。
 
 跑一次：
 
@@ -254,6 +261,8 @@ node scripts/layout.mjs <论文 id>            # 结果写 papers/<id>/layout.js
 - `doc.get` 的 `source` 变成 `layout`，`layoutAt` 记录解析时间；PDF 换版本（size/mtime 变了）会自动退回文本层；
 - 想退回文本层：调一次 `layout.clear`（或删掉 `layout.json`），下次打开会重建。
 - 只补表格结构（不重新上传、不花额度）：`layout.tables`，给老的 `layout.json` 回填。
+- 查看质量报告：`layout.report`（或工具栏「质量」按钮），列出每页状态、问题数和被排除的块。
+- 缺页兜底：`layout.start({maxCloudPages:N})` 且 PP-StructureV3 整页缺失时，才用 `PaddleOCR-VL-1.6` 补一轮（默认 0，不额外计费）。
 
 已知取舍：被模型标成正文、其实是一整行公式的块，仍会按普通文字显示（符号顺序可能错，
 可点「见原文页」对照）；表格默认是「图 + 文字」，结构要展开才能逐格选中；

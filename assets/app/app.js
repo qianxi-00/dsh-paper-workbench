@@ -101,6 +101,10 @@ const state = {
   layoutResumable: false,
   layoutSavedPages: 0,
   layoutApplied: false,
+  layoutQuality: null,
+  layoutSchemaVersion: 0,
+  layoutBadPages: 0,
+  layoutReport: null,
   figures: [],
   figuresByKey: {},
   chatMode: 'session', // session = 落进真正的 DSH 会话；local = 插件自绘（老宿主兜底）
@@ -1376,6 +1380,9 @@ async function openPaper(id, options = {}) {
     state.layoutResumable = false
     state.layoutSavedPages = 0
     state.layoutApplied = false
+    state.layoutQuality = null
+    state.layoutBadPages = 0
+    state.layoutReport = null
     state.layoutBusy = false
     state.zhMode = false
     state.zhStatus = null
@@ -1391,6 +1398,7 @@ async function openPaper(id, options = {}) {
         state.layoutResumable = Boolean(status.resumable)
         state.layoutSavedPages = status.savedPages || 0
         state.layoutApplied = Boolean(status.layout && status.layout.applied)
+        setLayoutQuality(status.layout)
         const running = status.job && status.job.state === 'running'
         state.layoutBusy = Boolean(running)
         render()
@@ -1902,6 +1910,7 @@ function renderMain() {
   if (state.search.open) overlays.push(renderSearchOverlay())
   if (state.trash.open) overlays.push(renderTrashModal())
   if (state.convPicker.open) overlays.push(renderConvPicker())
+  if (state.layoutReport) overlays.push(renderLayoutReport())
   if (state.showSettings) return h('section', { class: 'main' }, renderTopbar(), h('div', { class: 'content' }, renderSettings()), ...overlays)
   const content = state.tab === 'online' || (!state.current && state.online.items.length > 0) ? renderOnline() : !state.current ? renderEmpty() : renderReader()
   return h('section', { class: 'main' }, renderTopbar(), content, ...overlays)
@@ -2263,6 +2272,7 @@ function renderTableGrid(paragraph) {
     if (cells.length === 0) return
     const tr = h('tr')
     for (const cell of cells) {
+      if (cell.placeholder === true) continue
       const tag = cell.header ? 'th' : 'td'
       const attrs = {}
       if (Number(cell.colspan) > 1) attrs.colspan = Number(cell.colspan)
@@ -2484,6 +2494,15 @@ function renderCompareToolbar() {
         title: '用 PDF 文本层重新回填文字（比如摘要段被服务端 OCR 认错时用），不上传、不花配额',
         onclick: refillLayoutText,
       }, '重填文字')
+      : null,
+    state.layoutApplied && state.layoutSchemaVersion >= 2
+      ? h('button', {
+        id: 'layout-quality',
+        class: 'ghost' + (state.layoutQuality === 'passed' ? '' : ' dirty'),
+        disabled: !hostReady(),
+        title: '查看版面质量报告：哪些页需要看原页',
+        onclick: openLayoutReport,
+      }, state.layoutQuality === 'passed' ? '质量 ✓' : '质量 ' + state.layoutBadPages)
       : null,
     h('button', { id: 'logs-toggle', class: 'ghost' + (state.logs.open ? ' active' : ''), disabled: !hostReady(), title: hostReady() ? '任务日志（翻译 / OCR / 自检）' : '重启桌面端后可用', onclick: toggleLogs }, '日志'),
   )
@@ -3927,6 +3946,62 @@ function paintLayoutButton() {
   }
 }
 
+// 版面质量：passed 才敢说「模型给的全对得上文本层」，需要复核的页要点名。
+function setLayoutQuality(layout) {
+  state.layoutSchemaVersion = layout ? Number(layout.schemaVersion) || 1 : 0
+  state.layoutQuality = layout && layout.quality ? layout.quality.status : null
+  state.layoutBadPages = layout && Array.isArray(layout.pages)
+    ? layout.pages.filter(page => page.status && page.status !== 'ready').length
+    : 0
+}
+
+async function openLayoutReport() {
+  const meta = state.current && state.current.meta
+  if (!meta) return
+  if (!hostReady()) { needRestart(); return }
+  const paperId = meta.id
+  try {
+    const report = await rpc('layout.report', { id: paperId })
+    // 报告是异步回来的：期间用户可能切到另一篇，不能把 A 的页号画到 B 上
+    if (!state.current || state.current.meta.id !== paperId) return
+    state.layoutReport = report && report.exists ? report : null
+    if (!state.layoutReport) toast('这篇还没有版面解析结果')
+    render()
+  } catch (error) {
+    if (!state.current || state.current.meta.id !== paperId) return
+    toast('读取质量报告失败：' + error.message, 5000)
+  }
+}
+
+function renderLayoutReport() {
+  const report = state.layoutReport
+  const close = () => { state.layoutReport = null; render() }
+  const pages = report && Array.isArray(report.pages) ? report.pages.filter(page => page.status !== 'ready') : []
+  const schemaVersion = report ? Number(report.schemaVersion) || 1 : 0
+  const quality = report && report.quality ? report.quality.status : 'unknown'
+  if (schemaVersion < 2) {
+    return h('div', { class: 'overlay', onclick: event => { if (event.target === event.currentTarget) close() } },
+      h('div', { class: 'modal layout-report' },
+        h('div', { class: 'modal-head' }, h('strong', {}, '版面质量报告'), h('button', { class: 'ghost', onclick: close }, '关闭')),
+        h('div', { class: 'modal-body' }, h('p', { class: 'muted' }, '这是旧版（schemaVersion 1）版面结果，重新解析后可查看逐页质量报告。'))))
+  }
+  return h('div', { class: 'overlay', onclick: event => { if (event.target === event.currentTarget) close() } },
+    h('div', { class: 'modal layout-report' },
+      h('div', { class: 'modal-head' },
+        h('strong', {}, '版面质量报告'),
+        h('button', { class: 'ghost', onclick: close }, '关闭')),
+      h('div', { class: 'modal-body' },
+        h('p', {}, quality === 'passed' ? '所有页的文字都能和 PDF 文本层对上。' : '有些页需要复核（点击目录/原文页对比）：'),
+        h('p', { class: 'muted' }, '版本 ' + (report.revision || '—') + ' · 被排除的块 ' + ((report.excluded || []).length) + ' 个'),
+        pages.length === 0
+          ? h('p', { class: 'muted' }, '没有需要复核的页。')
+          : h('ul', { class: 'layout-report-pages' }, pages.map(page => h('li', {},
+            h('button', { class: 'link', onclick: () => { state.layoutReport = null; jumpToPage(page.n) } }, '第 ' + page.n + ' 页'),
+            ' · ' + page.status + ' · ' + ((page.issues || []).length) + ' 个问题',
+            page.fallback ? ' · 显示原页' : '')))))
+  )
+}
+
 async function pollLayoutJob(id) {
   stopLayoutPoll()
   const tick = async () => {
@@ -3957,6 +4032,7 @@ async function pollLayoutJob(id) {
     state.layoutResumable = Boolean(status && status.resumable)
     state.layoutSavedPages = (status && status.savedPages) || 0
     state.layoutApplied = Boolean(status && status.layout && status.layout.applied)
+    setLayoutQuality(status && status.layout)
     // interrupted 也是终态：磁盘上写着 running 但进程已经重启过，再轮询也等不到结果
     const settled = !job || job.state === 'done' || job.state === 'failed' ||
       job.state === 'cancelled' || job.state === 'interrupted'

@@ -1070,3 +1070,9 @@ table.lit-table tbody tr:nth-child(even) td { background: rgba(127, 127, 127, 0.
 /* 图注里的行内公式（$n=12$ 这类） */
 .inline-math { white-space: nowrap; }
 .inline-math .katex { font-size: 1em; }
+
+/* 版面质量报告 */
+.modal.layout-report { width: min(680px, 92vw); }
+.layout-report .modal-body { max-height: 60vh; overflow: auto; }
+.layout-report-pages { margin: 8px 0 0; padding-left: 18px; line-height: 1.9; }
+.layout-report-pages .link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }

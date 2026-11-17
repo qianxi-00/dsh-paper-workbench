@@ -421,8 +421,8 @@ const guarded = cleanLayoutBlocks([
 equal('clean 不删公式旁的正文短句', [guarded.dropped, guarded.blocks.length], [0, 2])
 
 const cleanedBlocks = cleanLayoutBlocks([
-  { order: 0, page: 1, kind: 'body', text: 'N X LNAT = log P (yn | X; θ) (2)', bbox: { x: 10, y: 100, width: 200, height: 16 } },
-  { order: 1, page: 1, kind: 'formula', text: '', latex: '\\mathcal{L}_{NAT}=\\sum', bbox: { x: 40, y: 118, width: 150, height: 24 } },
+  { order: 0, page: 1, kind: 'body', text: 'x = y + z', bbox: { x: 10, y: 100, width: 200, height: 16 } },
+  { order: 1, page: 1, kind: 'formula', text: '', latex: 'x=y+z', bbox: { x: 40, y: 110, width: 150, height: 24 } },
   { order: 2, page: 1, kind: 'body', text: 'The model is trained with two losses and the details are', bbox: { x: 10, y: 300, width: 300, height: 16 } },
   { order: 3, page: 1, kind: 'body', text: 'listed in the appendix for completeness.', bbox: { x: 10, y: 320, width: 300, height: 16 } },
   { order: 4, page: 1, kind: 'caption', text: 'Figure 1 | Overview.', bbox: { x: 10, y: 400, width: 300, height: 16 } },
@@ -437,8 +437,8 @@ equal('clean orderMap 能让图注的 order 跟上',
 // normalizeLayout 里也要生效：公式重复块被去掉、图注的 order 重映射后仍指向正确的块
 const cleanedLayout = normalizeLayout([page1([
   block('paragraph_title', '2 Method', [100, 100, 700, 150]),
-  block('text', 'N X LNAT = log P (yn | X; θ) (2)', [100, 300, 700, 340]),
-  block('formula', '\\mathcal{L}_{NAT}=\\sum', [150, 350, 650, 420]),
+  block('text', 'x = y + z', [100, 300, 700, 340]),
+  block('formula', 'x=y+z', [150, 330, 650, 380]),
   block('figure_title', 'Figure 1 | Overview.', [100, 500, 700, 540]),
   block('image', '', [150, 560, 650, 800]),
 ])], { pageSizes: [A4], pageCount: 1 })
