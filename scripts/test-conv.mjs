@@ -115,6 +115,15 @@ async function main() {
   check('提示词：附件段 + 路径', prompt.includes('【用户上传的附件】') && prompt.includes('notes.md：C:/x/notes.md'))
   check('提示词：要求标页码', prompt.includes('[p.N]'))
   check('提示词：没范围时为空串', buildScopePrompt({}) === '')
+  check('提示词：使用真实换行', prompt.split(String.fromCharCode(10)).length > 3 && !prompt.includes(String.fromCharCode(92) + 'n'))
+  check('提示词：要求同源论文回链', prompt.includes('/paper-workbench/app?paper=') && prompt.includes('[p.N]'))
+  const focused = mergeConversation({ ...made, sessionId: 'pb-conv-original-history' }, {
+    paperContext: { paperId: 'p1', page: 2, sectionId: null, blockId: 'b-source', revision: 'r-source' },
+  })
+  check('焦点：保留原宿主历史 id', focused.sessionId === 'pb-conv-original-history')
+  check('焦点：关联论文的上下文可持久化', focused.paperContext && focused.paperContext.blockId === 'b-source')
+  check('焦点：删除关联会清除当前论文', mergeConversation(focused, { paperIds: ['p2'] }).paperContext === null)
+  check('焦点：旧会话默认无焦点', made.paperContext === null)
   check('摘要：带 attachmentCount', conversationSummary({ ...made, attachments: [{ name: 'a', path: 'p' }] }).attachmentCount === 1)
 
   // ---- store：CRUD

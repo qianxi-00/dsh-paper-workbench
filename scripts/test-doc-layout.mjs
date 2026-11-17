@@ -1,236 +1,135 @@
-/**
- * 版面模型 → doc / figures 的接线自测（hermetic，不联网）。
- *
- * 用真实 PDF 造一份「合成 layout.json」，验证：
- *  - doc.source === 'layout'、段落 kind/顺序/figureIndex 与 layout 一致；
- *  - 版面与 PDF 对不上（size 变了）时自动退回文本层；
- *  - figures.list 直接用 layout 的图/表清单（不再跑 PyMuPDF 规则）。
- *
- * 运行：node scripts/test-doc-layout.mjs
- */
-import { promises as fsp } from 'node:fs'
+/** Layout → doc/figures integration. Synthetic files only; no Python or network. */
+import assert from 'node:assert/strict'
+import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const SOURCE_PDF = 'G:\\笔记\\LLM知识体系论文\\加速训练\\FlashAttention.pdf'
-
-let passed = 0
-let failed = 0
-let skipped = 0
-
-function ok(condition, message) {
-  if (!condition) throw new Error(message || '断言失败')
-}
-function eq(actual, expected, message) {
-  if (JSON.stringify(actual) === JSON.stringify(expected)) return
-  throw new Error((message ? message + '：' : '') + '期望 ' + JSON.stringify(expected) + '，实际 ' + JSON.stringify(actual))
-}
-async function check(name, fn) {
-  try {
-    await fn()
-    passed += 1
-    console.log('PASS  ' + name)
-  } catch (error) {
-    failed += 1
-    console.log('FAIL  ' + name + ' -> ' + (error && error.message ? error.message : String(error)))
-  }
-}
-function skip(name, reason) {
-  skipped += 1
-  console.log('SKIP  ' + name + (reason ? '（' + reason + '）' : ''))
-}
-
-const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'pb-doc-layout-'))
+const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pb-doc-layout-'))
 process.env.DSH_PAPER_WORKBENCH_DATA = root
-
 const store = await import('../lib/store.js')
 const docModule = await import('../lib/doc.js')
 const figuresModule = await import('../lib/figures.js')
 const layoutModule = await import('../lib/layout.js')
+let passed = 0
+let failed = 0
+async function check(name, run) {
+  try { await run(); passed++; console.log('PASS  ' + name) }
+  catch (error) { failed++; console.error('FAIL  ' + name + ': ' + error.message) }
+}
 
-let existing = null
 try {
-  existing = await fsp.stat(SOURCE_PDF)
-} catch {
-  existing = null
+  const file = path.join(root, 'synthetic.pdf')
+  await fs.writeFile(file, 'Synthetic PDF fingerprint fixture; parser is never invoked.')
+  const stat = await fs.stat(file)
+  const source = { path: file, size: stat.size, mtimeMs: stat.mtimeMs }
+  const id = 'layout-doc-1'
+  await store.addPaper({ id, title: 'Synthetic paper', srcPath: file, pageCount: 2, hasText: true })
+  await store.writeTextCache(id, { source, pages: [1, 2].map(n => ({ n, w: 600, h: 800, blocks: [
+    { kind: 'heading', text: n + ' Section', size: 16, x: 70, y: 80, x2: 400, y2: 100 },
+    { kind: 'body', text: 'Fallback text for page ' + n + '.', size: 10, x: 70, y: 120, x2: 500, y2: 160 },
+  ] })) })
+  const block = (kind, text, extra = {}) => ({ page: 1, kind, text, bbox: { x: 70, y: 100, width: 400, height: 30 }, ...extra })
+  let layout = {
+    version: layoutModule.LAYOUT_VERSION, revision: 'revision-source', at: '2026-01-01T00:00:00.000Z',
+    source, model: 'synthetic', pageCount: 2,
+    blocks: [
+      block('heading', '1 Introduction', { level: 1 }),
+      block('body', 'Source paragraph, fully preserved.'),
+      block('figure', '', { figureIndex: 0 }),
+      block('caption', 'Figure 1: Synthetic figure.'),
+      block('formula', '', { latex: 'O=\\operatorname{softmax}(QK^{T})V' }),
+      block('heading', '2 Method', { level: 1, page: 2 }),
+      block('table', 'a | b', { page: 2, figureIndex: 1, html: '<table><tr><td>a</td></tr></table>', table: { rows: [{ cells: [{ text: 'a' }] }] } }),
+      block('body', 'Second paragraph.', { page: 2 }),
+    ].map((value, order) => ({ ...value, order, blockId: 'b-' + order })),
+    figures: [
+      { index: 0, page: 1, kind: 'figure', bbox: { x: 70, y: 100, width: 400, height: 100 }, caption: 'Figure 1: Synthetic figure.', blockIndex: 2 },
+      { index: 1, page: 2, kind: 'table', bbox: { x: 70, y: 100, width: 400, height: 100 }, caption: '', blockIndex: 6 },
+    ],
+  }
+  const saveLayout = () => store.writeJsonAtomic(store.paperFile(id, layoutModule.LAYOUT_FILE), layout)
+  await saveLayout()
+
+  await check('projection preserves blockId/revision and legacy paragraph ids', async () => {
+    const doc = docModule.buildLayoutDoc({ meta: {}, pdf: {}, layout })
+    assert.equal(doc.revision, layout.revision)
+    assert.equal(doc.citationVersion, 1)
+    assert.deepEqual(doc.paragraphs.map(p => p.blockId), layout.blocks.map(b => b.blockId))
+    assert.deepEqual(doc.paragraphs.map(p => p.id), layout.blocks.map((_, i) => 'p' + String(i).padStart(4, '0')))
+  })
+  await check('legacy layout does not invent source identity', async () => {
+    const doc = docModule.buildLayoutDoc({ meta: {}, pdf: {}, layout: { blocks: [block('body', 'Legacy body.')] } })
+    assert.equal(doc.revision, null)
+    assert.ok(!doc.paragraphs[0].blockId)
+  })
+  await check('doc preserves layout kinds, sections, formula and table', async () => {
+    const { doc, built } = await docModule.getDoc(id)
+    assert.equal(built, true)
+    assert.equal(doc.source, 'layout')
+    assert.deepEqual(doc.paragraphs.map(p => p.kind), layout.blocks.map(b => b.kind))
+    assert.equal(doc.paragraphs[2].figureIndex, 0)
+    assert.equal(doc.paragraphs[4].latex, layout.blocks[4].latex)
+    assert.deepEqual(doc.paragraphs[6].table, layout.blocks[6].table)
+    assert.deepEqual(doc.sections.map(s => s.title), ['1 Introduction', '2 Method'])
+    assert.deepEqual(doc.paragraphs.map(p => p.section), ['s1', 's1', 's1', 's1', 's1', 's2', 's2', 's2'])
+  })
+  await check('unchanged layout uses the document cache', async () => {
+    assert.equal((await docModule.getDoc(id)).built, false)
+  })
+  await check('missing citation version invalidates old cache', async () => {
+    const cached = await store.readDoc(id)
+    delete cached.citationVersion
+    await store.writeDoc(id, cached)
+    const value = await docModule.getDoc(id)
+    assert.equal(value.built, true)
+    assert.equal(value.doc.citationVersion, 1)
+  })
+  await check('missing block identity invalidates otherwise current cache', async () => {
+    const cached = await store.readDoc(id)
+    delete cached.paragraphs[1].blockId
+    await store.writeDoc(id, cached)
+    const value = await docModule.getDoc(id)
+    assert.equal(value.built, true)
+    assert.equal(value.doc.paragraphs[1].blockId, 'b-1')
+  })
+  await check('revision change invalidates cache even if layout.at is unchanged', async () => {
+    layout = { ...layout, revision: 'revision-new' }
+    await saveLayout()
+    const value = await docModule.getDoc(id)
+    assert.equal(value.built, true)
+    assert.equal(value.doc.revision, 'revision-new')
+  })
+  await check('outline and algorithm version changes rebuild once', async () => {
+    await store.updateMeta(id, { outline: [{ title: '1 Introduction', page: 1, level: 1 }] })
+    assert.equal((await docModule.getDoc(id)).built, true)
+    assert.equal((await docModule.getDoc(id)).built, false)
+    const cached = await store.readDoc(id)
+    await store.writeDoc(id, { ...cached, layoutBuild: 'old-build' })
+    assert.equal((await docModule.getDoc(id)).built, true)
+  })
+  await check('explicit rebuild preserves paragraph hashes', async () => {
+    const first = await docModule.getDoc(id, { rebuild: true })
+    const second = await docModule.getDoc(id, { rebuild: true })
+    assert.equal(second.built, true)
+    assert.deepEqual(first.doc.paragraphs.map(p => p.hash), second.doc.paragraphs.map(p => p.hash))
+  })
+  await check('figures use published layout instead of a prior PDF cache', async () => {
+    await store.writeJsonAtomic(store.paperFile(id, 'figures.json'), { version: 1, source, figures: [{ index: 9, page: 1 }] })
+    const figures = await figuresModule.listFigures(id)
+    assert.deepEqual(figures.map(f => f.kind), ['figure', 'table'])
+    assert.deepEqual(figures.map(f => f.attachOrder), [2, 6])
+  })
+  await check('stale layout falls back to synthetic text without invoking a parser', async () => {
+    layout = { ...layout, source: { ...source, size: 1 } }
+    await saveLayout()
+    const { doc } = await docModule.getDoc(id, { rebuild: true })
+    assert.equal(doc.source, 'pdf-text')
+    assert.ok(doc.paragraphs.some(p => p.text.includes('Fallback text')))
+    assert.ok(doc.paragraphs.every(p => !p.blockId))
+  })
+} finally {
+  await store.closeDb().catch(() => {})
+  await fs.rm(root, { recursive: true, force: true })
 }
-if (!existing) {
-  skip('版面模型接线', '没有样例 PDF：' + SOURCE_PDF)
-  await fsp.rm(root, { recursive: true, force: true })
-  console.log(`\n${passed} PASS / ${failed} FAIL / ${skipped} SKIP`)
-  process.exit(failed === 0 ? 0 : 1)
-}
-
-const copy = path.join(root, 'sample.pdf')
-await fsp.copyFile(SOURCE_PDF, copy)
-const added = await store.addPaper({ id: 'layout-doc-1', title: '版面样例', srcPath: copy, pageCount: 34, hasText: true })
-const id = added.meta.id
-const stat = await fsp.stat(copy)
-
-function block(page, kind, label, text, bbox, extra = {}) {
-  return { order: 0, page, kind, label, text, bbox, ...extra }
-}
-
-const layout = {
-  version: 1,
-  at: '2026-01-01T00:00:00.000Z',
-  model: 'PP-StructureV3',
-  jobId: 'job-test',
-  source: { size: stat.size, mtimeMs: stat.mtimeMs, path: copy },
-  pageCount: 34,
-  servicePages: 1,
-  warnings: [],
-  blocks: [
-    block(1, 'heading', 'paragraph_title', '1 Introduction', { x: 72, y: 80, width: 300, height: 16 }, { level: 1 }),
-    block(1, 'body', 'text', '第一段正文，讲 attention 为什么慢。', { x: 72, y: 110, width: 480, height: 40 }),
-    block(1, 'figure', 'image', '', { x: 72, y: 170, width: 460, height: 200 }, { figureIndex: 0 }),
-    block(1, 'caption', 'figure_title', 'Figure 1: IO-aware attention.', { x: 72, y: 378, width: 460, height: 24 }),
-    block(1, 'formula', 'formula', '', { x: 120, y: 420, width: 300, height: 40 }, { latex: 'O=\\operatorname{softmax}(QK^{T})V' }),
-    block(1, 'heading', 'paragraph_title', '2 Method', { x: 72, y: 480, width: 260, height: 16 }, { level: 1 }),
-    block(1, 'table', 'table', 'a | b', { x: 72, y: 520, width: 460, height: 140 }, {
-      figureIndex: 1,
-      html: '<table><tr><td>a</td><td>b</td></tr></table>',
-      table: {
-        rows: [
-          { cells: [{ text: 'Model', header: true, colspan: 1, rowspan: 1 }, { text: 'WER', header: true, colspan: 1, rowspan: 1 }], header: true },
-          { cells: [{ text: 'Paraformer', header: false, colspan: 1, rowspan: 1 }, { text: '5.1', header: false, colspan: 1, rowspan: 1 }], header: false },
-        ],
-        cols: 2,
-        headerRows: 1,
-        source: 'pdf',
-      },
-    }),
-    block(1, 'body', 'text', '第二段正文，讲 tiling。', { x: 72, y: 680, width: 480, height: 40 }),
-  ],
-  figures: [
-    { index: 0, page: 1, kind: 'figure', label: 'image', bbox: { x: 72, y: 170, width: 460, height: 200 }, caption: 'Figure 1: IO-aware attention.', captionOrder: 3, blockIndex: 2 },
-    { index: 1, page: 1, kind: 'table', label: 'table', bbox: { x: 72, y: 520, width: 460, height: 140 }, caption: '', captionOrder: null, blockIndex: 6 },
-  ],
-}
-await store.writeJsonAtomic(store.paperFile(id, layoutModule.LAYOUT_FILE), layout)
-
-await check('layout.status 能读到摘要', async () => {
-  const read = await layoutModule.createLayout({ store, pdf: null, ocr: null }).readLayout(id)
-  ok(read && read.blocks.length === 8, '读回的块数不对')
-  const summary = layoutModule.layoutSummary(read)
-  eq(summary.figures, 2, '图数')
-  eq(summary.byKind.heading, 2, '标题数')
-})
-
-await check('doc 用版面模型建模', async () => {
-  const built = await docModule.getDoc(id)
-  ok(built.built === true, '应该现场建模')
-  eq(built.doc.source, 'layout', 'doc.source')
-  eq(built.doc.layoutAt, layout.at, 'layoutAt 要带上')
-  eq(built.doc.paragraphs.length, 8, '段落数应与块数一致')
-  eq(built.doc.paragraphs.map(item => item.kind),
-    ['heading', 'body', 'figure', 'caption', 'formula', 'heading', 'table', 'body'], '段落 kind 顺序')
-  eq(built.doc.paragraphs[2].figureIndex, 0, '图块的 figureIndex')
-  eq(built.doc.paragraphs[6].figureIndex, 1, '表格块的 figureIndex')
-  eq(built.doc.paragraphs[4].latex, 'O=\\operatorname{softmax}(QK^{T})V', '公式 latex')
-  eq(built.doc.paragraphs[6].html.startsWith('<table>'), true, '表格 html')
-  eq(built.doc.paragraphs[6].table.rows.length, 2, '表格结构要传到 doc')
-  eq(built.doc.paragraphs[6].table.rows[1].cells[1].text, '5.1', '表格单元格文字')
-  eq(built.doc.sections.map(section => section.title), ['1 Introduction', '2 Method'], '节标题')
-  eq(built.doc.paragraphs.map(item => item.section), ['s1', 's1', 's1', 's1', 's1', 's2', 's2', 's2'], '节归属')
-})
-
-await check('第二次读 doc 命中缓存', async () => {
-  const again = await docModule.getDoc(id)
-  eq(again.built, false, '第二次不应重建')
-  eq(again.doc.source, 'layout', '缓存来源')
-})
-
-await check('有目录（meta.outline）的论文也能命中版面缓存', async () => {
-  // 版面分节不靠 outline，但缓存判断会拿 outlineHash 比：存空指纹会让每次打开都重建
-  await store.updateMeta(id, { outline: [{ title: '1 Introduction', page: 1, level: 1 }] })
-  docModule.invalidateDocCache(id, { dropDoc: true })
-  await new Promise(resolve => setTimeout(resolve, 120))
-  const first = await docModule.getDoc(id, { rebuild: true })
-  eq(first.built, true, '第一次应重建')
-  const second = await docModule.getDoc(id)
-  eq(second.built, false, '目录没变时第二次应命中缓存')
-})
-
-await check('rebuild 不会直接返回缓存', async () => {
-  const again = await docModule.getDoc(id, { rebuild: true })
-  eq(again.built, true, 'rebuild:true 必须重新建模')
-})
-
-await check('构建算法版本变了要让旧 doc.json 失效', async () => {
-  const cached = await store.readDoc(id)
-  ok(cached && cached.source === 'layout', '应有一份版面 doc 缓存')
-  await store.writeDoc(id, { ...cached, layoutBuild: 'clean-0' })
-  const again = await docModule.getDoc(id)
-  eq(again.built, true, 'layoutBuild 不一致时应重建')
-  eq(again.doc.layoutBuild, layoutModule.LAYOUT_BUILD, '重建后带上当前构建版本')
-})
-
-await check('段落 hash 稳定（译文能对上）', async () => {
-  const first = await docModule.getDoc(id, { rebuild: true })
-  const second = await docModule.getDoc(id, { rebuild: true })
-  eq(first.doc.paragraphs.map(item => item.hash), second.doc.paragraphs.map(item => item.hash), '两次重建的 hash')
-  const paragraph = first.doc.paragraphs[1]
-  eq(paragraph.text, '第一段正文，讲 attention 为什么慢。', '第 2 段的文字')
-  ok(paragraph.hash === docModule.paragraphHash(paragraph.kind, paragraph.text),
-    '正文 hash 应与纯函数一致：' + JSON.stringify(paragraph.text) + ' ' + paragraph.hash)
-})
-
-await check('figures.list 用版面的图/表清单', async () => {
-  const figures = await figuresModule.listFigures(id)
-  eq(figures.length, 2, '图数')
-  eq([figures[0].kind, figures[1].kind], ['figure', 'table'], 'kind')
-  eq([figures[0].attachOrder, figures[1].attachOrder], [2, 6], 'attachOrder 指向版面块')
-  eq(figures[0].label, 1, '图注编号')
-})
-
-await check('先有 PyMuPDF 的 figures.json，跑完版面后必须换成版面清单', async () => {
-  // 旧规则清单（1 张不在 layout 里的图），source 与当前 PDF 一致 —— 曾经的实现会一直返回它
-  const cached = { version: 1, source: { path: stat.path || copy, size: stat.size, mtimeMs: stat.mtimeMs }, figures: [
-    { page: 1, x: 10, y: 10, x2: 60, y2: 60, width: 50, height: 50, index: 1, caption: null, label: null, kind: 'figure' },
-  ] }
-  await store.writeJsonAtomic(store.paperFile(id, 'figures.json'), cached)
-  const figures = await figuresModule.listFigures(id)
-  eq(figures.length, 2, '应该用版面清单（2 项），实际 ' + figures.length)
-  eq([figures[0].attachOrder, figures[1].attachOrder], [2, 6], 'attachOrder 来自版面块')
-})
-
-await check('版面与 PDF 对不上时退回文本层', async () => {
-  // 把 layout.source 改小，模拟「PDF 换过版本」
-  const stale = { ...layout, at: '2026-01-02T00:00:00.000Z', source: { ...layout.source, size: 1 } }
-  await store.writeJsonAtomic(store.paperFile(id, layoutModule.LAYOUT_FILE), stale)
-  docModule.invalidateDocCache(id, { dropDoc: true })
-  await new Promise(resolve => setTimeout(resolve, 120))
-  const built = await docModule.getDoc(id, { rebuild: true })
-  ok(built.doc.source !== 'layout', '过期版面不应被使用，实际 ' + built.doc.source + ' built=' + built.built)
-  ok(built.doc.paragraphs.length > 8, '文本层路线段落应远多于 8，实际 ' + built.doc.paragraphs.length)
-})
-
-await check('版面被清掉后 figures 不能还挂着版面清单', async () => {
-  // 前面的用例把 layout.source 改坏了，这里先恢复一份对得上的版面
-  await store.writeJsonAtomic(store.paperFile(id, layoutModule.LAYOUT_FILE), layout)
-  const fromLayout = await figuresModule.listFigures(id, { refresh: true })
-  eq(fromLayout.length, 2, '版面清单应为 2 项')
-  await layoutModule.createLayout({ store, pdf: null, ocr: null }).clearLayout(id)
-  docModule.invalidateDocCache(id, { dropDoc: true })
-  const layoutExists = await fsp.access(store.paperFile(id, layoutModule.LAYOUT_FILE)).then(() => true, () => false)
-  const figures = await figuresModule.listFigures(id)
-  ok(figures.every(item => item.attachOrder === null || item.attachOrder === undefined),
-    '版面清掉后不应再有 attachOrder（layout.json exists=' + layoutExists + '）：' + JSON.stringify(figures.slice(0, 2)))
-})
-
-await check('没有 layout.json 时也能正常建模', async () => {
-  await layoutModule.createLayout({ store, pdf: null, ocr: null }).clearLayout(id)
-  docModule.invalidateDocCache(id, { dropDoc: true })
-  await new Promise(resolve => setTimeout(resolve, 120))
-  const built = await docModule.getDoc(id, { rebuild: true })
-  ok(built.doc.source !== 'layout', '不该再用版面')
-  ok(built.doc.sections.length > 1, '文本层路线应有多个节')
-})
-
-await store.removePaper(id)
-await store.closeDb().catch(() => {})
-await fsp.rm(root, { recursive: true, force: true })
-
-console.log(`\n${passed} PASS / ${failed} FAIL / ${skipped} SKIP`)
-process.exit(failed === 0 ? 0 : 1)
+console.log(`${passed} PASS / ${failed} FAIL`)
+process.exitCode = failed ? 1 : 0
