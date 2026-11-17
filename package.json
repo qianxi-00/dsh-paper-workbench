@@ -30,7 +30,11 @@
     "README.md",
     "LICENSE",
     "scripts/layout.mjs",
-    "docs/v4-layout.md"
+    "docs/v4-layout.md",
+    "docs/v6-zhpdf.md",
+    "docs/v7-quality.md",
+    "docs/quality/**/*",
+    "scripts/quality/*.mjs"
   ],
   "engines": {
     "node": ">=20.0.0"
