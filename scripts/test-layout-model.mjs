@@ -747,5 +747,45 @@ equal('正文仍用 PDF 文本层', JSON.parse(fs.readFileSync(capFile, 'utf8'))
 equal('还原图注也计入 changed', capResult.changed, 2)
 fs.rmSync(capRoot, { recursive: true, force: true })
 
+// 远端任务恢复：提交成功后进程/网络在轮询阶段断了，下次必须续拉同一个 jobId，
+// 不能把同一页重新上传（按页计费，重传就是重复花钱）。
+const remoteRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-layout-remote-'))
+const remotePdfPath = path.join(remoteRoot, 'paper.pdf')
+fs.writeFileSync(remotePdfPath, 'fake pdf for remote resume')
+const remoteStore = {
+  paperFile: (id, name) => path.join(remoteRoot, id, name),
+  getMeta: async id => ({ id, title: '远端恢复样例' }),
+  resolvePdf: async () => ({ path: remotePdfPath, meta: { id: 'paper-rr' } }),
+  getConfig: async () => ({ ocr: { token: 'token-1', layoutModel: '' } }),
+  readJson: async (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return fallback } },
+  writeJsonAtomic: async (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value)) },
+}
+const remotePdf = {
+  callTool: async (command, payload) => {
+    if (command === 'info') return { ok: true, pages: 1, sizes: [A4] }
+    if (command === 'split') { fs.writeFileSync(payload.out, 'part'); return { ok: true, pages: 1 } }
+    if (command === 'page_lines') return { ok: true, page: payload.page, lines: [] }
+    throw new Error('未预期的命令：' + command)
+  },
+}
+let remoteSubmits = 0
+let remotePolls = 0
+const remoteOcr = {
+  submitJob: async () => { remoteSubmits += 1; return { jobId: 'job-remote-1' } },
+  pollJob: async () => { remotePolls += 1; if (remotePolls === 1) throw new Error('轮询网络断了'); return { state: 'done', jsonUrl: 'http://example.com/rr.jsonl' } },
+  fetchResults: async () => ({ pages: [], skipped: 0, text: JSON.stringify({ result: { layoutParsingResults: [{ prunedResult: { ...SIZE_1191, parsing_res_list: [block('text', '远端恢复正文', [10, 10, 900, 60])] } }] } }) }),
+}
+const remoteRunner = createLayout({ store: remoteStore, pdf: remotePdf, ocr: remoteOcr })
+let remoteError = ''
+try { await remoteRunner.runLayout('paper-rr', { batchPages: 1 }) } catch (error) { remoteError = error.message }
+check('远端恢复：第一次轮询失败', remoteError === '轮询网络断了', remoteError)
+const remotePartial = await remoteRunner.readPartial('paper-rr')
+check('远端恢复：断点保存了远端 jobId', remotePartial && remotePartial.pending && remotePartial.pending.jobId === 'job-remote-1', JSON.stringify(remotePartial && remotePartial.pending))
+const remoteResumed = await remoteRunner.runLayout('paper-rr', { batchPages: 1, resume: true })
+equal('远端恢复：没有重复提交', remoteSubmits, 1)
+equal('远端恢复：续拉同一个 job', remotePolls, 2)
+equal('远端恢复：页数正确', remoteResumed.blocks.map(item => item.page), [1])
+fs.rmSync(remoteRoot, { recursive: true, force: true })
 console.log(`\n${pass} PASS / ${fail} FAIL`)
 process.exit(fail === 0 ? 0 : 1)
+

@@ -93,6 +93,6 @@ node scripts/quality/rebuild-layout.mjs <paperId> --apply    # 发布新 revisio
 - `scripts/test-layout-archive.mjs`：原始归档、不可变版本、旧版备份、指针切换。
 - `scripts/test-layout-table.mjs`：HTML rowspan/colspan 网格、表头、伪表拒绝。
 - `scripts/test-ocr-cancel.mjs`：OCR 提交/轮询/下载的 AbortSignal 与错误文本。
-- `scripts/test-layout-model.mjs`：runner 命令顺序、分片、断点续跑、清理规则。
+- `scripts/test-layout-model.mjs`：runner 命令顺序、分片、断点续跑、远端 jobId 续拉、清理规则。
 - `scripts/test-pdf-quality.py`：`order_blocks` 双栏/单栏/表格。
 - `scripts/test-figure-cache.mjs`：内容键 PNG 缓存与并发。
