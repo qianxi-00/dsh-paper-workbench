@@ -73,8 +73,8 @@ node scripts/quality/rebuild-layout.mjs <paperId> --apply    # 发布新 revisio
 
 ## RPC
 
-- `layout.status`：`layout` 附加 `schemaVersion/revision/quality/pages[{n,status,issues,fallback}]`。
-- `layout.report`：只读质量报告（页状态、问题清单、被排除块）。
+- `layout.status`：`layout` 附加 `schemaVersion/revision/quality/pages[{n,status,issues,summary,fallback}]`；`summary` 区分 `blocking`（需要人工判断）和 `informational`（候选冲突、行救回等提示，不单独阻塞阅读）。
+- `layout.report`：只读质量报告（页状态、问题清单、`summary`、被排除块）。
 - `layout.start` / `layout.run`：**默认续跑**（同一 PDF + 同一模型才认断点，已完成的批次整批跳过、不重复上传）；只有显式传 `resume:false` 才丢弃断点。
 - `layout.cancel` / `layout.refill` / `layout.tables` / `layout.clear`：`refill` 对 schemaVersion 2 是无操作；`layout.clear` 同时清断点与任务状态。
 

@@ -3995,10 +3995,15 @@ function renderLayoutReport() {
         h('p', { class: 'muted' }, '版本 ' + (report.revision || '—') + ' · 被排除的块 ' + ((report.excluded || []).length) + ' 个'),
         pages.length === 0
           ? h('p', { class: 'muted' }, '没有需要复核的页。')
-          : h('ul', { class: 'layout-report-pages' }, pages.map(page => h('li', {},
-            h('button', { class: 'link', onclick: () => { state.layoutReport = null; jumpToPage(page.n) } }, '第 ' + page.n + ' 页'),
-            ' · ' + page.status + ' · ' + ((page.issues || []).length) + ' 个问题',
-            page.fallback ? ' · 显示原页' : '')))))
+          : h('ul', { class: 'layout-report-pages' }, pages.map(page => {
+            const total = (page.issues || []).length
+            const blocking = page.summary && Number.isFinite(page.summary.blocking) ? page.summary.blocking : total
+            const info = page.summary && Number.isFinite(page.summary.informational) ? page.summary.informational : 0
+            return h('li', {},
+              h('button', { class: 'link', onclick: () => { state.layoutReport = null; jumpToPage(page.n) } }, '第 ' + page.n + ' 页'),
+              ' · ' + page.status + ' · ' + total + ' 个问题' + (info > 0 ? '（需人工 ' + blocking + '，提示 ' + info + '）' : ''),
+              page.fallback ? ' · 显示原页' : '')
+          }))))
   )
 }
 

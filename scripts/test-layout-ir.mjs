@@ -26,6 +26,9 @@ test('PDF spelling wins but conflicting sources remain reviewable and immutable'
   assert.equal(result.blocks[0].text, 'The model counts tokens.')
   assert.equal(result.blocks[0].selectedSource, 'pdf')
   assert.equal(result.blocks[0].quality.status, 'needs_review')
+  assert.deepEqual(result.blocks[0].quality.summary, { blocking: 0, informational: 1 })
+  assert.deepEqual(result.pages[0].quality.summary, { blocking: 0, informational: 1 })
+  assert.deepEqual(result.quality.summary, { blocking: 0, informational: 1 })
   assert.deepEqual(result.blocks[0].candidates.map(c => [c.source, c.text, c.score]), [
     ['service', 'The model counts toknes.', null], ['pdf', 'The model counts tokens.', null],
   ])
