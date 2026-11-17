@@ -49,6 +49,7 @@ let pdfChars = 0
 let layoutChars = 0
 let lineTotal = 0
 let lineHit = 0
+let lineCharsHit = 0
 let duplicates = 0
 const seen = new Set()
 for (const blockText of layout.blocks || []) {
@@ -73,7 +74,10 @@ for (let n = 1; n <= pageCount; n++) {
     if (value.length < 4) continue
     pdfChars += value.length
     lineTotal += 1
-    if (text.includes(value)) lineHit += 1
+    if (text.includes(value)) {
+      lineHit += 1
+      lineCharsHit += value.length
+    }
   }
 }
 const ratio = (a, b) => (b === 0 ? null : Math.round((a / b) * 10000) / 10000)
@@ -87,6 +91,7 @@ const report = {
   layoutChars,
   charRatio: ratio(layoutChars, pdfChars),
   lineCoverage: ratio(lineHit, lineTotal),
+  charRecall: ratio(lineCharsHit, pdfChars),
   duplicateRate: ratio(duplicates, Math.max(1, (layout.blocks || []).length)),
   quality: layout.quality ? layout.quality.status : null,
   note: '参照是 PDF 文本层，不是人工 gold；扫描页没有文本层时这些指标不适用。',
