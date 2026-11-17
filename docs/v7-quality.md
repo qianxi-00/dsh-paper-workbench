@@ -48,13 +48,15 @@ PDF
 
 ## 质量语义
 
+- 服务模型的块框偶尔从第二行开始；`assignLines` 会把块框上方 28pt 内、文字高度相似且水平对齐的 PDF 行救回该块，并记 `rescued-pdf-line`，避免正文被拆成孤立块。
+
 - 任务「跑完」不等于质量「通过」：`layout.status` / `layout.report` 单独返回 `quality`。
 - `passed`：所有页的块文字都能和 PDF 文本层核对（或有等价证据）。
 - `needs_review`：有页/块只能依赖模型文字（扫描页、乱码、坐标不可换算），前端提示看原页。
 - `failed`：源页失败/缺页/缺尺寸，整篇不发布新版本，旧版本保留。
 - 未匹配 PDF 行的短标签/页码/水印/邮箱只保留在质量报告与 `blocks[].quality` 里，不投影到正文；长句仍作为正文保留并标 `needs_review`。
 - 每个问题的 `code` 可追踪：`missing-layout-page`、`missing-page-dimensions`、`unknown-coordinate-transform`、
-  `unverified-model-text`、`garbled-candidate`、`text-conflict`、`ambiguous-line-owner`、`unmatched-pdf-line`、
+  `unverified-model-text`、`garbled-candidate`、`text-conflict`、`ambiguous-line-owner`、`unmatched-pdf-line`、`rescued-pdf-line`、
   `duplicate-formula`、`unlinked-caption`、`caption-type-conflict`、`formula-text-conflict` 等。
 
 ## RPC
@@ -75,7 +77,7 @@ PDF
 
 - `scripts/test-page-identity.mjs`：页号/坏行/缺页/越界上传不发布。
 - `scripts/test-layout-conservation.mjs`：文本守恒、清理只做一次、连字符、排除记录。
-- `scripts/test-layout-ir.mjs`：34 条纯 fixture（坐标、候选、行归属、图注、公式、质量、数学字形）。
+- `scripts/test-layout-ir.mjs`：37 条纯 fixture（坐标、候选、行归属、图注、公式、质量、数学字形）。
 - `scripts/test-layout-archive.mjs`：原始归档、不可变版本、旧版备份、指针切换。
 - `scripts/test-layout-table.mjs`：HTML rowspan/colspan 网格、表头、伪表拒绝。
 - `scripts/test-ocr-cancel.mjs`：OCR 提交/轮询/下载的 AbortSignal 与错误文本。
