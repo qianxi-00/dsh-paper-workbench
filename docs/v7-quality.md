@@ -52,6 +52,7 @@ PDF
 - `passed`：所有页的块文字都能和 PDF 文本层核对（或有等价证据）。
 - `needs_review`：有页/块只能依赖模型文字（扫描页、乱码、坐标不可换算），前端提示看原页。
 - `failed`：源页失败/缺页/缺尺寸，整篇不发布新版本，旧版本保留。
+- 未匹配 PDF 行的短标签/页码/水印/邮箱只保留在质量报告与 `blocks[].quality` 里，不投影到正文；长句仍作为正文保留并标 `needs_review`。
 - 每个问题的 `code` 可追踪：`missing-layout-page`、`missing-page-dimensions`、`unknown-coordinate-transform`、
   `unverified-model-text`、`garbled-candidate`、`text-conflict`、`ambiguous-line-owner`、`unmatched-pdf-line`、
   `duplicate-formula`、`unlinked-caption`、`caption-type-conflict`、`formula-text-conflict` 等。
