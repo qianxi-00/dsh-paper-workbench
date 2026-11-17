@@ -44,7 +44,8 @@
     "test": "node scripts/test-store.mjs && node scripts/test-db.mjs && node scripts/test-conv.mjs && node scripts/test-safety.mjs && node scripts/test-doctor.mjs && node scripts/test-tools.mjs && node scripts/test-doc.mjs && node scripts/test-doc-layout.mjs && node scripts/test-page-identity.mjs && node scripts/test-layout-conservation.mjs && node scripts/test-layout-archive.mjs && node scripts/test-layout-ir.mjs && node scripts/test-layout-table.mjs && node scripts/test-layout.mjs && node scripts/test-layout-model.mjs && node scripts/test-figure-cache.mjs && node scripts/test-zhpdf.mjs && node scripts/test-ai.mjs && node scripts/test-review.mjs && node scripts/test-jobs.mjs && node scripts/test-figures.mjs && node scripts/test-session.mjs && node scripts/test-obsidian.mjs && node scripts/test-arxiv.mjs && node scripts/test-ocr.mjs && node scripts/test-ocr-cancel.mjs && python scripts/test-pdf-quality.py && python assets/pdf_tool.py --self-test",
     "fix:library": "node scripts/fix-library.mjs",
     "selftest:pdf": "python assets/pdf_tool.py --self-test",
-    "layout": "node scripts/layout.mjs"
+    "layout": "node scripts/layout.mjs",
+    "quality:score": "node scripts/quality/score-layout.mjs"
   },
   "keywords": [
     "deepseek-harness",

@@ -47,6 +47,11 @@ python scripts/quality/test_cli.py
 - `last-collection.json`：本轮成功/失败明细。
 - `pages-to-review.json`：由已测得页数生成的逐页清单。每页 `status:unannotated`，`verified_tags:[]`，没有伪造人工标签。**此文件会重新生成，人工标注应另存，不要编辑它。**
 
+
+## 本地基线（不是人工 gold）
+
+`node scripts/quality/score-layout.mjs <paperId> [--data=<数据根>]` 用 PDF 文本层做参照，输出字符比、行覆盖率、重复率与质量状态；实测记录见 [BASELINE.md](BASELINE.md)。它只用于同一篇论文不同版本的相对比较，不能替代本页下面的人工 gold 评测。
+
 ## 人工采样与盲测
 
 先确认30份原论文和至少240个不同原始物理页。使用 `source_sha256 + page_index_0based` 去重；扫描、编码变体不能额外计入独立论文数或原始页数。按整篇family切分，所有相邻页与变体必须继承split。候选预先固定24 dev / 6 holdout；盲测只表示预留，尚未建立或运行盲测gold。
