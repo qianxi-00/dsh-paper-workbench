@@ -89,7 +89,7 @@ node scripts/quality/rebuild-layout.mjs <paperId> --apply    # 发布新 revisio
 
 - `scripts/test-page-identity.mjs`：页号/坏行/缺页/越界上传不发布。
 - `scripts/test-layout-conservation.mjs`：文本守恒、清理只做一次、连字符、排除记录。
-- `scripts/test-layout-ir.mjs`：37 条纯 fixture（坐标、候选、行归属、图注、公式、质量、数学字形）。
+- `scripts/test-layout-ir.mjs`：38 条纯 fixture（坐标、候选、行归属、图注、公式、质量、数学字形、行救回与图内标签）。
 - `scripts/test-layout-archive.mjs`：原始归档、不可变版本、旧版备份、指针切换。
 - `scripts/test-layout-table.mjs`：HTML rowspan/colspan 网格、表头、伪表拒绝。
 - `scripts/test-ocr-cancel.mjs`：OCR 提交/轮询/下载的 AbortSignal 与错误文本。
