@@ -41,4 +41,13 @@
 - 2026-11-17：建立隔离工作树；开始在单独临时数据根执行原有 npm test。未操作用户库、未调用收费API。
 
 - 2026-11-17：完成阶段1/2核心。`lib/layout-ir.js` 统一纯构建器 34 条 fixture 全过；`lib/layout-archive.js` 原始归档/不可变版本/兼容投影 7 条全过；`parseLayoutJsonl` 页身份、`cleanLayoutBlocks` 守恒与 doc 去二次清理已修（8+7 条）；`order_blocks` 双栏（8 条）、图缓存内容键（8 条）已修复。`runLayout` 已改为：每批原始 jsonl 归档 → 每页取 `page_lines` → `buildDocumentLayout` → attachTables → `archive.publish`（版本化）→ layout.json 投影。`refillText` 对 schemaVersion 2 只读返回。RPC 增 `layout.report`，`layout.status` 增 quality/revision/pages；SPA 工具栏加「质量」报告（未就绪页可跳原页）。全量测试见提交说明。
-- 未完成：PaddleOCR-VL-1.6 自动补充候选（IR 接口已留 `supplementaryPages`，主流程未接）；`lib/layout-table.js` 与 OCR 取消（task-6 子代理进行中）；语料只下载 15/30，gold 0 页；需要人工标注后才能报告质量指标。
+- 未完成（当时）：PaddleOCR-VL-1.6 自动补充候选（IR 接口已留 `supplementaryPages`，主流程未接）；`lib/layout-table.js` 与 OCR 取消（task-6 子代理进行中）；语料只下载 15/30，gold 0 页；需要人工标注后才能报告质量指标。
+
+### 最终状态（2026-11-17）
+
+- PaddleOCR-VL-1.6 已按 `maxCloudPages` 接入缺页补充（默认 0，不额外计费）；`layout-table.js`、OCR 取消、远端 jobId 续拉、离线 raw 重建、质量汇总均已完成。
+- 语料 30/30 篇、762 页、70,693,890 字节（`docs/quality/ACQUISITION.md`）；人工 gold 仍 **0 页**，20 页盲测未建立。
+- 全量测试：**679 PASS / 0 FAIL**（隔离数据根，`python scripts/test-pdf-quality.py` 9 tests + `pdf_tool --self-test` 13 checks 通过）。
+- 质量基线（`docs/quality/BASELINE.md`）：Paraformer 正式 layout 字符召回 97.62% / 行覆盖率 94.66%；归档 raw 离线重建后字符召回 99.15%、字符多重集召回 99.39%、行覆盖率 95.65%，`quality` 仍 `needs_review`。**未达到 99.5% 验收线，不能宣称达标**。
+- 真实云端复解析曾在轮询阶段超时，已终止且没有发布新 revision；线上仍是旧 revision，离线重建 CLI 可 `--apply` 发布，但未对用户真实库自动执行。
+- 当前代码已合入 `dev` 并推送 `origin/dev`；最近质量提交见 `git log`（`db49287`）。
