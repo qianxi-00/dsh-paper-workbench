@@ -361,3 +361,11 @@ test('stray short labels near a visual block stay figure-internal, not body para
   assert.equal(r.pages[0].lineAssignments.length, 1)
   assert.equal(r.pages[0].lineAssignments[0].role, 'figure-internal')
 })
+
+test('a hyphenated line break keeps the hyphen and drops the PDF extraction space', () => {
+  const r = build(fixture(
+    [raw('p', 'text', 'A pre- dictor now works.', [10, 20, 200, 60])],
+    [line('A pre-', 10, 22, 190, 34), line('dictor now works.', 10, 36, 190, 48)],
+  ))
+  assert.equal(r.blocks[0].text, 'A pre-dictor now works.')
+})
