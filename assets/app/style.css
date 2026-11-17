@@ -1066,3 +1066,7 @@ table.lit-table tbody tr:nth-child(even) td { background: rgba(127, 127, 127, 0.
   color: var(--muted);
   line-height: 1.6;
 }
+
+/* 图注里的行内公式（$n=12$ 这类） */
+.inline-math { white-space: nowrap; }
+.inline-math .katex { font-size: 1em; }

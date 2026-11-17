@@ -2297,6 +2297,38 @@ function renderTableGrid(paragraph) {
  * 用 katex.render 直接往节点里排，不走 innerHTML —— 走库自己的 DOM 构造路径，
  * 也就没有「把模型输出的字符串当 HTML 塞进页面」这条风险。
  */
+/**
+ * 行内公式：图注/表注里模型给的是 `$n=12$` 这类 LaTeX，直接显示会是源码。
+ * 只切 `$…$`（不含跨行），渲染失败退回原文，绝不拼 HTML。
+ */
+function renderInlineMath(text) {
+  const value = String(text || '')
+  const box = h('div', { class: 'para-orig' })
+  const pattern = /\$([^$\n]{1,300})\$/g
+  let last = 0
+  let match = null
+  while ((match = pattern.exec(value)) !== null) {
+    if (match.index > last) box.append(document.createTextNode(value.slice(last, match.index)))
+    const span = h('span', { class: 'inline-math' })
+    const katex = typeof window !== 'undefined' ? window.katex : null
+    let ok = false
+    if (katex && typeof katex.render === 'function') {
+      try {
+        katex.render(match[1], span, { displayMode: false, throwOnError: false, strict: false, trust: false, output: 'html' })
+        ok = true
+      } catch {
+        ok = false
+      }
+    }
+    if (!ok) span.textContent = match[1]
+    box.append(span)
+    last = match.index + match[0].length
+  }
+  if (last === 0) return h('div', { class: 'para-orig' }, value)
+  if (last < value.length) box.append(document.createTextNode(value.slice(last)))
+  return box
+}
+
 function renderFormula(tex) {
   const box = h('div', { class: 'para-latex', 'data-tex': tex })
   const katex = typeof window !== 'undefined' ? window.katex : null
@@ -2343,7 +2375,7 @@ function renderParagraph(paragraph) {
         askSelection(selected || paragraph.text)
       },
     },
-    h('div', { class: 'para-orig' }, paragraph.text),
+    kind === 'caption' ? renderInlineMath(paragraph.text) : h('div', { class: 'para-orig' }, paragraph.text),
   )
   if (kind === 'formula') {
     para.classList.add('kind-formula')

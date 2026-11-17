@@ -21,6 +21,7 @@ import {
   joinLines,
   looksLikeFormulaText,
   missingHeadPosition,
+  isCaptionLabel,
   needsPdfText,
   normalizeLayout,
   parseLayoutJsonl,
@@ -691,6 +692,60 @@ check('refill 后 at 更新（doc 缓存会失效）', refillSaved.at !== '2026-
   refillSaved.at)
 equal('refill 不碰图块', refillSaved.blocks[1].text, '')
 fs.rmSync(refillRoot, { recursive: true, force: true })
+
+// 图注不能被 PDF 文本层覆盖：那一小块里会混进图内标签、还会截断，模型给的 caption 才完整。
+equal('figure_title 是图注', isCaptionLabel('figure_title'), true)
+equal('table_title 是图注', isCaptionLabel('table_title'), true)
+equal('text 不是图注', isCaptionLabel('text'), false)
+
+const capRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-layout-caption-'))
+const capPdf = path.join(capRoot, 'paper.pdf')
+fs.writeFileSync(capPdf, 'fake pdf')
+const capFile = path.join(capRoot, 'paper-c', 'layout.json')
+fs.mkdirSync(path.dirname(capFile), { recursive: true })
+fs.writeFileSync(capFile, JSON.stringify({
+  version: LAYOUT_VERSION,
+  at: '2026-01-01T00:00:00.000Z',
+  model: LAYOUT_MODEL,
+  source: { size: 8, mtimeMs: 1 },
+  pageCount: 1,
+  servicePages: 1,
+  warnings: [],
+  blocks: [
+    { order: 0, page: 1, label: 'figure_title', kind: 'caption',
+      bbox: { x: 50, y: 300, width: 450, height: 40 },
+      text: 'RETRO block (x L) Figure 2 | Retro architecture. Left: simpliﬁed' },
+    { order: 1, page: 1, label: 'text', kind: 'body',
+      bbox: { x: 50, y: 90, width: 450, height: 40 }, text: 'ocr junk' },
+  ],
+  figures: [{ index: 0, page: 1, caption: 'Figure 2 | RetRo architecture. Left: simplified ...', captionOrder: 0 }],
+}))
+const capCalls = []
+const capRunner = createLayout({
+  store: {
+    paperFile: (id, name) => path.join(capRoot, id, name),
+    resolvePdf: async () => ({ path: capPdf }),
+    readJson: async (file, fallback) => {
+      try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return fallback }
+    },
+    writeJsonAtomic: async (file, value) => { fs.writeFileSync(file, JSON.stringify(value)) },
+  },
+  pdf: {
+    callTool: async (command, payload) => {
+      capCalls.push([command, payload.page])
+      return { ok: true, page: payload.page, lines: [
+        { x: 52, y: 92, x2: 498, y2: 110, text: 'clean body text from pdf' },
+      ] }
+    },
+  },
+})
+const capResult = await capRunner.refillText('paper-c')
+equal('图注用模型 caption 还原，不查文本层', capCalls, [['page_lines', 1]])
+equal('图注恢复成完整干净的 caption', JSON.parse(fs.readFileSync(capFile, 'utf8')).blocks[0].text,
+  'Figure 2 | RetRo architecture. Left: simplified ...')
+equal('正文仍用 PDF 文本层', JSON.parse(fs.readFileSync(capFile, 'utf8')).blocks[1].text, 'clean body text from pdf')
+equal('还原图注也计入 changed', capResult.changed, 2)
+fs.rmSync(capRoot, { recursive: true, force: true })
 
 console.log(`\n${pass} PASS / ${fail} FAIL`)
 process.exit(fail === 0 ? 0 : 1)
