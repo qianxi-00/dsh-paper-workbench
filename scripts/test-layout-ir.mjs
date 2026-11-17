@@ -350,3 +350,14 @@ test('a PDF line just above a service block is rescued, not orphaned', () => {
   assert.equal(r.blocks[0].quality.issues.some(i => i.code === 'unmatched-pdf-line'), false)
   assert.match(r.blocks[0].text, /First line continues here/)
 })
+
+test('stray short labels near a visual block stay figure-internal, not body paragraphs', () => {
+  const r = build(fixture(
+    [raw('fig', 'image', '', [100, 100, 200, 180])],
+    [line('insertion', 110, 88, 150, 96)],
+  ))
+  assert.equal(r.blocks.length, 1)
+  assert.equal(r.blocks[0].kind, 'figure')
+  assert.equal(r.pages[0].lineAssignments.length, 1)
+  assert.equal(r.pages[0].lineAssignments[0].role, 'figure-internal')
+})

@@ -35,8 +35,8 @@ node scripts/quality/score-layout.mjs retro-c351c0
 
 在 `layout-ir.js` 增加「块框上方 28pt 内的 PDF 行按文字相似度救回邻近块」后，用 Paraformer 已归档的 raw JSONL 做**离线重建**（不重新上传、不产生费用）：
 
-- 块数 160 → 122，`unmatched-pdf-line` 84 → 45；
-- 行级字符召回 97.62% → **99.19%**，行覆盖率 94.66% → **95.79%**；
+- 块数 160 → 89，`unmatched-pdf-line` 84 → 11（图/表内短标签归入 visual block，不再算正文）；
+- 行级字符召回 97.62% → **99.15%**，行覆盖率 94.66% → **95.65%**；
 - `quality` 仍为 `needs_review`（剩余主要是图内小标签，不是正文）。
 
 这个结果说明修复有效，但离线重建只更新了本地候选结果，没有自动重发版面解析；需要在面板里重新解析才会生成新的正式 revision。
