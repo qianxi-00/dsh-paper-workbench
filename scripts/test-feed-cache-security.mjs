@@ -60,6 +60,63 @@ test('订阅缓存安全', async (t) => {
     await assertCacheRemoved()
   })
 
+  await t.test('设置不能静默忽略旧缓存删除失败', async () => {
+    const api = createApi()
+    await setNetwork(api, networkA)
+    await seedLegacyCache()
+    const remove = fsp.rm
+    fsp.rm = async (file, options) => {
+      if (file === cacheFile) throw Object.assign(new Error('fixture lock'), { code: 'EPERM' })
+      return remove(file, options)
+    }
+    try {
+      await assert.rejects(setNetwork(api, networkB), /清理.*订阅缓存失败/)
+    } finally {
+      fsp.rm = remove
+    }
+  })
+
+  await t.test('旧缓存读取失败时仍先清理文件再返回空结果', async () => {
+    const api = createApi({ fetchTopicFeed: async () => ({ items: [] }) })
+    await setNetwork(api, networkA)
+    await seedLegacyCache()
+    const read = fsp.readFile
+    fsp.readFile = async (file, options) => {
+      if (file === cacheFile) throw Object.assign(new Error('fixture read'), { code: 'EACCES' })
+      return read(file, options)
+    }
+    try {
+      assert.deepEqual(await api['search.latest'](emptyArgs), { items: [], cached: false })
+      await assertCacheRemoved()
+    } finally {
+      fsp.readFile = read
+    }
+  })
+
+  await t.test('旧缓存无法读取且无法删除时明确失败', async () => {
+    let fetched = false
+    const api = createApi({ fetchTopicFeed: async () => { fetched = true; return { items: [] } } })
+    await setNetwork(api, networkA)
+    await seedLegacyCache()
+    const read = fsp.readFile
+    const remove = fsp.rm
+    fsp.readFile = async (file, options) => {
+      if (file === cacheFile) throw Object.assign(new Error('fixture read'), { code: 'EIO' })
+      return read(file, options)
+    }
+    fsp.rm = async (file, options) => {
+      if (file === cacheFile) throw Object.assign(new Error('fixture lock'), { code: 'EBUSY' })
+      return remove(file, options)
+    }
+    try {
+      await assert.rejects(api['search.latest'](emptyArgs), /清理.*订阅缓存失败/)
+      assert.equal(fetched, false, '不能在敏感旧缓存清理失败后继续拉取')
+    } finally {
+      fsp.readFile = read
+      fsp.rm = remove
+    }
+  })
+
   await t.test('非空 Feed 的缓存不保存网络配置明文', async () => {
     const api = createApi({ fetchTopicFeed: async () => feed('代理 A') })
     await setNetwork(api, networkA)
