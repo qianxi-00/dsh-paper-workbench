@@ -7,19 +7,32 @@
 右栏复用宿主原生 `conversation.content` 组件：消息流、思考过程、工具调用、模型与思考程度、权限、附件、语音输入和排队均由 DSH 原生管理；插件只负责精确的会话绑定、论文范围关联、阅读定位与快捷提问（`导读` / `总结全文` / `讲解本节` / `讲解选中` / 双击段落）。点右栏顶部的 `↗ 完整页` 可跳到主界面同一条完整会话，历史、运行状态与附件完全一致。
 翻译继续作为独立工具，通过 SSE 逐段生成并存入本地 SQLite（`workbench.db`），不进入聊天历史或污染对话上下文。
 
-> 状态：0.8.0。已完成真实 DSH 桌面端公开 `Factory / SessionProvider / SystemPrompt.context` 挂载与作用域隔离验证，并兼容三代以上 DSH 宿主版本。
+> **状态：v1.0.0（首个正式稳定版）** · 已通过多版本 DSH 桌面端公开契约挂载验证、跨平台 CI 自动化矩阵测试，支持有序并发持久翻译、全篇 + 周围图表深度讲解与工作区 Skills、对照富原文标注、订阅科研主题最新 Feed 与零依赖 SQLite / PostgreSQL / MySQL 多存储后端。
+
+## 一键交给 AI Agent 自动安装（推荐）
+
+复制下面整段指令发送给你正在使用的 Coding Agent（**DSH / Claude Code / Codex / Antigravity / Cursor**），Agent 会自动探测本机环境与 DSH 桌面端配置、挂载插件并给出待配置清单：
+
+```text
+请帮我安装 DeepSeek Harness 的论文工作台插件（dsh-paper-workbench v1.0.0）：
+1. 若本地尚无仓库，先克隆 https://github.com/qianxi-00/dsh-paper-workbench.git 到合适工作目录；若已存在则更新并拉取最新分支/发布标签；
+2. 阅读仓库内的 skills/install-dsh-paper-workbench/SKILL.md，并先执行 `node scripts/install-agent.mjs --dry-run --json` 确认探测到的 DSH 桌面端与 Python/PyMuPDF 状态；
+3. 确认无阻塞后执行 `node scripts/install-agent.mjs --json` 完成 DSH profile 挂载与工作区 Skills 初始化，再运行 `node scripts/doctor.mjs` 复核环境；
+4. 用中文向我清晰汇报：安装结果、生效方式（在 DSH 插件管理重新启用或重启 DSH），以及可选项配置引导（PaddleOCR Key / PostgreSQL 或 MySQL 外置数据库 / 可选 Obsidian 联动）。
+```
+
+也可以直接阅读内置技能 [skills/install-dsh-paper-workbench/SKILL.md](skills/install-dsh-paper-workbench/SKILL.md) 或本地运行 `node scripts/install-agent.mjs --help`。
 
 ## 能做什么
 
 - **宿主分栏与三栏阅读**：左侧文献库、目录与右侧原生会话均可拖拽调宽、双击分隔条复位（会话栏默认 420px）、一键收起/展开；窄窗口自动切换为覆盖抽屉，状态跨端口重启持久恢复。
-- **四种学术对照排版**：`双语`（上英衬线 + 下中无衬线微缩进，拖选默认只复制干净英文原文）、`并排`（宽屏双栏对齐阅读）、`原文`（临时隐藏译文专注英文）、`只看译文`；正文与图注均支持行内/块级 KaTeX 公式排版与复制还原 `$...$`。
-- **文献库**：按专题分组（默认全部收起）、记住展开状态；上传 PDF、按本地路径导入、从 Obsidian 卡片反查原始 PDF 批量入库；移出进回收站，**回收站可以恢复**（`🗑` 按钮）。
-- **图表与表格还原**：版面或空白带定位自动裁剪正文图表（含矢量图），表格默认展示原图并可展开可复制的真表格结构；点击图片看高清大图。
-- **文内搜索**：`🔍`（或阅读区 `Ctrl/⌘+F`，不抢占右侧原生输入框快捷键）检索段落与标题，点击命中平滑滚动定位并高亮。
-- **PDF 深色**：`◐` 三档（关 / 柔和 / 强），只反相页图，文字层与译文不动，夜间看图不刺眼。
-- **独立逐段翻译与自检**：`译` 开关、`译本节`、`整篇翻译` 在阅读器内流式推进、可随时 `停止`，失败段落一键 `重试失败 N`；右侧 `工具 ▾` 菜单收纳 `目录翻译`、`译文自检`、`版面解析`、`重填文字`、`版面质量` 与 `任务日志`，界面清爽不臃肿。
-- **原生 Agent 深度联动**：`导读`（3 分钟把握痛点、核心直觉与阅读路线）、`总结全文`、`讲解本节`、划词 `发送到会话` / `解释公式/术语`、双击段落直接提问。选段 100% 完整保留；超过单条直发上限（>24,000 字符）时支持一键**转为原生文本附件发送**，绝不静默截断；忙时自动进入原生队列，绝不覆盖输入框草稿或待发附件。
-- **精准论文引用跳回**：Agent 调用论文工具返回带 `paperId / page / blockId / revision / sectionId` 的引用链接（同时兼容旧 `[p.N]` 引用），点击直接定位到对应段落或章节；版本变更时自动降级定位到原文页并提示。
+- **四种学术对照排版**：`双语`（上英衬线 + 下中无衬线微缩进，拖选默认只复制干净英文原文）、`并排`（宽屏双栏对齐阅读）、`原文`（临时隐藏译文专注英文）、`只看译文`；正文与图注均支持行内/块级 KaTeX 公式、学术公式右编号、三线算法框排版与复制还原 `$...$`。
+- **对照富原文标注 & 笔记导出**：选中原文或译文可加 **5 色高亮 / 下划线 / 加粗 / 折叠 `💬` 批注气泡 / 行内 `‹+›` 插入注释**，点击即可编辑或按段/全篇清除；支持与 AI 自动整理生成的结构化「研读笔记」同页管理，一键 **导出 Markdown 归档** 或 **JSON 数据包**。
+- **有序并发 & 后台持久翻译**：可在设置里配置 `1–8` 翻译并发数，严格按文档段落顺序派发请求；翻译任务常驻宿主后台，切换标签、切换论文、关闭阅读器或切换 DSH 会话**绝不中断**，仅在明确点击「`⏸ 暂停翻译`」时暂停，支持从断点「`▶ 继续翻译`」及失败段落一键 `重试失败 N`。
+- **全篇上下文讲解 + 专属工作区 Skills/Tools**：新增 `paper_explain` 工具与 `paper-explainer` / `paper-deep-digest` / `paper-literature-synthesis` 工作区 Skills；讲解任意选段/章节时自动拼装全篇（默认 120k 字符预算）与同页/跨页引用图表，并自动通过 `paper_notes` 沉淀研读笔记。
+- **文献库与在线最新论文 Feed**：按专题分组、递归目录批量导入 `.pdf`（子文件夹自动作分组）、路径导入、上传 PDF 与回收站恢复；在线检索页支持订阅 8 个科研方向 + 自定义关键词，按发布时间倒序展示最新论文并一键下载入库。
+- **清晰的 Obsidian 联动边界**：新增 `obsidian.enabled` 独立开关（默认关闭以保持零门槛纯净工作台，已有 Vault 配置的老用户自动兼容开启）；关闭时自动隐藏「卡片」页签并由目录批量导入、Markdown/JSON 导入导出承接完整工作流。
+- **零依赖多存储后端与迁移**：默认内置 `SQLite`（Node < 22.5 自动降级 `JSON`），无需配置即开即用；设置里可按需切换纯 Node 原生协议实现的 **PostgreSQL** 或 **MySQL / MariaDB**，支持连接与建表权限测试、一键跨库全量迁移与全库快照备份/导入。
 
 ## 环境要求
 
@@ -113,12 +126,16 @@ Windows 用户没有 `npm` 也没关系：桌面端 → 论文工作台 → `⚙
 | --- | --- | --- |
 | `storage` | `link` | `link` 只记 PDF 原路径；`copy` 把 PDF 复制进 `papers/<id>/paper.pdf` |
 | `python` | `''` | 留空自动探测；填绝对路径可钉死解释器 |
-| `vault` / `kb` | `''` | 留空自动从 Obsidian 配置里找 open 的 vault 与「论文知识库」目录 |
+| `obsidian.enabled` | `false` | 可选 Obsidian 联动开关（已有 `vault`/`kb` 配置老用户自动保持 `true`） |
+| `vault` / `kb` | `''` | 开启 Obsidian 联动后用于自动/手动指定 vault 与知识库目录 |
+| `database.driver` | `'sqlite'` | 存储后端：`sqlite`（默认）/ `postgres` / `mysql`（支持测试连接与跨库迁移） |
 | `ocr.token` | `''` | PaddleOCR Key；写入后文件自动收紧到 0600，界面只回显示尾号 |
 | `ocr.model` | `PaddleOCR-VL-1.6` | 也可 `PP-StructureV3` / `PP-OCRv6` |
 | `ai.translateModel` / `ai.chatModel` | `null` | `null` = 跟随当前会话模型；也可钉 `{provider, model}` |
+| `ai.concurrency` | `1` | 翻译并发数（`1–8`，按原文段落 FIFO 顺序请求） |
 | `ai.temperature` | `0.2` | 翻译/对话温度 |
-| `workspace.title` / `workspace.path` | `论文` / `<数据根>/论文` | 原生会话归属的工作区 |
+| `topics` | `{ subscribed, custom, feedSource }` | 在线检索页最新论文订阅方向与自定义关键词 |
+| `workspace.title` / `workspace.path` | `论文` / `<数据根>/论文` | 原生会话归属的工作区（自动同步专属 `AGENTS.md` 与科研 `Skills`） |
 
 环境变量（兜底用，适合多套数据或测试）：
 
@@ -413,28 +430,37 @@ npm run fix:library                       # 干跑一次库体检（重复条目
 目录：
 
 ```
-lib/index.js    宿主入口（路由 + API + 工具注册 + 把 ctx.llm/sessionController 注入各层）
-lib/server.js   HTTP 处理（宿主与 dev-server 共用，含 SSE 与取消）
-lib/store.js    本地存储（索引/笔记/段落模型落文件，译文/日志/自检落 SQLite，原子写）
-lib/db.js       SQLite 存储层（node:sqlite + 同名 JSON 退化实现）
-lib/doc.js      段落模型（块合并、分节、hash、按 sha1 + 目录指纹缓存）
-lib/ai.js       翻译与对话（批量、JSON 解析、退化重试、标题、公式卫生、SSE 事件）
-lib/sse.js      SSE 输出（心跳、客户端断开即 abort）
-lib/session.js  原生 DSH 会话桥（create/prompt/follow + 帧归一化）
-lib/conv.js     对话形状、论文关联、兼容附件与范围提示词
+lib/index.js          宿主入口（路由 + API + 工具注册 + 工作区 Skills 部署）
+lib/server.js         HTTP 处理（宿主与 dev-server 共用，含 SSE、/translate/follow 与取消）
+lib/store.js          本地存储（索引/笔记/段落模型/配置与统一数据库后端路由）
+lib/db.js             SQLite 存储层（node:sqlite + 同名 JSON 退化实现，5 张表）
+lib/db-pg.js          零依赖纯 Node PostgreSQL Wire Protocol v3 客户端（SCRAM-SHA-256）
+lib/db-mysql.js       零依赖纯 Node MySQL Protocol v10 客户端
+lib/db-backend.js     多数据库统一门面（SQLite/JSON/PG/MySQL + 导入导出 + 跨库迁移）
+lib/translate-jobs.js 宿主常驻后台持久化翻译调度器（断连不中止、暂停/断点续翻）
+lib/explain.js        全篇大上下文 + 周围跨页图表关联深度讲解拼装器
+lib/workspace-skills.js 「论文」工作区 AGENTS.md 与科研 Skills 受管同步器
+lib/doc.js            段落模型（块合并、分节、hash、按 sha1 + 目录指纹缓存）
+lib/ai.js             翻译与对话（1-8 FIFO 并发、批量/兜底、标题、公式卫生 tidyMath）
+lib/sse.js            SSE 输出（心跳、客户端断开即 abort）
+lib/session.js        原生 DSH 会话桥（create/prompt/follow + 帧归一化）
+lib/conv.js           对话形状、论文关联、兼容附件与范围提示词
 lib/paper-context.js  Agent 作用域上下文、定位校验与版本化 UI 状态合并
-lib/jobs.js     任务日志（开始/进度/结束/失败，纯依赖注入）
-lib/review.js   译文自检（静态规则 + 模型批检）
-lib/figures.js  正文配图（抽位图、按「图 N」挂段落、缓存 PNG）
-lib/pdf.js      PyMuPDF 子进程桥
-lib/obsidian.js frontmatter 行级合并、卡片定位/写入、检索
-lib/arxiv.js    arXiv Atom + OpenAlex 解析、PDF 下载
-lib/ocr.js      PaddleOCR 云端任务（提交/轮询/jsonl → 按页 Markdown）
-lib/tools.js    9 个 agent 工具（裸 JSON-Schema）
-lib/client.js   左栏入口 + 阅读 iframe / 原生会话分栏 + 精确会话绑定与联动
-assets/app/     工作台 SPA（vanilla JS，三栏 + 对照视图 + 搜索/日志/回收站/自检/配图）
-assets/pdf_tool.py  PyMuPDF 命令行协处理器（text / outline / render / clip / figures）
+lib/jobs.js           任务日志（开始/进度/结束/失败，纯依赖注入）
+lib/review.js         译文自检（静态规则 + 模型批检）
+lib/figures.js        正文配图（抽位图、按「图 N」挂段落、缓存 PNG）
+lib/pdf.js            PyMuPDF 子进程桥
+lib/obsidian.js       frontmatter 行级合并、卡片定位/写入、检索（按需开关）
+lib/arxiv.js          arXiv Atom + OpenAlex 解析、订阅主题最新 Feed 与 PDF 下载
+lib/ocr.js            PaddleOCR 云端任务（指数退避重试 / 取消）
+lib/tools.js          10 个 agent 工具（新增 paper_explain 与研读笔记保存）
+lib/client.js         左栏入口 + 阅读 iframe / 原生会话分栏 + 精确会话绑定与联动
+skills/               AI Agent 一键安装 Skill（install-dsh-paper-workbench）
+assets/app/           工作台 SPA（vanilla JS，双语排版 + 富标注 + 多数据库/主题设置）
+assets/workspace-skills/ 「论文」工作区内置 AGENTS.md 与专精研读 Skills
+assets/pdf_tool.py    PyMuPDF 命令行协处理器（text / outline / render / clip / figures / zhpdf）
 AGENTS.md             架构契约、安全红线、测试要求与持久化维护记忆
+CHANGELOG.md          版本发布历史
 docs/v2-contracts.md  v2 的数据形状与接口契约
 docs/v3-contracts.md  v3 新增模块（db / jobs / review / figures / session）的契约
 docs/v8-native-session.md  v8 原生会话挂载、v2 桥接协议与多版本兼容契约

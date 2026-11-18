@@ -13,6 +13,7 @@
 
 const API = '/paper-workbench/api/'
 const TRANSLATE_URL = '/paper-workbench/ai/translate'
+const FOLLOW_TRANSLATE_URL = '/paper-workbench/translate/follow'
 const CHAT_URL = '/paper-workbench/ai/chat'
 const NATIVE_READER = new URLSearchParams(window.location.search).get('native') === '1'
 const app = document.getElementById('app')
@@ -70,9 +71,13 @@ const state = {
   translateError: '',
   translateReqId: '',
   translateTask: 0, // 翻译任务令牌：切论文后旧流的 finally 不能再动新论文的 state
+  translateJob: null,
+  translateDetached: false,
   chat: { messages: [], busy: false, abort: null, error: '', draft: '' },
   card: null,
   settings: null,
+  fullConfig: null,
+  settingsDraft: null,
   aiDraft: null,
   showSettings: false,
   selection: null,
@@ -81,6 +86,13 @@ const state = {
   doctor: { loading: false, report: null, error: '', unsupported: false },
   busy: '',
   online: { q: '', source: 'both', items: [], warnings: [], loading: false, error: '' },
+  latestFeed: { loading: false, loaded: false, topicFilter: 'all', items: [], topics: [], error: '', partialErrors: [] },
+  dbTestResult: null,
+  dbBusy: '',
+  annotations: [],
+  studyNotes: [],
+  annFilter: 'all',
+  annPopover: null,
   ocr: null,
   ocrBusy: '',
   ocrToken: '',
@@ -234,6 +246,14 @@ window.addEventListener('message', event => {
 })
 
 // ---------------------------------------------------------------- 小工具
+
+function obsidianEnabled() {
+  const obs = state.fullConfig && state.fullConfig.obsidian
+  if (obs && typeof obs.enabled === 'boolean') return obs.enabled
+  const hObs = state.health && state.health.obsidian
+  if (hObs && typeof hObs.enabled === 'boolean') return hObs.enabled
+  return true
+}
 
 function h(tag, props, ...children) {
   const node = document.createElement(tag)
@@ -405,7 +425,20 @@ function extractCleanSelection(selection, anchorElement) {
     if (!startedInZh && !onlyZh && node.classList?.contains('para-zh')) return
     if ((startedInZh || onlyZh) && node.classList?.contains('para-orig')) return
     const cls = node.classList
-    if (cls && (cls.contains('formula-link') || cls.contains('para-tools') || cls.contains('page-divider') || cls.contains('formula-meta') || cls.contains('algo-ln') || cls.contains('footnote-tag'))) return
+    if (
+      cls &&
+      (cls.contains('formula-link') ||
+        cls.contains('para-tools') ||
+        cls.contains('page-divider') ||
+        cls.contains('formula-meta') ||
+        cls.contains('algo-ln') ||
+        cls.contains('footnote-tag') ||
+        cls.contains('ann-bubble') ||
+        cls.contains('ann-insert-chip') ||
+        cls.contains('ann-popover'))
+    ) {
+      return
+    }
     const tex = typeof node.getAttribute === 'function' ? node.getAttribute('data-tex') : null
     if (tex) {
       chunks.push(tex)
@@ -903,6 +936,7 @@ async function loadAi(force = false) {
     const value = await rpc('ai.settings.get')
     const config = value.config || {}
     state.aiConfig = config.ai || config // 兼容 {ai:{…}} 与直接返回 AI 配置两种宿主实现
+    if (config && (config.obsidian || config.topics || config.database)) state.fullConfig = config
   } catch {
     try {
       const legacy = await rpc('settings.get')
@@ -1001,12 +1035,73 @@ function markPending(job) {
 }
 
 function translateHandlers(job) {
-  // 切论文 / 又开了新翻译任务后，旧流可能在 abort 生效前再送几帧：一律丢弃，
-  // 不能让旧论文的译文/状态写进新论文的 state。
   const live = () => job.token === state.translateTask
+  const applyDoneKey = (data) => {
+    const key = normalizeKey(data && data.key)
+    if (!key) return
+    job.done.add(key)
+    const text = String((data && data.text) || '').trim()
+    if (text !== '') {
+      state.trans[key] = { zh: text, model: (data && data.model) || '', at: new Date().toISOString() }
+    }
+    state.streams.delete(key)
+    paintTranslation(key)
+    paintTranslateChrome()
+  }
+  const applySkippedKey = (data) => {
+    const key = normalizeKey(data && data.key)
+    if (!key) return
+    state.streams.set(key, { status: 'skipped', text: '', message: String((data && data.reason) || '无需翻译') })
+    paintTranslation(key)
+    paintTranslateChrome()
+  }
+  const applyTerminalEnd = (data) => {
+    state.translateBusy = false
+    const pid = state.current?.meta?.id || state.translateJob?.paperId || ''
+    if (state.translateJob) {
+      const nextStatus = data && data.aborted ? 'paused' : data && data.ok === false ? 'error' : 'done'
+      state.translateJob = {
+        ...state.translateJob,
+        status: nextStatus,
+        ...(nextStatus === 'done' && Number(state.translateJob.total) > 0 ? { completed: Number(state.translateJob.total) } : {}),
+      }
+    }
+    if (pid && state.health && Array.isArray(state.health.activeTranslations)) {
+      state.health.activeTranslations = state.health.activeTranslations.filter((j) => j.paperId !== pid)
+    }
+    paintTranslateChrome()
+    if (job.mode === 'titles' && job.done.size === 0 && !state.translateError) {
+      const skipped = (data && data.skipped) || 0
+      toast(
+        skipped > 0
+          ? '目录里 ' + skipped + ' 个标题和原文一样，没有可翻的内容'
+          : '没有翻到任何标题：先确认「版面/文档模型」已经建好，再点一次目录翻译',
+        6000,
+      )
+    }
+    if (data && data.ok === false) {
+      state.translateError =
+        job.mode === 'titles'
+          ? '目录翻译没有全部成功，失败的标题可以点「重试」'
+          : '翻译没有全部成功，失败的段落可以点「重试」'
+      paintTranslateChrome()
+    }
+  }
   return {
     start(data) {
       if (!live()) return
+      if (data && data.total !== undefined && !data.key) {
+        state.translateJob = {
+          ...(state.translateJob || {}),
+          paperId: data.paperId || state.current?.meta?.id || '',
+          status: 'running',
+          completed: Number(data.already) || 0,
+          total: Number(data.total) || 0,
+          concurrency: Number(data.concurrency) || Number(state.aiConfig?.concurrency) || 1,
+        }
+        paintTranslateChrome()
+        return
+      }
       const key = normalizeKey(data && data.key)
       if (!key) return
       const item = state.streams.get(key) || { status: 'streaming', text: '', message: '' }
@@ -1024,93 +1119,120 @@ function translateHandlers(job) {
       state.streams.set(key, item)
       paintTranslation(key)
     },
+    progress(data) {
+      if (!live() || !data) return
+      state.translateJob = { ...(state.translateJob || {}), ...data }
+      state.translateBusy = state.translateJob.status === 'running'
+      paintTranslateChrome()
+    },
+    chunk(data) {
+      if (!live() || !data) return
+      if (data.skipped) applySkippedKey(data)
+      else applyDoneKey(data)
+    },
+    paused(data) {
+      if (!live()) return
+      state.translateJob = { ...(state.translateJob || {}), ...(data || {}), status: 'paused' }
+      state.translateBusy = false
+      if (state.job) state.job.stopped = true
+      for (const [k, item] of [...state.streams]) {
+        if (item.status === 'pending' || item.status === 'streaming') state.streams.delete(k)
+      }
+      paintAllTranslations()
+      paintTranslateChrome()
+    },
     done(data) {
       if (!live()) return
-      const key = normalizeKey(data && data.key)
-      if (!key || job.done.has(key)) return // 幂等：同一次请求重复 done 只覆盖一次
-      job.done.add(key)
-      const text = String((data && data.text) || '').trim()
-      if (text !== '') state.trans[key] = { zh: text, model: (data && data.model) || '', at: new Date().toISOString() }
-      state.streams.delete(key)
-      paintTranslation(key)
-      paintTranslateChrome()
+      if (data && data.key) {
+        if (job.done.has(normalizeKey(data.key))) return
+        applyDoneKey(data)
+        return
+      }
+      applyTerminalEnd({ ...(data || {}), ok: true })
     },
     skipped(data) {
       if (!live()) return
-      const key = normalizeKey(data && data.key)
-      if (!key) return
-      // 模型把名单/符号原样返回：不写译文，标一条说明，别在英文下面再贴一遍英文
-      state.streams.set(key, { status: 'skipped', text: '', message: String((data && data.reason) || '无需翻译') })
-      paintTranslation(key)
-      paintTranslateChrome()
+      applySkippedKey(data)
     },
     error(data) {
       if (!live()) return
       const key = normalizeKey(data && data.key)
-      if (!key) return
-      job.failed.add(key)
-      state.streams.set(key, { status: 'error', text: '', message: String((data && data.message) || '翻译失败') })
-      paintTranslation(key)
+      if (key) {
+        job.failed.add(key)
+        state.streams.set(key, { status: 'error', text: '', message: String((data && data.message) || '翻译失败') })
+        paintTranslation(key)
+        paintTranslateChrome()
+        return
+      }
+      state.translateError = String((data && data.message) || '翻译失败')
+      if (data && data.fatal) {
+        state.translateBusy = false
+        state.translateJob = { ...(state.translateJob || {}), status: 'error', error: state.translateError }
+      }
       paintTranslateChrome()
     },
     end(data) {
       if (!live()) return
-      state.translateBusy = false
-      paintTranslateChrome()
-      if (job.mode === 'titles' && job.done.size === 0 && !state.translateError) {
-        const skipped = (data && data.skipped) || 0
-        toast(skipped > 0
-          ? '目录里 ' + skipped + ' 个标题和原文一样，没有可翻的内容'
-          : '没有翻到任何标题：先确认「版面/文档模型」已经建好，再点一次目录翻译', 6000)
-      }
-      if (data && data.ok === false) {
-        state.translateError =
-          job.mode === 'titles'
-            ? '目录翻译没有全部成功，失败的标题可以点「重试」'
-            : '翻译没有全部成功，失败的段落可以点「重试」'
-        paintTranslateChrome()
-      }
+      applyTerminalEnd(data)
     },
   }
 }
 
 async function runTranslate(body, job) {
   if (state.translateBusy) {
-    toast('已有翻译任务在进行，先停止或等它结束')
+    toast('已有翻译任务在进行，点「⏸ 暂停翻译」后可暂停或等它结束')
     return
   }
   if (!state.current) return
   const task = ++state.translateTask
   job.token = task
+  state.translateDetached = false
   state.translateBusy = true
   state.translateError = ''
   state.job = job
+  const concurrency = Math.min(8, Math.max(1, Math.trunc(Number(state.aiConfig && state.aiConfig.concurrency) || 1)))
+  const pid = state.current.meta.id
+  const prevDone = state.translateJob && state.translateJob.paperId === pid ? Number(state.translateJob.completed) || 0 : 0
+  state.translateJob = {
+    paperId: pid,
+    status: 'running',
+    concurrency,
+    completed: Math.max(prevDone, job.done ? job.done.size : 0),
+    total: job.totalParagraphs || 0,
+  }
   state.translateReqId = genId()
   markPending(job)
-  render() // 先让占位的“翻译中…”出现，并显示停止按钮
+  render()
   const controller = new AbortController()
   state.translateAbort = controller
   try {
-    await streamSse(TRANSLATE_URL, { ...body, reqId: state.translateReqId }, translateHandlers(job), controller.signal)
+    await streamSse(
+      TRANSLATE_URL,
+      { ...body, persistent: true, concurrency, reqId: state.translateReqId },
+      translateHandlers(job),
+      controller.signal,
+    )
   } catch (error) {
     if (error.name !== 'AbortError') {
       state.translateError = '翻译失败：' + error.message
       toast(state.translateError, 5000)
     }
   } finally {
-    // 旧任务（切了论文 / 又开了新任务）不许再动新任务的 busy、状态栏和段落标记
     if (task === state.translateTask) {
       if (state.translateAbort === controller) state.translateAbort = null
       state.translateBusy = false
-      // 未收到 done 的段落标记为中断或失败，别让它们一直停在「翻译中…」；
-      // 已缓存的译文优先保留。
+      if (state.translateDetached) {
+        state.translateDetached = false
+        return
+      }
+      const isPaused = Boolean(state.translateJob && state.translateJob.status === 'paused')
       for (const [key, item] of [...state.streams]) {
         if (item.status !== 'pending' && item.status !== 'streaming') continue
-        if (state.trans[key]) {
+        if (state.trans[key] || isPaused) {
           state.streams.delete(key)
           continue
         }
-        const message = state.translateError ? '翻译失败，可重试' : '翻译已停止，可重试'
+        const message = state.translateError ? '翻译失败，可重试' : '翻译已暂停，可继续'
         state.streams.set(key, { status: 'error', text: '', message })
       }
       paintAllTranslations()
@@ -1121,6 +1243,91 @@ async function runTranslate(body, job) {
       }
     }
   }
+}
+
+async function attachTranslateFollow(paperId, initialJob) {
+  if (!paperId || !state.current || state.current.meta.id !== paperId) return
+  if (state.translateAbort) {
+    state.translateDetached = true
+    try {
+      state.translateAbort.abort()
+    } catch {
+      /* ignore */
+    }
+  }
+  const task = ++state.translateTask
+  const scopeIds = Array.isArray(initialJob?.sectionIds) ? initialJob.sectionIds : null
+  const job = buildJob(scopeIds, initialJob?.titles ? 'titles' : scopeIds ? 'section' : 'paper')
+  job.token = task
+  state.translateDetached = false
+  state.translateJob = initialJob || { paperId, status: 'running', completed: 0, total: job.totalParagraphs || 0 }
+  state.translateBusy = Boolean(state.translateJob && state.translateJob.status === 'running')
+  state.job = job
+  const controller = new AbortController()
+  state.translateAbort = controller
+  try {
+    await streamSseGet(FOLLOW_TRANSLATE_URL + '?id=' + encodeURIComponent(paperId) + '&replay=1', translateHandlers(job), controller.signal)
+  } catch (error) {
+    if (error.name !== 'AbortError') state.translateError = '重连翻译流失败：' + error.message
+  } finally {
+    if (task === state.translateTask) {
+      if (state.translateAbort === controller) state.translateAbort = null
+      state.translateBusy = false
+      if (!state.translateDetached) paintTranslateChrome()
+      state.translateDetached = false
+    }
+  }
+}
+
+async function pauseTranslate() {
+  if (!state.current) return
+  const paperId = state.current.meta.id
+  state.translateDetached = false
+  let pausedResp = null
+  try {
+    pausedResp = await rpc('translate.pause', { id: paperId })
+  } catch {
+    const reqId = state.translateReqId
+    await fetch(API + 'ai/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reqId, paperId }),
+    }).catch(() => {})
+  }
+  const controller = state.translateAbort
+  if (controller) {
+    try {
+      controller.abort()
+    } catch {
+      /* ignore */
+    }
+  }
+  state.translateBusy = false
+  state.translateJob = (pausedResp && pausedResp.job) || {
+    ...(state.translateJob || {}),
+    paperId,
+    status: 'paused',
+  }
+  if (state.job) state.job.stopped = true
+  for (const [k, item] of [...state.streams]) {
+    if (item.status === 'pending' || item.status === 'streaming') state.streams.delete(k)
+  }
+  toast('已暂停翻译，可随时点「继续翻译」接着翻')
+  paintAllTranslations()
+  paintTranslateChrome()
+  render()
+}
+
+function stopTranslate() {
+  return pauseTranslate()
+}
+
+function resumeTranslate() {
+  if (!state.current) return
+  const prev = state.translateJob || {}
+  const sectionIds = Array.isArray(prev.sectionIds) && prev.sectionIds.length ? prev.sectionIds : null
+  const job = buildJob(sectionIds, prev.titles ? 'titles' : sectionIds ? 'section' : 'paper')
+  runTranslate({ id: state.current.meta.id, resume: true, ...(sectionIds ? { sectionIds } : {}) }, job)
 }
 
 function translateSection(sectionId, retranslate = false) {
@@ -1162,7 +1369,16 @@ function confirmTranslateAll() {
     toast('没有可翻译的段落')
     return
   }
-  const ok = window.confirm('整篇翻译：' + sections.length + ' 节 · ' + paragraphs.length + ' 段。\n\n会按节串行推进，翻译结果写入这篇论文的 trans.json；中途可停止。继续？')
+  const cc = Math.min(8, Math.max(1, Math.trunc(Number(state.aiConfig && state.aiConfig.concurrency) || 1)))
+  const ok = window.confirm(
+    '整篇翻译：' +
+      sections.length +
+      ' 节 · ' +
+      paragraphs.length +
+      ' 段。\n\n将按文档顺序以 ' +
+      cc +
+      ' 并发在后台持久推进（切走界面或切换会话不会中断，点「⏸ 暂停翻译」才暂停）。继续？',
+  )
   if (ok) translateAll()
 }
 
@@ -1181,8 +1397,6 @@ function translateTitles() {
     done: new Set(),
     failed: new Set(),
   }
-  // 只翻目录标题：titles:true 已经让宿主把段落池收成空（见 lib/ai.js 的 titlesWanted），
-  // 千万别再带空的 keys —— [] 会被当成「指定了这些 key」，把标题全过滤掉。
   runTranslate({ id: state.current.meta.id, titles: true }, job)
 }
 
@@ -1207,26 +1421,6 @@ function retryKey(key) {
   translateKeys([key])
 }
 
-function stopTranslate() {
-  const controller = state.translateAbort
-  if (controller) {
-    try {
-      controller.abort()
-    } catch {
-      /* 已结束 */
-    }
-  }
-  const reqId = state.translateReqId
-  if (reqId) {
-    fetch(API + 'ai/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reqId }) }).catch(() => {})
-  }
-  state.translateBusy = false
-  // 停下来不是「翻完了」，状态栏要能区分，避免用户以为整篇已经完成
-  if (state.job) state.job.stopped = true
-  toast('已停止翻译')
-  paintTranslateChrome()
-}
-
 function sectionDoneCount(job) {
   let done = 0
   for (const keys of job.keysBySection.values()) {
@@ -1243,9 +1437,24 @@ function sectionDoneCount(job) {
 }
 
 function progressText() {
+  const tj = state.translateJob
   const job = state.job
-  if (!job) return state.translateBusy ? '翻译中…' : ''
-  const suffix = state.translateBusy ? '' : job.stopped ? '（已停止）' : '（已结束）'
+  const cc = Number((tj && tj.concurrency) || (state.aiConfig && state.aiConfig.concurrency) || 1)
+  const ccTag = cc > 1 ? ' · ' + cc + ' 并发' : ''
+  if (tj && Number(tj.total) > 0) {
+    const doneCount = Math.min(Math.max(Number(tj.completed) || 0, job ? job.done.size : 0), Number(tj.total))
+    const suffix =
+      tj.status === 'running'
+        ? ccTag
+        : tj.status === 'paused'
+          ? '（已暂停）'
+          : tj.status === 'error'
+            ? '（有失败）'
+            : '（已完成）'
+    return '翻译 ' + doneCount + '/' + tj.total + ' 段' + suffix
+  }
+  if (!job) return state.translateBusy ? '翻译中…' + ccTag : ''
+  const suffix = state.translateBusy ? ccTag : job.stopped ? '（已暂停）' : '（已结束）'
   if (job.mode === 'titles') return '目录翻译 ' + Math.min(job.done.size, job.totalParagraphs) + '/' + job.totalParagraphs + suffix
   const sections = job.totalSections || JobSectionCount(job)
   const sectionText = sections > 0 ? sectionDoneCount(job) + '/' + sections + ' 节 · ' : ''
@@ -1291,7 +1500,14 @@ function paintTranslation(key, nodes) {
   if (list.length === 0) return
   const text = state.trans[key] && state.trans[key].zh
   const stream = state.streams.get(key)
-  for (const node of list) node.replaceChildren(...zhContent(key, text, stream))
+  const zhAnns = annotationsFor(key, 'zh')
+  for (const node of list) {
+    node.replaceChildren(...zhContent(key, text, stream))
+    if (text && zhAnns.length > 0) {
+      const box = node.querySelector ? node.querySelector('.zh-text') : null
+      if (box) applyParagraphAnnotations(box, zhAnns)
+    }
+  }
   if (text || stream) ensureShowZh()
 }
 
@@ -1345,7 +1561,14 @@ function paintAllTranslations() {
     const text = state.trans[key] && state.trans[key].zh
     const stream = state.streams.get(key)
     if (!text && !stream) continue
-    for (const node of list) node.replaceChildren(...zhContent(key, text, stream))
+    const zhAnns = text ? annotationsFor(key, 'zh') : []
+    for (const node of list) {
+      node.replaceChildren(...zhContent(key, text, stream))
+      if (zhAnns.length > 0) {
+        const box = node.querySelector ? node.querySelector('.zh-text') : null
+        if (box) applyParagraphAnnotations(box, zhAnns)
+      }
+    }
     painted = true
   }
   if (painted) ensureShowZh()
@@ -1353,6 +1576,10 @@ function paintAllTranslations() {
 
 function paintTranslateChrome() {
   const docReady = !!(state.doc && Array.isArray(state.doc.paragraphs) && state.doc.paragraphs.length > 0)
+  const tj = state.translateJob
+  const running = Boolean(state.translateBusy || (tj && tj.status === 'running'))
+  const paused = Boolean(!running && tj && tj.status === 'paused')
+  const countSuffix = tj && Number(tj.total) > 0 ? ' (' + Math.min(Number(tj.completed) || 0, Number(tj.total)) + '/' + tj.total + ')' : ''
   const status = document.getElementById('translate-status')
   if (status) {
     status.textContent = state.translateError || progressText()
@@ -1360,8 +1587,15 @@ function paintTranslateChrome() {
   }
   const stop = document.getElementById('translate-stop')
   if (stop) {
-    stop.hidden = !state.translateBusy
-    stop.disabled = !state.translateBusy
+    stop.hidden = !running
+    stop.disabled = !running
+    stop.textContent = '⏸ 暂停翻译' + countSuffix
+  }
+  const resume = document.getElementById('translate-resume')
+  if (resume) {
+    resume.hidden = !paused
+    resume.disabled = !docReady || running
+    resume.textContent = '▶ 继续翻译' + countSuffix
   }
   const retryable = failedSegmentKeys()
   const retry = document.getElementById('retry-failed')
@@ -1371,7 +1605,22 @@ function paintTranslateChrome() {
   }
   for (const id of ['translate-all', 'translate-section', 'translate-titles']) {
     const button = document.getElementById(id)
-    if (button) button.disabled = !docReady || state.translateBusy
+    if (button) button.disabled = !docReady || running
+  }
+  const activePid = (tj && tj.paperId) || state.current?.meta?.id || ''
+  if (activePid && typeof document.querySelectorAll === 'function') {
+    for (const badge of document.querySelectorAll('[data-paper-trans-badge]')) {
+      if (badge.getAttribute('data-paper-trans-badge') !== activePid) continue
+      if (tj && (tj.status === 'running' || tj.status === 'paused')) {
+        badge.className = 'paper-trans-badge' + (tj.status === 'paused' ? ' paused' : '')
+        badge.title = tj.status === 'running' ? '后台翻译中' : '翻译已暂停，待继续'
+        badge.textContent = (tj.status === 'paused' ? '⏸ ' : '译 ') + (tj.completed || 0) + '/' + (tj.total || '?')
+      } else {
+        badge.className = 'paper-meta'
+        badge.title = ''
+        badge.textContent = state.current?.meta?.status === 'read' ? '✓' : ''
+      }
+    }
   }
 }
 
@@ -1567,10 +1816,10 @@ async function loadHealth() {
   }
 }
 
-/** 切论文前放弃上一篇的所有在途任务：结果回来时不许再写 state。 */
+/** 切论文前只摘除旧界面的 SSE 观察监听（绝不取消后台持续翻译），旧结果不再写当前 state。 */
 function abortPaperWork() {
-  // 翻译：先让令牌失效，再 abort（abort 后 finally 还会跑，令牌对不上就什么都不做）
   state.translateTask += 1
+  state.translateDetached = true
   if (state.translateAbort) {
     try {
       state.translateAbort.abort()
@@ -1580,6 +1829,7 @@ function abortPaperWork() {
   }
   state.translateAbort = null
   state.translateBusy = false
+  state.translateJob = null
   // 对话：旧回答不能写进新论文的气泡
   if (state.chat.abort) {
     try {
@@ -1623,7 +1873,11 @@ async function openPaper(id, options = {}) {
     state.trans = {}
     state.streams = new Map()
     state.job = null
+    state.translateJob = null
     state.translateError = ''
+    state.annotations = []
+    state.studyNotes = []
+    state.annPopover = null
     state.sectionId = (restore && restore.sectionId) || null
     state.chat.messages = []
     state.chat.error = ''
@@ -1761,6 +2015,12 @@ async function loadDoc(id, seq) {
       state.trans[lower] = entry
     }
     if (hidden > 0) console.info('[paper-workbench] 隐藏了 ' + hidden + ' 条与原文相同的译文')
+    state.annotations = Array.isArray(value && value.annotations) ? value.annotations : []
+    state.studyNotes = Array.isArray(value && value.studyNotes) ? value.studyNotes : []
+    state.translateJob = (value && value.translateJob) || null
+    if (state.translateJob && state.translateJob.status === 'running' && !state.translateBusy) {
+      attachTranslateFollow(id, state.translateJob).catch(() => {})
+    }
   } catch (error) {
     if (stale()) return
     state.doc = null
@@ -2036,7 +2296,10 @@ function renderSide() {
         { class: 'side-actions' },
         h('button', { onclick: importByPath }, '＋ 按路径导入'),
         h('button', { onclick: uploadPdf }, '上传 PDF'),
-        h('button', { onclick: importFromVault, title: '扫描 Obsidian 卡片里记录的原始 PDF 并入库' }, '从笔记库导入'),
+        obsidianEnabled()
+          ? h('button', { onclick: importFromVault, title: '扫描 Obsidian 卡片里记录的原始 PDF 并入库' }, '从笔记库导入')
+          : null,
+        h('button', { onclick: importFromDir, title: '扫描本地目录（及子文件夹）里的全部 PDF 批量入库' }, '批量导入目录'),
         h('button', { onclick: () => toggleOnline() }, state.tab === 'online' ? '返回阅读' : '在线检索'),
         state.picked.size > 0
           ? h('button', { class: 'primary', onclick: comparePicked, title: '让 agent 对比这些论文并写一篇方向综述' }, '对比综述 (' + state.picked.size + ')')
@@ -2121,7 +2384,24 @@ function renderSide() {
                         h('div', { class: 'paper-title' }, paper.title),
                         h('div', { class: 'paper-meta' }, [paper.year, fmtAuthors(paper.authors), paper.pageCount ? paper.pageCount + ' 页' : ''].filter(Boolean).join(' · ')),
                       ),
-                      h('span', { class: 'paper-meta' }, paper.status === 'read' ? '✓' : ''),
+                      (() => {
+                        const liveJob =
+                          state.current && state.current.meta.id === paper.id && state.translateJob
+                            ? state.translateJob
+                            : ((state.health && state.health.activeTranslations) || []).find((j) => j.paperId === paper.id)
+                        if (liveJob && (liveJob.status === 'running' || liveJob.status === 'paused')) {
+                          return h(
+                            'span',
+                            {
+                              class: 'paper-trans-badge' + (liveJob.status === 'paused' ? ' paused' : ''),
+                              'data-paper-trans-badge': paper.id,
+                              title: liveJob.status === 'running' ? '后台翻译中' : '翻译已暂停，待继续',
+                            },
+                            (liveJob.status === 'paused' ? '⏸ ' : '译 ') + (liveJob.completed || 0) + '/' + (liveJob.total || '?'),
+                          )
+                        }
+                        return h('span', { class: 'paper-meta', 'data-paper-trans-badge': paper.id }, paper.status === 'read' ? '✓' : '')
+                      })(),
                     ),
                   )
                 : null,
@@ -2132,7 +2412,13 @@ function renderSide() {
       'div',
       { class: 'statusbar' },
       h('span', {}, state.health && state.health.pdf && state.health.pdf.ok ? 'PDF ✓' : 'PDF ✗'),
-      h('span', {}, state.health && state.health.vault && state.health.vault.ok ? 'Obsidian ✓' : 'Obsidian ✗'),
+      obsidianEnabled()
+        ? h('span', {}, state.health && state.health.vault && state.health.vault.ok ? 'Obsidian ✓' : 'Obsidian ✗')
+        : h(
+            'span',
+            { title: '当前存储后端' },
+            'DB ' + ((state.health && state.health.db && (state.health.db.driver || state.health.db.engine)) || 'sqlite').toUpperCase() + (state.health && state.health.db && state.health.db.healthy === false ? ' ✗' : ' ✓'),
+          ),
       h('span', { title: 'PaddleOCR 云端接口（扫描件）' }, 'OCR ' + (state.health && state.health.ocr && state.health.ocr.configured ? '✓' : '✗')),
       h('span', { class: 'spacer' }),
       h('button', { class: 'ghost', onclick: openSettings, title: '设置' }, '⚙'),
@@ -2172,6 +2458,9 @@ function collapseAllGroups(topicKeys, searching) {
 
 function toggleOnline() {
   state.tab = state.tab === 'online' ? (state.current ? 'compare' : 'online') : 'online'
+  if (state.tab === 'online' && !state.latestFeed.loaded && !state.latestFeed.loading && (state.fullConfig?.topics || state.health?.obsidian !== undefined)) {
+    loadLatestFeed().catch(() => {})
+  }
   render()
 }
 
@@ -2237,8 +2526,12 @@ function renderTopbar() {
     ['compare', '对照'],
     ['page', '原文页'],
     ['notes', '笔记'],
-    ['card', '卡片'],
+    ...(obsidianEnabled() ? [['card', '卡片']] : []),
   ]
+  const notesBadge =
+    ((state.annotations && state.annotations.length) || 0) +
+    ((state.studyNotes && state.studyNotes.length) || 0) +
+    ((state.current && state.current.notes && state.current.notes.highlights && state.current.notes.highlights.length) || 0)
   return h(
     'div',
     { class: 'topbar' },
@@ -2255,7 +2548,7 @@ function renderTopbar() {
                 'data-tab': key,
                 onclick: () => switchTab(key),
               },
-              label + (key === 'notes' ? ' ' + (((state.current.notes && state.current.notes.highlights) || []).length) : ''),
+              label + (key === 'notes' ? ' ' + notesBadge : ''),
             ),
           ),
         )
@@ -2703,7 +2996,489 @@ function renderCaptionOrig(textValue) {
   return box
 }
 
+const ANN_COLOR_HEX = { yellow: '#eab308', green: '#22c55e', blue: '#3b82f6', pink: '#ec4899', purple: '#a855f7', note: '#eab308' }
+const ANN_KIND_LABELS = { highlight: '高亮', underline: '下划线', bold: '加粗', comment: '批注', insert: '插入' }
+
+function annotationsFor(key, target = '') {
+  if (!key || !Array.isArray(state.annotations)) return []
+  const k = String(key).toLowerCase()
+  return state.annotations.filter((item) => item && item.paragraphKey === k && (!target || (item.target || 'orig') === target))
+}
+
+function collectTextUnits(root) {
+  const units = []
+  let offset = 0
+  const walk = (node) => {
+    if (!node) return
+    if (node.nodeType === 3) {
+      const txt = node.textContent || ''
+      if (txt.length > 0) {
+        units.push({ kind: 'text', node, text: txt, start: offset, end: offset + txt.length })
+        offset += txt.length
+      }
+      return
+    }
+    if (node.nodeType !== 1) return
+    const cls = node.classList
+    if (cls && (cls.contains('footnote-tag') || cls.contains('ann-bubble') || cls.contains('ann-insert-chip') || cls.contains('ann-popover'))) return
+    const tex = typeof node.getAttribute === 'function' ? node.getAttribute('data-tex') : null
+    if (tex) {
+      units.push({ kind: 'atomic', node, text: tex, start: offset, end: offset + tex.length })
+      offset += tex.length
+      return
+    }
+    const kids = node.childNodes || node.children || []
+    for (const child of [...kids]) walk(child)
+  }
+  walk(root)
+  return { units, fullText: units.map((u) => u.text).join('') }
+}
+
+function resolveOffsetInUnits(units, targetNode, targetOffset) {
+  if (!targetNode) return null
+  if (targetNode.nodeType === 3) {
+    const u = units.find((item) => item.node === targetNode)
+    if (u) return u.start + Math.max(0, Math.min(targetOffset || 0, u.text.length))
+  }
+  if (targetNode.nodeType === 1) {
+    const texOwner = targetNode.closest ? targetNode.closest('[data-tex]') : null
+    const owner = texOwner || targetNode
+    const atomic = units.find((item) => item.node === owner)
+    if (atomic) return atomic.start + (targetOffset > 0 ? atomic.text.length : 0)
+    const kids = targetNode.childNodes || targetNode.children || []
+    if (targetOffset < kids.length) {
+      const first = kids[targetOffset]
+      const hit = units.find((u) => u.node === first || (first.contains && first.contains(u.node)))
+      if (hit) return hit.start
+    }
+  }
+  return null
+}
+
+function captureRichSelectionSnapshot(selection, fallbackText) {
+  if (!state.current || !selection || selection.rangeCount === 0) return null
+  const range = typeof selection.getRangeAt === 'function' ? selection.getRangeAt(0) : null
+  const anchor = range?.startContainer || selection.anchorNode
+  const el = anchor && (anchor.nodeType === 1 ? anchor : anchor.parentElement)
+  if (!el || !el.closest) return null
+  const paraEl = el.closest('.para[data-key]')
+  if (!paraEl) return null
+  const paragraphKey = String(paraEl.getAttribute('data-key') || '').trim().toLowerCase()
+  if (!paragraphKey) return null
+  const inZh = Boolean(el.closest('.para-zh'))
+  const target = inZh ? 'zh' : 'orig'
+  const container = inZh ? paraEl.querySelector('.zh-text') || paraEl.querySelector('.para-zh') : paraEl.querySelector('.para-orig')
+  if (!container) return null
+  const { units, fullText } = collectTextUnits(container)
+  if (!fullText) return null
+
+  let startOffset = range ? resolveOffsetInUnits(units, range.startContainer, range.startOffset) : null
+  let endOffset = range ? resolveOffsetInUnits(units, range.endContainer, range.endOffset) : null
+  const cleanQuote = String(fallbackText || '').trim()
+  if (startOffset === null || endOffset === null || endOffset < startOffset) {
+    const idx = cleanQuote ? fullText.indexOf(cleanQuote) : -1
+    if (idx >= 0) {
+      startOffset = idx
+      endOffset = idx + cleanQuote.length
+    } else {
+      startOffset = 0
+      endOffset = Math.min(fullText.length, cleanQuote.length || fullText.length)
+    }
+  }
+  if (endOffset < startOffset) [startOffset, endOffset] = [endOffset, startOffset]
+  const quote = fullText.slice(startOffset, endOffset) || cleanQuote
+  const prefix = fullText.slice(Math.max(0, startOffset - 40), startOffset)
+  const suffix = fullText.slice(endOffset, Math.min(fullText.length, endOffset + 40))
+  const paraObj = state.doc?.paragraphs?.find((p) => 'para-' + p.id === paraEl.id)
+  return {
+    paragraphKey,
+    target,
+    startOffset,
+    endOffset,
+    quote,
+    prefix,
+    suffix,
+    page: Number(paraEl.getAttribute('data-page') || paraObj?.page || state.page || 1),
+    sectionId: paraEl.getAttribute('data-section') || paraObj?.section || state.sectionId || null,
+    blockId: paraObj?.blockId || null,
+  }
+}
+
+function resolveAnnotationSpan(ann, fullText) {
+  let start = Math.max(0, Math.min(Number(ann.startOffset) || 0, fullText.length))
+  let end = Math.max(start, Math.min(Number(ann.endOffset) || start, fullText.length))
+  const quote = String(ann.quote || '')
+  if (quote && fullText.slice(start, end) !== quote) {
+    const composite = String(ann.prefix || '') + quote + String(ann.suffix || '')
+    const compIdx = composite.length > quote.length ? fullText.indexOf(composite) : -1
+    if (compIdx >= 0) {
+      start = compIdx + String(ann.prefix || '').length
+      end = start + quote.length
+    } else {
+      const idx = fullText.indexOf(quote)
+      if (idx >= 0) {
+        start = idx
+        end = idx + quote.length
+      }
+    }
+  }
+  return { start, end }
+}
+
+function buildAnnotationWrapper(activeAnns, children) {
+  const classes = ['ann-mark']
+  let bgAnn = null
+  for (const ann of activeAnns) {
+    if (ann.kind === 'highlight') {
+      bgAnn = ann
+      classes.push('ann-hl-' + (ann.color || 'yellow'))
+    } else if (ann.kind === 'underline') {
+      classes.push('ann-underline')
+    } else if (ann.kind === 'bold') {
+      classes.push('ann-bold')
+    } else if (ann.kind === 'comment') {
+      classes.push('ann-has-comment')
+    }
+  }
+  const primary = bgAnn || activeAnns[0]
+  return h(
+    'span',
+    {
+      class: classes.join(' '),
+      'data-ann-id': primary.id,
+      'data-ann-ids': activeAnns.map((a) => a.id).join(','),
+      title: activeAnns.map((a) => (ANN_KIND_LABELS[a.kind] || a.kind) + (a.note ? ': ' + a.note : '')).join(' | '),
+      onclick: (event) => {
+        event.stopPropagation()
+        const rect = event.currentTarget?.getBoundingClientRect ? event.currentTarget.getBoundingClientRect() : { left: 80, top: 120 }
+        openAnnotationPopover(primary, rect)
+      },
+    },
+    children,
+  )
+}
+
+function applyParagraphAnnotations(container, anns) {
+  if (!container || !Array.isArray(anns) || anns.length === 0) return
+  const { units, fullText } = collectTextUnits(container)
+  if (!fullText && anns.every((a) => a.kind !== 'insert')) return
+
+  const resolved = anns.map((ann) => {
+    const span = resolveAnnotationSpan(ann, fullText)
+    return { ann, start: span.start, end: span.end }
+  })
+
+  const pointSet = new Set([0, fullText.length])
+  const styled = []
+  const insertsAt = new Map()
+  const commentsAt = new Map()
+
+  for (const item of resolved) {
+    const { ann, start, end } = item
+    if (ann.kind === 'insert') {
+      const at = Math.max(0, Math.min(end, fullText.length))
+      pointSet.add(at)
+      const list = insertsAt.get(at) || []
+      list.push(ann)
+      insertsAt.set(at, list)
+      continue
+    }
+    if (end > start) {
+      pointSet.add(start)
+      pointSet.add(end)
+      styled.push(item)
+    }
+    if (ann.kind === 'comment') {
+      const at = Math.max(0, Math.min(end, fullText.length))
+      pointSet.add(at)
+      const list = commentsAt.get(at) || []
+      list.push(ann)
+      commentsAt.set(at, list)
+    }
+  }
+
+  for (const unit of units) {
+    if (unit.kind === 'atomic') {
+      const covering = styled.filter((s) => s.start < unit.end && s.end > unit.start).map((s) => s.ann)
+      const afterComments = commentsAt.get(unit.end) || []
+      const afterInserts = insertsAt.get(unit.end) || []
+      if (covering.length > 0 && unit.node.parentElement) {
+        const wrap = buildAnnotationWrapper(covering, [])
+        unit.node.parentElement.insertBefore(wrap, unit.node)
+        wrap.append(unit.node)
+        for (const cAnn of afterComments) wrap.parentElement.insertBefore(renderAnnBubble(cAnn), wrap.nextSibling)
+        for (const iAnn of afterInserts) wrap.parentElement.insertBefore(renderAnnInsertChip(iAnn), wrap.nextSibling)
+      } else if (unit.node.parentElement && (afterComments.length > 0 || afterInserts.length > 0)) {
+        for (const cAnn of afterComments) unit.node.parentElement.insertBefore(renderAnnBubble(cAnn), unit.node.nextSibling)
+        for (const iAnn of afterInserts) unit.node.parentElement.insertBefore(renderAnnInsertChip(iAnn), unit.node.nextSibling)
+      }
+      continue
+    }
+
+    const parent = unit.node.parentElement
+    if (!parent) continue
+    const localCuts = [...pointSet].filter((pt) => pt >= unit.start && pt <= unit.end).sort((a, b) => a - b)
+    const needsTouch =
+      localCuts.length > 2 ||
+      styled.some((s) => s.start < unit.end && s.end > unit.start) ||
+      localCuts.some((pt) => pt > unit.start && (commentsAt.has(pt) || insertsAt.has(pt))) ||
+      (unit.start === 0 && (commentsAt.has(0) || insertsAt.has(0)))
+    if (!needsTouch) continue
+
+    const nodesToInsert = []
+    if (unit.start === 0) {
+      for (const cAnn of commentsAt.get(0) || []) nodesToInsert.push(renderAnnBubble(cAnn))
+      for (const iAnn of insertsAt.get(0) || []) nodesToInsert.push(renderAnnInsertChip(iAnn))
+    }
+    const pts = [unit.start, ...localCuts.filter((pt) => pt > unit.start && pt < unit.end), unit.end]
+    for (let i = 0; i < pts.length - 1; i += 1) {
+      const segStart = pts[i]
+      const segEnd = pts[i + 1]
+      const sliceText = unit.text.slice(segStart - unit.start, segEnd - unit.start)
+      if (sliceText.length > 0) {
+        const textNode = document.createTextNode(sliceText)
+        const activeAnns = styled.filter((s) => s.start <= segStart && s.end >= segEnd).map((s) => s.ann)
+        nodesToInsert.push(activeAnns.length > 0 ? buildAnnotationWrapper(activeAnns, textNode) : textNode)
+      }
+      if (segEnd > 0) {
+        for (const cAnn of commentsAt.get(segEnd) || []) {
+          nodesToInsert.push(renderAnnBubble(cAnn))
+          commentsAt.delete(segEnd)
+        }
+        for (const iAnn of insertsAt.get(segEnd) || []) {
+          nodesToInsert.push(renderAnnInsertChip(iAnn))
+          insertsAt.delete(segEnd)
+        }
+      }
+    }
+    for (const replacement of nodesToInsert) parent.insertBefore(replacement, unit.node)
+    if (typeof unit.node.remove === 'function') unit.node.remove()
+  }
+}
+
+function renderAnnBubble(ann) {
+  return h(
+    'button',
+    {
+      type: 'button',
+      class: 'ann-bubble',
+      'data-ann-id': ann.id,
+      title: ann.note ? '批注：' + ann.note : '点击编辑批注',
+      onclick: (event) => {
+        event.stopPropagation()
+        const rect = event.currentTarget?.getBoundingClientRect ? event.currentTarget.getBoundingClientRect() : { left: 80, top: 120 }
+        openAnnotationPopover(ann, rect)
+      },
+    },
+    '💬',
+  )
+}
+
+function renderAnnInsertChip(ann) {
+  const preview = String(ann.note || '').trim().replace(/\s+/g, ' ').slice(0, 22)
+  return h(
+    'button',
+    {
+      type: 'button',
+      class: 'ann-insert-chip',
+      'data-ann-id': ann.id,
+      title: ann.note ? '插入：' + ann.note : '点击编辑插入内容',
+      onclick: (event) => {
+        event.stopPropagation()
+        const rect = event.currentTarget?.getBoundingClientRect ? event.currentTarget.getBoundingClientRect() : { left: 80, top: 120 }
+        openAnnotationPopover(ann, rect)
+      },
+    },
+    '‹+ ' + (preview || '插入笔记') + (String(ann.note || '').length > 22 ? '…' : '') + '›',
+  )
+}
+
+function closeAnnotationPopover() {
+  if (state.annPopover && state.annPopover.el) {
+    state.annPopover.el.remove()
+  }
+  state.annPopover = null
+}
+
+function openAnnotationPopover(annOrDraft, rect = { left: 80, top: 120 }) {
+  closeAnnotationPopover()
+  const isNew = !annOrDraft.id
+  const draft = { ...annOrDraft }
+  const vw = Number(window.innerWidth) || 1200
+  const vh = Number(window.innerHeight) || 800
+  const left = Math.max(12, Math.min(Math.max(12, vw - 376), Number(rect.left) || 80))
+  const top = Math.max(12, Math.min(Math.max(12, vh - 240), (Number(rect.top) || 100) + 28))
+
+  let noteText = String(draft.note || '')
+  let color = String(draft.color || (draft.kind === 'insert' ? 'purple' : 'yellow'))
+  const kind = String(draft.kind || 'comment')
+  const titleMap = { comment: isNew ? '添加批注' : '编辑批注', insert: isNew ? '插入批注' : '编辑插入内容', highlight: '高亮标注', underline: '下划线标注', bold: '加粗标注' }
+
+  const textarea = h('textarea', {
+    placeholder: kind === 'insert' ? '输入要插入并折叠展示的内容…' : '输入批注或笔记内容（留空也可只保留标记）…',
+    value: noteText,
+    oninput: (event) => {
+      noteText = event.target.value
+    },
+  })
+
+  const pop = h(
+    'div',
+    {
+      class: 'ann-popover',
+      style: { left: left + 'px', top: top + 'px' },
+      onmousedown: (e) => e.stopPropagation(),
+      onclick: (e) => e.stopPropagation(),
+    },
+    h(
+      'div',
+      { class: 'ann-popover-head' },
+      h('span', {}, titleMap[kind] || '标注'),
+      h('span', { class: 'spacer' }),
+      h('button', { type: 'button', class: 'ghost', onclick: closeAnnotationPopover }, '✕'),
+    ),
+    draft.quote ? h('div', { class: 'ann-popover-quote' }, draft.quote.slice(0, 180)) : null,
+    h(
+      'div',
+      { class: 'ann-popover-actions' },
+      ['yellow', 'green', 'blue', 'pink', 'purple'].map((c) =>
+        h('button', {
+          type: 'button',
+          class: 'floating-dot c-' + c + (color === c ? ' active' : ''),
+          title: '颜色：' + c,
+          onclick: () => {
+            color = c
+            toast('已选颜色：' + c)
+          },
+        }),
+      ),
+    ),
+    textarea,
+    h(
+      'div',
+      { class: 'ann-popover-actions' },
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'primary',
+          onclick: async () => {
+            const payload = { ...draft, kind, color, note: noteText.trim() }
+            closeAnnotationPopover()
+            await saveRichAnnotation(payload)
+          },
+        },
+        '保存',
+      ),
+      !isNew
+        ? h(
+            'button',
+            {
+              type: 'button',
+              class: 'danger',
+              onclick: async () => {
+                closeAnnotationPopover()
+                await deleteAnnotationById(draft.id)
+              },
+            },
+            '删除',
+          )
+        : null,
+      h('button', { type: 'button', class: 'ghost', onclick: closeAnnotationPopover }, '取消'),
+    ),
+  )
+
+  document.body.append(pop)
+  state.annPopover = { el: pop, id: draft.id || '', openedAt: Date.now() }
+  setTimeout(() => textarea.focus && textarea.focus(), 10)
+}
+
+async function saveRichAnnotation(annotation) {
+  if (!state.current) return
+  try {
+    const value = await rpc('annotations.save', { id: state.current.meta.id, annotation })
+    if (Array.isArray(value && value.annotations)) state.annotations = value.annotations
+    toast('已保存标注')
+    render(true)
+  } catch (error) {
+    toast('保存标注失败：' + error.message)
+  }
+}
+
+async function createRichAnnotation(kind, color = 'yellow', note = '', explicitSnapshot = null) {
+  if (!state.current) return null
+  const snap = explicitSnapshot || (state.selection && state.selection.rich) || captureRichSelectionSnapshot(window.getSelection(), pickedText())
+  if (!snap) {
+    toast('请先在对照正文里选中一段文字')
+    return null
+  }
+  const annotation = {
+    paragraphKey: snap.paragraphKey,
+    target: snap.target || 'orig',
+    kind,
+    color: color || 'yellow',
+    startOffset: snap.startOffset,
+    endOffset: snap.endOffset,
+    quote: snap.quote || '',
+    prefix: snap.prefix || '',
+    suffix: snap.suffix || '',
+    note: String(note || ''),
+    page: snap.page || state.page || 1,
+    sectionId: snap.sectionId || null,
+    blockId: snap.blockId || null,
+  }
+  await saveRichAnnotation(annotation)
+  return annotation
+}
+
+async function deleteAnnotationById(annId) {
+  if (!state.current || !annId) return
+  try {
+    const value = await rpc('annotations.delete', { id: state.current.meta.id, ids: [annId] })
+    if (Array.isArray(value && value.annotations)) state.annotations = value.annotations
+    toast('已删除标注')
+    render(true)
+  } catch (error) {
+    toast('删除标注失败：' + error.message)
+  }
+}
+
+async function clearParagraphAnnotations(paragraphKey, rangeFilter = null) {
+  if (!state.current || !paragraphKey) return
+  const anns = annotationsFor(paragraphKey)
+  if (anns.length === 0) return
+  let targetIds = anns.map((a) => a.id)
+  if (rangeFilter && Number.isFinite(rangeFilter.startOffset) && Number.isFinite(rangeFilter.endOffset)) {
+    const overlapped = anns.filter(
+      (a) => (a.target || 'orig') === (rangeFilter.target || 'orig') && !(a.endOffset <= rangeFilter.startOffset || a.startOffset >= rangeFilter.endOffset),
+    )
+    if (overlapped.length > 0) targetIds = overlapped.map((a) => a.id)
+  }
+  try {
+    const value = await rpc('annotations.delete', { id: state.current.meta.id, ids: targetIds })
+    if (Array.isArray(value && value.annotations)) state.annotations = value.annotations
+    toast('已清除该段 ' + targetIds.length + ' 条标注')
+    render(true)
+  } catch (error) {
+    toast('清除标注失败：' + error.message)
+  }
+}
+
+async function clearAllAnnotations() {
+  if (!state.current) return
+  if (!window.confirm('清空这篇论文的原文标注？AI 研读笔记与译文不会受到影响。')) return
+  try {
+    await rpc('annotations.clear', { id: state.current.meta.id })
+    state.annotations = []
+    toast('已清空原文标注')
+    render(true)
+  } catch (error) {
+    toast('清空标注失败：' + error.message)
+  }
+}
+
 function renderParaTools(paragraph, key, textValue) {
+  const hasAnns = key ? annotationsFor(key).length > 0 : false
   return h(
     'div',
     {
@@ -2744,6 +3519,21 @@ function renderParaTools(paragraph, key, textValue) {
       },
       '讲解',
     ),
+    hasAnns
+      ? h(
+          'button',
+          {
+            type: 'button',
+            class: 'para-tool-btn',
+            title: '清除本段所有高亮与批注',
+            onclick: (e) => {
+              e.stopPropagation()
+              clearParagraphAnnotations(key)
+            },
+          },
+          '清除标注',
+        )
+      : null,
     paragraph.page
       ? h(
           'button',
@@ -2893,6 +3683,8 @@ function renderParagraph(paragraph) {
   if (kind === 'footnote' && origNode) {
     origNode.prepend(h('span', { class: 'footnote-tag' }, '注'))
   }
+  const origAnns = annotationsFor(key, 'orig')
+  if (origNode && origAnns.length > 0) applyParagraphAnnotations(origNode, origAnns)
   const para = h(
     'div',
     {
@@ -2949,7 +3741,15 @@ function renderParagraph(paragraph) {
     )
     return para
   }
-  if (key) para.append(h('div', { class: 'para-zh', 'data-zh': key }, ...zhContent(key, entry && entry.zh, state.streams.get(key))))
+  if (key) {
+    const zhWrap = h('div', { class: 'para-zh', 'data-zh': key }, ...zhContent(key, entry && entry.zh, state.streams.get(key)))
+    const zhAnns = entry && entry.zh ? annotationsFor(key, 'zh') : []
+    if (zhAnns.length > 0) {
+      const box = zhWrap.querySelector ? zhWrap.querySelector('.zh-text') : null
+      if (box) applyParagraphAnnotations(box, zhAnns)
+    }
+    para.append(zhWrap)
+  }
   para.append(renderParaTools(paragraph, key, textValue))
   const figures = key && state.figuresByKey ? state.figuresByKey[key] : null
   // 图挂在自己的图注段落上时，段落正文就是图注，图里不必再重复一遍
@@ -3012,6 +3812,12 @@ function renderCompareToolbar() {
       state.logs.open ||
       (state.layoutApplied && state.layoutSchemaVersion >= 2 && state.layoutQuality !== 'passed'),
   )
+  const running = Boolean(state.translateBusy || (state.translateJob && state.translateJob.status === 'running'))
+  const paused = Boolean(!running && state.translateJob && state.translateJob.status === 'paused')
+  const countSuffix =
+    state.translateJob && Number(state.translateJob.total) > 0
+      ? ' (' + Math.min(Number(state.translateJob.completed) || 0, Number(state.translateJob.total)) + '/' + state.translateJob.total + ')'
+      : ''
   return h(
     'div',
     { class: 'toolbar compare-toolbar' },
@@ -3025,14 +3831,15 @@ function renderCompareToolbar() {
           class: 'switch' + (state.ai.translateOn ? ' on' : ''),
           role: 'switch',
           'aria-checked': state.ai.translateOn ? 'true' : 'false',
-          title: '打开后对当前节逐段翻译（存入本地 SQLite，不进对话历史）',
+          title: '打开后对当前节逐段翻译（存入存储后端，不进对话历史）',
           onclick: toggleTranslate,
         },
         '译',
       ),
-      h('button', { id: 'translate-section', disabled: !docReady || state.translateBusy, onclick: () => translateSection(state.sectionId || (sectionsOf()[0] && sectionsOf()[0].id)) }, '译本节'),
-      h('button', { id: 'translate-all', disabled: !docReady || state.translateBusy, onclick: confirmTranslateAll }, '整篇翻译'),
-      h('button', { id: 'translate-stop', hidden: !state.translateBusy, disabled: !state.translateBusy, onclick: stopTranslate }, '停止'),
+      h('button', { id: 'translate-section', disabled: !docReady || running, onclick: () => translateSection(state.sectionId || (sectionsOf()[0] && sectionsOf()[0].id)) }, '译本节'),
+      h('button', { id: 'translate-all', disabled: !docReady || running, onclick: confirmTranslateAll }, '整篇翻译'),
+      h('button', { id: 'translate-stop', class: 'btn-pause-trans', hidden: !running, disabled: !running, title: '显式暂停当前后台翻译（切走界面不会中断翻译）', onclick: pauseTranslate }, '⏸ 暂停翻译' + countSuffix),
+      h('button', { id: 'translate-resume', class: 'btn-resume-trans', hidden: !paused, disabled: !docReady || running, title: '从上次暂停断点继续翻译剩余未译段落', onclick: resumeTranslate }, '▶ 继续翻译' + countSuffix),
       h('button', { id: 'retry-failed', hidden: retryable.length === 0, title: '重新请求这些翻译失败的段落', onclick: retryFailedSegments }, '重试失败 ' + retryable.length),
       status ? h('span', { class: 'translate-status' + (status === state.translateError ? ' error' : ''), id: 'translate-status' }, status) : h('span', { class: 'translate-status', id: 'translate-status' }, ''),
     ),
@@ -3370,20 +4177,252 @@ function explainPage() {
 
 // ---------------------------------------------------------------- 笔记 / 卡片
 
+function triggerDownload(filename, content, mime = 'text/plain;charset=utf-8') {
+  try {
+    const blob = new Blob([String(content || '')], { type: mime })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename || 'export.txt'
+    document.body.append(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch {
+    copyText(String(content || ''))
+    toast('已复制到剪贴板（当前环境不支持直接下载）')
+  }
+}
+
+async function exportPaperMarkdown(includeTrans = true) {
+  if (!state.current) return
+  try {
+    const res = await rpc('paper.exportMarkdown', { id: state.current.meta.id, includeTrans })
+    triggerDownload(res.filename || state.current.meta.id + '-notes.md', res.markdown || '', 'text/markdown;charset=utf-8')
+    toast('已导出研读归档：' + (res.filename || 'notes.md'))
+  } catch (error) {
+    toast('导出失败：' + error.message)
+  }
+}
+
+async function exportDbSnapshot(paperIds = null) {
+  try {
+    const res = await rpc('db.export', paperIds ? { paperIds } : {})
+    const file =
+      (Array.isArray(paperIds) && paperIds.length === 1 ? paperIds[0] : 'paper-workbench') +
+      '-backup-' +
+      new Date().toISOString().slice(0, 10) +
+      '.json'
+    triggerDownload(file, JSON.stringify(res.snapshot, null, 2), 'application/json;charset=utf-8')
+    toast('已导出数据备份：' + file)
+  } catch (error) {
+    toast('导出备份失败：' + error.message)
+  }
+}
+
+function importDbSnapshot() {
+  const input = h('input', { type: 'file', accept: '.json,application/json' })
+  input.onchange = async () => {
+    const file = input.files && input.files[0]
+    if (!file) return
+    try {
+      const text = await file.text()
+      const snapshot = JSON.parse(text)
+      const res = await rpc('db.import', { snapshot, mode: 'merge' })
+      toast('已导入：' + res.papers + ' 篇 · ' + res.translations + ' 译文 · ' + res.annotations + ' 标注 · ' + res.studyNotes + ' 笔记')
+      if (state.current) await loadDoc(state.current.meta.id)
+      render(true)
+    } catch (error) {
+      toast('导入备份失败：' + error.message)
+    }
+  }
+  input.click()
+}
+
+function jumpToAnnotationTarget(ann) {
+  if (!ann) return
+  if (ann.paragraphKey && state.doc && Array.isArray(state.doc.paragraphs)) {
+    const p = state.doc.paragraphs.find((item) => item.hash && String(item.hash).toLowerCase() === ann.paragraphKey)
+    if (p) {
+      state.tab = 'compare'
+      render(true)
+      const node = document.getElementById('para-' + p.id)
+      if (node) {
+        node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        node.classList.add('flash')
+        setTimeout(() => node.classList.remove('flash'), 1600)
+        return
+      }
+    }
+  }
+  jumpToPage(ann.page || 1)
+}
+
 function renderNotesPane() {
   const notes = state.current.notes || { highlights: [] }
   const highlights = notes.highlights || []
+  const anns = Array.isArray(state.annotations) ? state.annotations : []
+  const studyNotes = Array.isArray(state.studyNotes) ? state.studyNotes : []
+  const filter = state.annFilter || 'all'
+  const filteredAnns = anns.filter((ann) => {
+    if (filter === 'all') return true
+    if (filter === 'highlight') return ann.kind === 'highlight'
+    if (filter === 'style') return ann.kind === 'underline' || ann.kind === 'bold'
+    if (filter === 'comment') return ann.kind === 'comment' || ann.kind === 'insert'
+    return true
+  })
+
   const pane = h('div', { class: 'pane' })
   pane.append(
     h(
       'div',
       { class: 'toolbar', style: { borderBottom: 'none', padding: '0 0 10px' } },
-      h('span', { class: 'muted' }, highlights.length + ' 条高亮'),
+      h('span', { class: 'muted' }, studyNotes.length + ' 篇研读笔记 · ' + (anns.length + highlights.length) + ' 条标注'),
       h('span', { class: 'spacer' }),
-      h('button', { onclick: () => insertPrompt(P.deepRead(state.current.meta)), title: '让 agent 精读全文并写入 Obsidian（走会话）' }, '精读整篇（交给会话）'),
+      h('button', { onclick: () => exportPaperMarkdown(true), title: '导出包含研读笔记、标注与双语对照的 Markdown 文档' }, '导出 Markdown'),
+      h('button', { onclick: () => exportDbSnapshot([state.current.meta.id]), title: '导出本篇译文/标注/研读笔记便携备份 JSON' }, '导出数据包'),
+      anns.length > 0
+        ? h('button', { class: 'ghost', onclick: clearAllAnnotations, title: '清除这篇论文的所有原文标注（不影响研读笔记）' }, '清空标注')
+        : null,
+      h(
+        'button',
+        {
+          onclick: () =>
+            obsidianEnabled()
+              ? insertPrompt(P.deepRead(state.current.meta))
+              : askSelection('请精读《' + state.current.meta.title + '》（id="' + state.current.meta.id + '"）全篇并调用 paper_notes(action="save_study_note") 保存一份结构化中文精读笔记。', { page: 1 }),
+          title: obsidianEnabled() ? '让 agent 精读全文并写入 Obsidian（走会话）' : '让 agent 精读全文并保存研读笔记',
+        },
+        obsidianEnabled() ? '精读整篇（交给会话）' : '精读并存笔记',
+      ),
     ),
   )
-  if (highlights.length === 0) pane.append(h('div', { class: 'hint' }, '还没有笔记。到原文页或对照视图选中一段文字，点「高亮」即可收藏到这里。'))
+
+  pane.append(
+    h(
+      'div',
+      { class: 'notes-section-head' },
+      h('span', {}, 'AI 讲解与研读笔记 (' + studyNotes.length + ')'),
+      h('span', { class: 'spacer' }),
+      h(
+        'button',
+        {
+          class: 'ghost',
+          onclick: async () => {
+            const title = window.prompt('研读笔记标题：', '§' + (state.page || 1) + ' 研读总结')
+            if (!title) return
+            const md = window.prompt('笔记正文（支持 Markdown）：', '')
+            if (!md || !md.trim()) return
+            try {
+              const res = await rpc('studyNotes.save', {
+                id: state.current.meta.id,
+                note: { title: title.trim(), page: state.page || 1, sectionId: state.sectionId || null, scope: 'section', markdown: md.trim() },
+              })
+              state.studyNotes = res.studyNotes || []
+              toast('已保存研读笔记')
+              render()
+            } catch (error) {
+              toast('保存失败：' + error.message)
+            }
+          },
+        },
+        '＋ 新建笔记',
+      ),
+    ),
+  )
+  if (studyNotes.length === 0) {
+    pane.append(h('div', { class: 'hint' }, '还没有 AI 研读笔记。在右侧让 Agent「讲解本节」或「讲解选中」，会自动归纳整理到这里。'))
+  }
+  for (const sn of studyNotes) {
+    pane.append(
+      h(
+        'div',
+        { class: 'study-note-card' },
+        h(
+          'div',
+          { class: 'study-note-head' },
+          h('span', { class: 'study-note-title' }, sn.title || '研读笔记'),
+          h('span', { class: 'badge' }, sn.scope || 'section'),
+          h('span', { class: 'muted' }, 'p.' + (sn.page || 1)),
+          h('span', { class: 'spacer' }),
+          h('button', { class: 'ghost', onclick: () => jumpToPage(sn.page || 1) }, '跳回 p.' + (sn.page || 1)),
+          h(
+            'button',
+            {
+              class: 'danger',
+              onclick: async () => {
+                try {
+                  const res = await rpc('studyNotes.delete', { id: state.current.meta.id, ids: [sn.id] })
+                  state.studyNotes = res.studyNotes || []
+                  render()
+                } catch (error) {
+                  toast('删除失败：' + error.message)
+                }
+              },
+            },
+            '删除',
+          ),
+        ),
+        sn.anchorQuote ? h('div', { class: 'quote' }, sn.anchorQuote) : null,
+        h('div', { class: 'study-note-body markdown', html: renderMarkdown(sn.markdown || '') }),
+      ),
+    )
+  }
+
+  pane.append(
+    h(
+      'div',
+      { class: 'notes-section-head' },
+      h('span', {}, '原文富标注与高亮 (' + (anns.length + highlights.length) + ')'),
+      h('span', { class: 'spacer' }),
+      [
+        ['all', '全部'],
+        ['highlight', '高亮'],
+        ['style', '下划线/加粗'],
+        ['comment', '批注/插入'],
+      ].map(([fKey, fLabel]) =>
+        h(
+          'button',
+          {
+            class: 'topic-pill' + (filter === fKey ? ' active' : ''),
+            onclick: () => {
+              state.annFilter = fKey
+              render()
+            },
+          },
+          fLabel,
+        ),
+      ),
+    ),
+  )
+
+  if (filteredAnns.length === 0 && highlights.length === 0) {
+    pane.append(h('div', { class: 'hint' }, '还没有原文标注。到「对照」视图划选英文/译文，点浮窗色点、下划线、加粗、💬 批注或 ‹+› 插入即可持久化保存。'))
+  }
+  for (const ann of filteredAnns) {
+    pane.append(
+      h(
+        'div',
+        { class: 'ann-note-card' },
+        ann.quote ? h('div', { class: 'quote' }, ann.quote) : null,
+        h(
+          'div',
+          { class: 'row' },
+          h('span', { class: 'ann-kind-tag' }, ANN_KIND_LABELS[ann.kind] || ann.kind),
+          h('span', { class: 'muted' }, 'p.' + (ann.page || 1) + (ann.target === 'zh' ? ' · 译文' : ' · 原文')),
+          ann.note ? h('span', {}, ann.note) : null,
+        ),
+        h(
+          'div',
+          { class: 'row' },
+          h('button', { onclick: () => jumpToAnnotationTarget(ann) }, '跳回原文'),
+          h('button', { onclick: (e) => openAnnotationPopover(ann, e.currentTarget?.getBoundingClientRect?.() || { left: 100, top: 120 }) }, '编辑'),
+          ann.quote ? h('button', { onclick: () => askSelection(ann.quote, { page: ann.page || 1, sectionId: ann.sectionId || null }) }, NATIVE_READER ? '发送到会话' : '问 AI') : null,
+          h('button', { class: 'danger', onclick: () => deleteAnnotationById(ann.id) }, '删除'),
+        ),
+      ),
+    )
+  }
   for (const [index, highlight] of highlights.entries()) {
     pane.append(
       h(
@@ -3566,19 +4605,68 @@ function renderMessage(message, index) {
 
 // ---------------------------------------------------------------- 设置（原有 + AI 区）
 
+const FALLBACK_TOPIC_PRESETS = [
+  { id: 'llm-agents', label: '大模型与智能体' },
+  { id: 'multimodal-ocr', label: '多模态与文档版面 / OCR' },
+  { id: 'efficient-training', label: '推理加速 / 量化 / 注意力' },
+  { id: 'rag-retrieval', label: '检索增强与知识系统' },
+  { id: 'alignment-eval', label: '对齐 / 安全 / 评测' },
+  { id: 'robotics-vla', label: '具身智能与 VLA' },
+  { id: 'rl-reasoning', label: '强化学习与推理' },
+  { id: 'systems-infra', label: 'AI 基础设施与分布式系统' },
+]
+
 function openSettings() {
   state.showSettings = true
-  // 打开设置页顺手跑一次环境自检；旧宿主没有 doctor.run 时静默降级，不弹 toast
+  state.dbTestResult = null
   loadDoctor()
   loadAi(true).then(() => {
     state.aiDraft = {
       translateModel: (state.aiConfig && state.aiConfig.translateModel) || null,
       chatModel: (state.aiConfig && state.aiConfig.chatModel) || null,
       temperature: state.aiConfig && Number.isFinite(Number(state.aiConfig.temperature)) ? Number(state.aiConfig.temperature) : 0.2,
+      concurrency: Math.min(8, Math.max(1, Math.trunc(Number(state.aiConfig && state.aiConfig.concurrency) || 1))),
     }
-    rpc('settings.get')
-      .then((value) => {
+    Promise.all([
+      rpc('settings.get'),
+      rpc('search.topics').catch(() => ({ topics: FALLBACK_TOPIC_PRESETS })),
+    ])
+      .then(([value, topicData]) => {
         state.settings = value
+        const cfg = (value && value.config) || {}
+        state.fullConfig = cfg
+        if (Array.isArray(topicData && topicData.topics) && topicData.topics.length) {
+          state.latestFeed.topics = topicData.topics
+        }
+        if (cfg.ai && Number.isFinite(Number(cfg.ai.concurrency))) {
+          state.aiDraft.concurrency = Math.min(8, Math.max(1, Math.trunc(Number(cfg.ai.concurrency) || 1)))
+        }
+        state.settingsDraft = {
+          python: cfg.python || '',
+          vault: cfg.vault || '',
+          kb: cfg.kb || '',
+          storage: cfg.storage || 'link',
+          obsidian: { enabled: Boolean(cfg.obsidian && cfg.obsidian.enabled), syncStatus: !(cfg.obsidian && cfg.obsidian.syncStatus === false) },
+          topics: {
+            subscribed: Array.isArray(cfg.topics && cfg.topics.subscribed) ? [...cfg.topics.subscribed] : ['llm-agents', 'multimodal-ocr', 'efficient-training'],
+            customText: Array.isArray(cfg.topics && cfg.topics.custom) ? cfg.topics.custom.join(', ') : '',
+            feedSource: (cfg.topics && cfg.topics.feedSource) || 'arxiv',
+          },
+          database: {
+            driver: (cfg.database && cfg.database.driver) || 'sqlite',
+            tablePrefix: (cfg.database && cfg.database.tablePrefix) || 'pb_',
+            host: (cfg.database && cfg.database.host) || '127.0.0.1',
+            port: Number((cfg.database && cfg.database.port) || 3306),
+            database: (cfg.database && cfg.database.database) || 'paper_workbench',
+            user: (cfg.database && cfg.database.user) || '',
+            password: '',
+            clearPassword: false,
+            passwordConfigured: Boolean(cfg.database && cfg.database.passwordConfigured),
+            passwordHint: (cfg.database && cfg.database.passwordHint) || '',
+            ssl: Boolean(cfg.database && cfg.database.ssl),
+          },
+          ocr: Object.assign({}, cfg.ocr || {}),
+        }
         render()
       })
       .catch((error) => toast(error.message))
@@ -3662,21 +4750,36 @@ function renderSettings() {
     translateModel: ai.translateModel || null,
     chatModel: ai.chatModel || null,
     temperature: Number.isFinite(Number(ai.temperature)) ? Number(ai.temperature) : 0.2,
+    concurrency: Math.min(8, Math.max(1, Math.trunc(Number(ai.concurrency) || 1))),
   }
+  if (!state.settingsDraft) {
+    state.settingsDraft = {
+      python: config.python || '',
+      vault: config.vault || '',
+      kb: config.kb || '',
+      storage: config.storage || 'link',
+      obsidian: { enabled: Boolean(config.obsidian && config.obsidian.enabled), syncStatus: true },
+      topics: { subscribed: ['llm-agents', 'multimodal-ocr', 'efficient-training'], customText: '', feedSource: 'arxiv' },
+      database: { driver: 'sqlite', tablePrefix: 'pb_', host: '127.0.0.1', port: 3306, database: 'paper_workbench', user: '', password: '', clearPassword: false, passwordConfigured: false, ssl: false },
+      ocr: Object.assign({}, config.ocr || {}),
+    }
+  }
+  const sd = state.settingsDraft
+  const topicCatalog = (state.latestFeed.topics && state.latestFeed.topics.length ? state.latestFeed.topics : FALLBACK_TOPIC_PRESETS)
+
   const field = (key, label, placeholder) => {
     const id = 'set-' + key
     return h(
       'div',
       { class: 'field' },
-      // label 用 for 关联到 input：点标签也能聚焦，屏幕阅读器也能读对
       h('label', { for: id }, label),
       h('input', {
         id,
         type: 'text',
-        value: config[key] || '',
+        value: sd[key] || '',
         placeholder: placeholder || '',
         onchange: (event) => {
-          config[key] = event.target.value
+          sd[key] = event.target.value
         },
       }),
     )
@@ -3697,14 +4800,25 @@ function renderSettings() {
         ...modelOptions(draft[key]),
       ),
     )
+
+  const dbPayloadFromDraft = () => ({
+    driver: sd.database.driver || 'sqlite',
+    tablePrefix: sd.database.tablePrefix || 'pb_',
+    host: sd.database.host || '127.0.0.1',
+    port: Number(sd.database.port) || (sd.database.driver === 'postgres' ? 5432 : 3306),
+    database: sd.database.database || 'paper_workbench',
+    user: sd.database.user || '',
+    password: sd.database.password || '',
+    clearPassword: Boolean(sd.database.clearPassword),
+    ssl: Boolean(sd.database.ssl),
+  })
+
   return h(
     'div',
     { class: 'modal settings-view' },
     h('div', { class: 'modal-head' }, h('h3', {}, '设置'), h('span', { class: 'spacer' }), h('button', { class: 'ghost', onclick: () => { state.showSettings = false; render() } }, '✕')),
     h('div', { class: 'hint' }, '数据目录：' + (settings.dataRoot || '')),
     field('python', 'Python 路径（留空自动探测）', 'F:\\ProGramApp\\Anaconda\\python.exe'),
-    field('vault', 'Obsidian vault 路径（留空自动探测）', 'D:\\系统组件\\文档\\Obsidian Vault'),
-    field('kb', '论文知识库目录（留空自动探测）', '...\\F盘编程知识库\\论文知识库'),
     h(
       'div',
       { class: 'field' },
@@ -3713,38 +4827,296 @@ function renderSettings() {
         'select',
         {
           onchange: (event) => {
-            config.storage = event.target.value
+            sd.storage = event.target.value
           },
         },
-        h('option', { value: 'link', selected: config.storage !== 'copy' }, 'link：只记原路径（省磁盘）'),
-        h('option', { value: 'copy', selected: config.storage === 'copy' }, 'copy：复制进库（移动原文件也不怕）'),
+        h('option', { value: 'link', selected: sd.storage !== 'copy' }, 'link：只记原路径（省磁盘）'),
+        h('option', { value: 'copy', selected: sd.storage === 'copy' }, 'copy：复制进库（移动原文件也不怕）'),
       ),
     ),
-    h('div', { class: 'divider' }, NATIVE_READER ? 'AI 翻译' : 'AI（翻译 / 对话）'),
+
+    h('div', { class: 'divider' }, NATIVE_READER ? 'AI 翻译与并发' : 'AI（翻译 / 对话 / 并发）'),
     modelSelect('ai-translate-model', '翻译模型', 'translateModel'),
     NATIVE_READER ? h('p', { class: 'hint' }, '聊天模型与思考程度在右侧原生输入框中选择。') : modelSelect('ai-chat-model', '对话模型', 'chatModel'),
     h(
       'div',
-      { class: 'field' },
-      h('label', {}, '温度（0–1，默认 0.2；越低越稳定）'),
-      h('input', {
-        id: 'ai-temperature',
-        type: 'number',
-        min: '0',
-        max: '1',
-        step: '0.05',
-        value: String(draft.temperature),
-        // 保存按钮点击前如果输入框还没失焦，change 可能来不及触发；input 也记一次，避免温度白改
-        oninput: (event) => {
-          draft.temperature = Math.max(0, Math.min(1, Number(event.target.value) || 0))
-        },
-        onchange: (event) => {
-          draft.temperature = Math.max(0, Math.min(1, Number(event.target.value) || 0))
-        },
+      { class: 'db-grid' },
+      h(
+        'div',
+        { class: 'field' },
+        h('label', { for: 'ai-concurrency' }, '翻译并发数（1–8，按原文顺序派发请求）'),
+        h('input', {
+          id: 'ai-concurrency',
+          type: 'number',
+          min: '1',
+          max: '8',
+          step: '1',
+          value: String(draft.concurrency || 1),
+          oninput: (event) => {
+            draft.concurrency = Math.min(8, Math.max(1, Math.trunc(Number(event.target.value) || 1)))
+          },
+        }),
+      ),
+      h(
+        'div',
+        { class: 'field' },
+        h('label', { for: 'ai-temperature' }, '温度（0–1，默认 0.2）'),
+        h('input', {
+          id: 'ai-temperature',
+          type: 'number',
+          min: '0',
+          max: '1',
+          step: '0.05',
+          value: String(draft.temperature),
+          oninput: (event) => {
+            draft.temperature = Math.max(0, Math.min(1, Number(event.target.value) || 0))
+          },
+        }),
+      ),
+    ),
+
+    h('div', { class: 'divider' }, '关注研究方向（在线检索页自动列出最新论文）'),
+    h(
+      'div',
+      { class: 'topic-check-grid' },
+      topicCatalog.map((t) => {
+        const checked = sd.topics.subscribed.includes(t.id)
+        return h(
+          'label',
+          { class: 'topic-check-item' },
+          h('input', {
+            type: 'checkbox',
+            checked,
+            onchange: (event) => {
+              if (event.target.checked) {
+                if (!sd.topics.subscribed.includes(t.id)) sd.topics.subscribed = [...sd.topics.subscribed, t.id]
+              } else {
+                sd.topics.subscribed = sd.topics.subscribed.filter((x) => x !== t.id)
+              }
+            },
+          }),
+          h('span', {}, t.label),
+        )
       }),
     ),
-    state.aiConfig && state.aiConfig.target ? h('div', { class: 'hint' }, '目标语言：' + state.aiConfig.target) : null,
-    state.aiModels && state.aiModels.ready === false ? h('div', { class: 'hint error' }, 'AI 暂不可用：' + (state.aiModels.reason || '宿主没有提供模型')) : null,
+    h(
+      'div',
+      { class: 'db-grid' },
+      h(
+        'div',
+        { class: 'field' },
+        h('label', { for: 'topics-custom' }, '自定义关注关键词（英文/中文，逗号分隔）'),
+        h('input', {
+          id: 'topics-custom',
+          type: 'text',
+          placeholder: 'e.g. KV cache, speculative decoding, OCR',
+          value: sd.topics.customText || '',
+          oninput: (event) => {
+            sd.topics.customText = event.target.value
+          },
+        }),
+      ),
+      h(
+        'div',
+        { class: 'field' },
+        h('label', {}, '最新论文源'),
+        h(
+          'select',
+          {
+            onchange: (event) => {
+              sd.topics.feedSource = event.target.value
+            },
+          },
+          h('option', { value: 'arxiv', selected: sd.topics.feedSource === 'arxiv' }, 'arXiv 最新投稿（推荐）'),
+          h('option', { value: 'openalex', selected: sd.topics.feedSource === 'openalex' }, 'OpenAlex 近 90 天'),
+          h('option', { value: 'both', selected: sd.topics.feedSource === 'both' }, 'arXiv + OpenAlex 合并去重'),
+        ),
+      ),
+    ),
+
+    h('div', { class: 'divider' }, '数据存储后端与迁移（SQLite / PostgreSQL / MySQL）'),
+    h(
+      'div',
+      { class: 'db-grid' },
+      h(
+        'div',
+        { class: 'field' },
+        h('label', { for: 'db-driver' }, '存储后端驱动'),
+        h(
+          'select',
+          {
+            id: 'db-driver',
+            onchange: (event) => {
+              const drv = event.target.value
+              sd.database.driver = drv
+              if (drv === 'postgres' && (!sd.database.port || sd.database.port === 3306)) sd.database.port = 5432
+              if (drv === 'mysql' && (!sd.database.port || sd.database.port === 5432)) sd.database.port = 3306
+              state.dbTestResult = null
+              render()
+            },
+          },
+          h('option', { value: 'sqlite', selected: sd.database.driver === 'sqlite' }, 'SQLite（默认，零配置）'),
+          h('option', { value: 'postgres', selected: sd.database.driver === 'postgres' }, 'PostgreSQL（纯 Node 协议）'),
+          h('option', { value: 'mysql', selected: sd.database.driver === 'mysql' }, 'MySQL / MariaDB（纯 Node 协议）'),
+        ),
+      ),
+      h(
+        'div',
+        { class: 'field' },
+        h('label', { for: 'db-prefix' }, '表前缀（仅允许字母/数字/下划线）'),
+        h('input', {
+          id: 'db-prefix',
+          type: 'text',
+          value: sd.database.tablePrefix || 'pb_',
+          oninput: (event) => {
+            sd.database.tablePrefix = event.target.value
+          },
+        }),
+      ),
+    ),
+    sd.database.driver !== 'sqlite'
+      ? h(
+          'div',
+          { class: 'db-grid' },
+          h(
+            'div',
+            { class: 'field' },
+            h('label', {}, '主机（Host）'),
+            h('input', { type: 'text', value: sd.database.host, oninput: (e) => { sd.database.host = e.target.value } }),
+          ),
+          h(
+            'div',
+            { class: 'field' },
+            h('label', {}, '端口（Port）'),
+            h('input', { type: 'number', value: String(sd.database.port), oninput: (e) => { sd.database.port = Number(e.target.value) || 3306 } }),
+          ),
+          h(
+            'div',
+            { class: 'field' },
+            h('label', {}, '数据库名'),
+            h('input', { type: 'text', value: sd.database.database, oninput: (e) => { sd.database.database = e.target.value } }),
+          ),
+          h(
+            'div',
+            { class: 'field' },
+            h('label', {}, '用户名'),
+            h('input', { type: 'text', value: sd.database.user, oninput: (e) => { sd.database.user = e.target.value } }),
+          ),
+          h(
+            'div',
+            { class: 'field' },
+            h('label', {}, sd.database.passwordConfigured ? '密码（已保存 ' + (sd.database.passwordHint || '***') + '，留空不修改）' : '密码'),
+            h('input', {
+              type: 'password',
+              autocomplete: 'off',
+              placeholder: sd.database.passwordConfigured ? '留空保持不变' : '数据库密码',
+              oninput: (e) => {
+                sd.database.password = e.target.value
+                sd.database.clearPassword = false
+              },
+            }),
+          ),
+          h(
+            'div',
+            { class: 'field' },
+            h('label', {}, 'TLS / SSL'),
+            h(
+              'select',
+              {
+                onchange: (e) => {
+                  sd.database.ssl = e.target.value === 'true'
+                },
+              },
+              h('option', { value: 'false', selected: !sd.database.ssl }, '自动 / 关闭'),
+              h('option', { value: 'true', selected: Boolean(sd.database.ssl) }, '强制 TLS 加密'),
+            ),
+          ),
+        )
+      : null,
+    h(
+      'div',
+      { class: 'field-row' },
+      h(
+        'button',
+        {
+          class: 'ghost',
+          disabled: state.dbBusy !== '',
+          onclick: async () => {
+            state.dbBusy = 'test'
+            render()
+            try {
+              state.dbTestResult = await rpc('db.test', { database: dbPayloadFromDraft() })
+            } catch (error) {
+              state.dbTestResult = { ok: false, error: error.message }
+            } finally {
+              state.dbBusy = ''
+              render()
+            }
+          },
+        },
+        state.dbBusy === 'test' ? '测试中…' : '测试连接',
+      ),
+      sd.database.driver !== 'sqlite'
+        ? h(
+            'button',
+            {
+              class: 'ghost',
+              disabled: state.dbBusy !== '',
+              onclick: async () => {
+                if (!window.confirm('将当前激活数据库里的全量译文、标注、研读笔记与自检结果迁移到当前填写的目标数据库？不会删除源库数据。')) return
+                state.dbBusy = 'migrate'
+                render()
+                try {
+                  const res = await rpc('db.migrate', { database: dbPayloadFromDraft(), mode: 'merge' })
+                  state.dbTestResult = {
+                    ok: true,
+                    latencyMs: res.durationMs,
+                    serverVersion: res.targetDriver + '（迁移 ' + res.papers + ' 篇 / 译文 ' + (res.migrated?.translations || 0) + ' / 标注 ' + (res.migrated?.annotations || 0) + '）',
+                  }
+                  toast('迁移完成，校验一致！')
+                } catch (error) {
+                  state.dbTestResult = { ok: false, error: error.message }
+                  toast('迁移失败：' + error.message)
+                } finally {
+                  state.dbBusy = ''
+                  render()
+                }
+              },
+            },
+            state.dbBusy === 'migrate' ? '迁移中…' : '一键迁移到该库',
+          )
+        : null,
+      h('button', { class: 'ghost', onclick: () => exportDbSnapshot(null) }, '导出全库备份 (.json)'),
+      h('button', { class: 'ghost', onclick: importDbSnapshot }, '导入备份 (.json)'),
+    ),
+    state.dbTestResult
+      ? h(
+          'div',
+          { class: 'db-status-banner ' + (state.dbTestResult.ok ? 'ok' : 'err') },
+          state.dbTestResult.ok
+            ? '✓ 连接正常 · ' + (state.dbTestResult.serverVersion || state.dbTestResult.driver || '') + ' · ' + (state.dbTestResult.latencyMs || 0) + 'ms'
+            : '✗ 失败：' + (state.dbTestResult.error || '无法连接'),
+        )
+      : null,
+
+    h('div', { class: 'divider' }, 'Obsidian 知识库联动（可选）'),
+    h(
+      'label',
+      { class: 'topic-check-item' },
+      h('input', {
+        id: 'obsidian-enabled',
+        type: 'checkbox',
+        checked: Boolean(sd.obsidian && sd.obsidian.enabled),
+        onchange: (event) => {
+          sd.obsidian.enabled = event.target.checked
+          render()
+        },
+      }),
+      h('span', {}, '启用 Obsidian 知识库联动（展示「卡片」页签、从笔记库导入及状态同步；默认关闭以保持纯净工作台体验）'),
+    ),
+    sd.obsidian && sd.obsidian.enabled ? field('vault', 'Obsidian vault 路径（留空自动探测）', 'D:\\系统组件\\文档\\Obsidian Vault') : null,
+    sd.obsidian && sd.obsidian.enabled ? field('kb', '论文知识库目录（留空自动探测）', '...\\F盘编程知识库\\论文知识库') : null,
+
     h('div', { class: 'divider' }, '扫描件 OCR（PaddleOCR 云端接口）'),
     h(
       'div',
@@ -3768,18 +5140,18 @@ function renderSettings() {
         'select',
         {
           onchange: (event) => {
-            config.ocr = Object.assign({}, config.ocr || {}, { model: event.target.value })
+            sd.ocr = Object.assign({}, sd.ocr || {}, { model: event.target.value })
           },
         },
         ['PaddleOCR-VL-1.6', 'PP-StructureV3', 'PP-OCRv6'].map((model) =>
-          h('option', { value: model, selected: ((config.ocr || {}).model || 'PaddleOCR-VL-1.6') === model }, model + (model === 'PaddleOCR-VL-1.6' ? '（版面 Markdown，推荐）' : model === 'PP-OCRv6' ? '（纯文字，最快）' : '（结构化版面）')),
+          h('option', { value: model, selected: ((sd.ocr || {}).model || 'PaddleOCR-VL-1.6') === model }, model + (model === 'PaddleOCR-VL-1.6' ? '（版面 Markdown，推荐）' : model === 'PP-OCRv6' ? '（纯文字，最快）' : '（结构化版面）')),
         ),
       ),
     ),
     h(
       'div',
       { class: 'field-row' },
-      h('span', { class: 'hint' }, 'Key 只存在本机 ' + ((settings.dataRoot || '') + '\\config.json') + '（权限 0600），不写进仓库、不进日志、不回传浏览器明文。'),
+      h('span', { class: 'hint' }, 'Key 与密码只存本机配置文件（权限 0600），不进日志、不回传浏览器明文。'),
       h('span', { class: 'spacer' }),
       h(
         'button',
@@ -3805,15 +5177,38 @@ function renderSettings() {
         {
           class: 'primary',
           onclick: async () => {
-            const patch = Object.assign({}, config)
+            const customList = String(sd.topics.customText || '')
+              .split(/[,，\n]/)
+              .map((s) => s.trim())
+              .filter(Boolean)
             const token = (state.ocrToken || '').trim()
-            patch.ocr = Object.assign({}, config.ocr || {}, { token: token ? token : state.ocrClear ? null : '' })
-            try {
-              await rpc('settings.set', { patch })
-            } catch (error) {
-              toast('普通设置保存失败：' + error.message)
+            const patch = {
+              python: sd.python,
+              vault: sd.vault,
+              kb: sd.kb,
+              storage: sd.storage,
+              obsidian: { enabled: Boolean(sd.obsidian.enabled), syncStatus: true },
+              topics: {
+                subscribed: sd.topics.subscribed.slice(),
+                custom: customList,
+                feedSource: sd.topics.feedSource || 'arxiv',
+              },
+              database: dbPayloadFromDraft(),
+              ocr: Object.assign({}, sd.ocr || {}, { token: token ? token : state.ocrClear ? null : '' }),
             }
-            const aiPatch = { translateModel: draft.translateModel, chatModel: draft.chatModel, temperature: draft.temperature }
+            const aiPatch = {
+              translateModel: draft.translateModel,
+              chatModel: draft.chatModel,
+              temperature: draft.temperature,
+              concurrency: Math.min(8, Math.max(1, Math.trunc(Number(draft.concurrency) || 1))),
+            }
+            try {
+              const saved = await rpc('settings.set', { patch })
+              if (saved && saved.config) state.fullConfig = saved.config
+            } catch (error) {
+              toast('设置保存失败：' + error.message)
+              return
+            }
             try {
               await saveAiPatch(aiPatch)
             } catch (error) {
@@ -3823,8 +5218,10 @@ function renderSettings() {
             state.showSettings = false
             state.ocrToken = ''
             state.ocrClear = false
+            state.latestFeed.loaded = false
             await loadHealth()
-            render()
+            if (state.current) await loadDoc(state.current.meta.id).catch(() => {})
+            render(true)
             toast('设置已保存')
           },
         },
@@ -3835,6 +5232,72 @@ function renderSettings() {
 }
 
 // ---------------------------------------------------------------- 在线检索
+
+async function loadLatestFeed(force = false) {
+  state.latestFeed.loading = true
+  state.latestFeed.error = ''
+  render()
+  try {
+    const res = await rpc('search.latest', { force })
+    state.latestFeed.items = Array.isArray(res && res.items) ? res.items : []
+    state.latestFeed.topics = Array.isArray(res && res.topics) && res.topics.length ? res.topics : state.latestFeed.topics
+    state.latestFeed.partialErrors = Array.isArray(res && res.partialErrors) ? res.partialErrors : []
+    state.latestFeed.loaded = true
+  } catch (error) {
+    state.latestFeed.error = error.message
+  } finally {
+    state.latestFeed.loading = false
+    render()
+  }
+}
+
+function renderOnlineResultCard(item) {
+  const pubDate = item.publishedAt || item.published || ''
+  const dateTag = pubDate ? String(pubDate).slice(0, 10) : item.year || ''
+  return h(
+    'div',
+    { class: 'result' },
+    h('div', { class: 't' }, item.title),
+    h(
+      'div',
+      { class: 'a' },
+      item.source ? h('span', { class: 'badge' }, item.source) : null,
+      dateTag ? h('span', { class: 'badge' }, String(dateTag)) : null,
+      Array.isArray(item.categories) && item.categories.length ? h('span', { class: 'badge' }, item.categories[0]) : null,
+      [fmtAuthors(item.authors), item.venue].filter(Boolean).join(' · '),
+    ),
+    h('div', { class: 'abs' }, item.abstract || ''),
+    h(
+      'div',
+      { class: 'row' },
+      h(
+        'button',
+        {
+          class: 'primary',
+          disabled: state.busy === 'import:' + item.title,
+          onclick: async () => {
+            state.busy = 'import:' + item.title
+            render()
+            try {
+              const value = await rpc('search.import', { item })
+              toast('已入库：' + value.meta.title)
+              await loadLibrary()
+              if (value.meta) openPaper(value.meta.id)
+            } catch (error) {
+              toast('入库失败：' + error.message)
+            } finally {
+              state.busy = ''
+              render()
+            }
+          },
+        },
+        item.pdfUrl ? '下载并入库' : '无开放 PDF',
+      ),
+      item.url || item.absUrl ? h('button', { onclick: () => window.open(item.url || item.absUrl, '_blank', 'noopener') }, '打开原文页') : null,
+      h('button', { onclick: () => insertGeneralPrompt('帮我查找并研读这篇论文：' + item.title + (item.doi ? '（DOI ' + item.doi + '）' : '') + '，提炼研究动机、方法设计与核心结论。') }, '让 agent 读'),
+    ),
+  )
+}
 
 function renderOnline() {
   const box = h('div', { class: 'online' })
@@ -3865,7 +5328,9 @@ function renderOnline() {
         h('option', { value: 'openalex', selected: state.online.source === 'openalex' }, '仅 OpenAlex'),
       ),
       h('button', { class: 'primary', onclick: doSearch, disabled: state.online.loading }, state.online.loading ? '检索中…' : '检索'),
-      h('button', { onclick: () => insertGeneralPrompt(P.vaultSearch(state.online.q || '论文')) }, '问笔记库'),
+      obsidianEnabled()
+        ? h('button', { onclick: () => insertGeneralPrompt(P.vaultSearch(state.online.q || '论文')) }, '问笔记库')
+        : h('button', { onclick: () => insertGeneralPrompt('请在当前工作台文献库中梳理与「' + (state.online.q || '论文') + '」相关的已有工作、方法差异与研究空白。') }, '问文献库'),
     ),
   )
   if (state.online.error) box.append(h('div', { class: 'error' }, state.online.error))
@@ -3873,47 +5338,66 @@ function renderOnline() {
     box.append(h('div', { class: 'hint' }, '提示：' + state.online.warnings.join('；')))
   }
   for (const item of state.online.items) {
-    box.append(
+    box.append(renderOnlineResultCard(item))
+  }
+
+  if (state.online.items.length === 0) {
+    const lf = state.latestFeed
+    const subIds = (state.fullConfig && state.fullConfig.topics && state.fullConfig.topics.subscribed) || ['llm-agents', 'multimodal-ocr', 'efficient-training']
+    const catalog = lf.topics && lf.topics.length ? lf.topics : FALLBACK_TOPIC_PRESETS
+    const activeSubs = catalog.filter((t) => subIds.includes(t.id))
+    const feedPanel = h('div', { class: 'feed-panel' })
+    feedPanel.append(
       h(
         'div',
-        { class: 'result' },
-        h('div', { class: 't' }, item.title),
-        h('div', { class: 'a' }, h('span', { class: 'badge' }, item.source || ''), [item.year, fmtAuthors(item.authors), item.venue].filter(Boolean).join(' · ')),
-        h('div', { class: 'abs' }, item.abstract || ''),
+        { class: 'feed-head' },
+        h('strong', {}, '订阅主题最新论文'),
+        h('span', { class: 'hint' }, '按发布时间倒序'),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'ghost', disabled: lf.loading, onclick: () => loadLatestFeed(true) }, lf.loading ? '刷新中…' : '↻ 刷新最新'),
+        h('button', { class: 'ghost', onclick: openSettings }, '⚙ 订阅设置'),
+      ),
+      h(
+        'div',
+        { class: 'topic-pills' },
         h(
-          'div',
-          { class: 'row' },
+          'button',
+          {
+            class: 'topic-pill' + (lf.topicFilter === 'all' ? ' active' : ''),
+            onclick: () => {
+              lf.topicFilter = 'all'
+              render()
+            },
+          },
+          '全部订阅',
+        ),
+        activeSubs.map((t) =>
           h(
             'button',
             {
-              class: 'primary',
-              disabled: state.busy === 'import:' + item.title,
-              onclick: async () => {
-                state.busy = 'import:' + item.title
+              class: 'topic-pill' + (lf.topicFilter === t.id ? ' active' : ''),
+              onclick: () => {
+                lf.topicFilter = t.id
                 render()
-                try {
-                  const value = await rpc('search.import', { item })
-                  toast('已入库：' + value.meta.title)
-                  await loadLibrary()
-                  if (value.meta) openPaper(value.meta.id)
-                } catch (error) {
-                  toast('入库失败：' + error.message)
-                } finally {
-                  state.busy = ''
-                  render()
-                }
               },
             },
-            item.pdfUrl ? '下载并入库' : '无开放 PDF',
+            t.label,
           ),
-          item.url || item.absUrl ? h('button', { onclick: () => window.open(item.url || item.absUrl, '_blank', 'noopener') }, '打开原文页') : null,
-          h('button', { onclick: () => insertGeneralPrompt('帮我查找并研读这篇论文：' + item.title + (item.doi ? '（DOI ' + item.doi + '）' : '') + '，提炼研究动机、方法设计与核心结论。') }, '让 agent 读'),
         ),
       ),
     )
-  }
-  if (!state.online.loading && state.online.items.length === 0 && !state.online.error) {
-    box.append(h('div', { class: 'hint' }, '检索结果来自 arXiv 与 OpenAlex 的开放接口；点「下载并入库」会把 PDF 复制进库。'))
+    if (lf.error) feedPanel.append(h('div', { class: 'error' }, '最新论文拉取失败：' + lf.error))
+    const feedItems = lf.items.filter((item) => {
+      if (!lf.topicFilter || lf.topicFilter === 'all') return true
+      if (Array.isArray(item.topicIds) && item.topicIds.includes(lf.topicFilter)) return true
+      if (Array.isArray(item.matchedTopics) && item.matchedTopics.includes(lf.topicFilter)) return true
+      return false
+    })
+    for (const item of feedItems) feedPanel.append(renderOnlineResultCard(item))
+    if (!lf.loading && feedItems.length === 0 && !lf.error) {
+      feedPanel.append(h('div', { class: 'hint' }, lf.loaded ? '当前筛选主题暂无最新论文，点「↻ 刷新最新」或「⚙ 订阅设置」调整方向。' : '点「↻ 刷新最新」拉取你关注方向的最新预印本论文。'))
+    }
+    box.append(feedPanel)
   }
   return h('div', { class: 'content' }, box)
 }
@@ -3982,6 +5466,20 @@ function uploadPdf() {
   input.click()
 }
 
+async function importFromDir() {
+  const dir = window.prompt('输入本地论文文件夹的绝对路径（会递归扫描子文件夹里的 .pdf 并以文件夹名作分组）：')
+  if (!dir || !dir.trim()) return
+  toast('正在批量扫描目录导入 PDF…')
+  try {
+    const value = await rpc('library.importDir', { dir: dir.trim(), recursive: true })
+    toast('扫描 ' + value.scanned + ' 份 PDF，新入库 ' + value.imported.length + ' 篇，跳过 ' + value.skipped.length + ' 篇')
+    await loadLibrary()
+    render()
+  } catch (error) {
+    toast('目录导入失败：' + error.message)
+  }
+}
+
 async function importFromVault() {
   toast('正在扫描 Obsidian 卡片…')
   try {
@@ -4012,9 +5510,11 @@ function showFloating(x, y, text) {
   const meta = state.current && state.current.meta
   if (!meta) return
   rememberReaderSelection(text)
+  const rich = captureRichSelectionSnapshot(window.getSelection(), text)
   const snapshot = {
     keys: selectionMemory.keys || [],
     host: selectionMemory.host || null,
+    rich,
   }
   state.selection = { text, ...snapshot }
   floatingShownAt = Date.now()
@@ -4022,26 +5522,55 @@ function showFloating(x, y, text) {
   const vh = Number(window.innerHeight) || 800
   const safeX = Number.isFinite(x) ? x : 16
   const safeY = Number.isFinite(y) ? y : 64
-  const left = Math.max(8, Math.min(Math.max(8, vw - 360), safeX))
-  const desiredTop = safeY < 56 ? Math.max(8, safeY) + 26 : safeY - 46
-  const top = Math.max(8, Math.min(Math.max(8, vh - 48), desiredTop))
+  const left = Math.max(8, Math.min(Math.max(8, vw - 390), safeX))
+  const desiredTop = safeY < 72 ? Math.max(8, safeY) + 28 : safeY - (rich ? 74 : 46)
+  const top = Math.max(8, Math.min(Math.max(8, vh - 86), desiredTop))
+  const rectHint = { left, top: top + 36 }
   floating = h(
     'div',
     {
-      class: 'floating-menu',
+      class: 'floating-menu' + (rich ? ' floating-two-row' : ''),
       style: { left: left + 'px', top: top + 'px' },
       onmousedown: (event) => event.preventDefault(),
     },
-    NATIVE_READER
-      ? h('button', { class: 'primary-soft', onclick: () => { const selected = text; hideFloating(); askSelection(selected) } }, '发送到会话')
-      : h('button', { onclick: () => { const selected = text; hideFloating(); askSelection(selected) } }, '问 AI'),
-    h('button', { onclick: () => { const selected = text; hideFloating(); explainTermsSelection(selected) } }, '解释公式/术语'),
-    h('button', { onclick: () => { const selected = text; hideFloating(); translateSelection(selected, snapshot) } }, '翻译'),
-    h('button', { onclick: () => { addHighlight(text); hideFloating() } }, '高亮'),
-    h('button', { onclick: () => { copyText(text); hideFloating() } }, '复制'),
-    !NATIVE_READER
-      ? h('button', { onclick: () => { const selected = text; hideFloating(); insertPrompt(P.askSelection(meta, selected)) } }, '插入会话')
+    rich
+      ? h(
+          'div',
+          { class: 'floating-row floating-row-ann' },
+          ['yellow', 'green', 'blue', 'pink', 'purple'].map((c) =>
+            h('button', {
+              type: 'button',
+              class: 'floating-dot c-' + c,
+              title: '高亮 (' + c + ')',
+              onclick: () => {
+                hideFloating()
+                createRichAnnotation('highlight', c, '', rich)
+              },
+            }),
+          ),
+          h('button', { type: 'button', onclick: () => { hideFloating(); createRichAnnotation('underline', 'blue', '', rich) } }, '下划线'),
+          h('button', { type: 'button', onclick: () => { hideFloating(); createRichAnnotation('bold', 'yellow', '', rich) } }, '加粗'),
+          h('button', { type: 'button', onclick: (event) => { event && event.stopPropagation && event.stopPropagation(); hideFloating(); openAnnotationPopover({ ...rich, kind: 'comment', color: 'yellow', note: '' }, rectHint) } }, '💬 批注'),
+          h('button', { type: 'button', onclick: (event) => { event && event.stopPropagation && event.stopPropagation(); hideFloating(); openAnnotationPopover({ ...rich, kind: 'insert', color: 'purple', note: '' }, rectHint) } }, '‹+› 插入'),
+          annotationsFor(rich.paragraphKey).some((a) => (a.target || 'orig') === rich.target && !(a.endOffset <= rich.startOffset || a.startOffset >= rich.endOffset))
+            ? h('button', { type: 'button', onclick: () => { hideFloating(); clearParagraphAnnotations(rich.paragraphKey, rich) } }, '清除')
+            : null,
+        )
       : null,
+    h(
+      'div',
+      { class: 'floating-row' },
+      NATIVE_READER
+        ? h('button', { class: 'primary-soft', onclick: () => { const selected = text; hideFloating(); askSelection(selected) } }, '发送到会话')
+        : h('button', { onclick: () => { const selected = text; hideFloating(); askSelection(selected) } }, '问 AI'),
+      h('button', { onclick: () => { const selected = text; hideFloating(); explainTermsSelection(selected) } }, '解释公式/术语'),
+      h('button', { onclick: () => { const selected = text; hideFloating(); translateSelection(selected, snapshot) } }, '翻译'),
+      h('button', { onclick: () => { rich ? createRichAnnotation('highlight', 'yellow', '', rich) : addHighlight(text); hideFloating() } }, '高亮'),
+      h('button', { onclick: () => { copyText(text); hideFloating() } }, '复制'),
+      !NATIVE_READER
+        ? h('button', { onclick: () => { const selected = text; hideFloating(); insertPrompt(P.askSelection(meta, selected)) } }, '插入会话')
+        : null,
+    ),
   )
   document.body.append(floating)
 }
@@ -4232,6 +5761,7 @@ document.addEventListener('selectionchange', () => {
 
 document.addEventListener('mouseup', (event) => {
   if (floating && floating.contains(event.target)) return
+  if (state.annPopover && state.annPopover.el && state.annPopover.el.contains(event.target)) return
   const text = selectionText()
   const target = event.target
   // 划词只对正文/对话区域生效；点在按钮、输入框、目录上不弹菜单
@@ -4246,6 +5776,10 @@ document.addEventListener('mouseup', (event) => {
 })
 
 document.addEventListener('click', (event) => {
+  const justOpenedAnn = state.annPopover && Date.now() - (state.annPopover.openedAt || 0) < 120
+  if (state.annPopover && state.annPopover.el && !justOpenedAnn && !state.annPopover.el.contains(event.target)) {
+    closeAnnotationPopover()
+  }
   // 拖选结束时浏览器会在鼠标松开处补一个 click（跨段选择时它落在 .compare 上），
   // 不能让它把刚弹出来的划词菜单立刻关掉——那会让「问 AI」永远点不到。
   const justShown = floating && Date.now() - floatingShownAt < 300
@@ -5998,6 +7532,19 @@ window.__pb = {
   translateSection,
   translateAll,
   translateSelection,
+  pauseTranslate,
+  resumeTranslate,
+  createRichAnnotation,
+  deleteAnnotationById,
+  clearParagraphAnnotations,
+  clearAllAnnotations,
+  openAnnotationPopover,
+  closeAnnotationPopover,
+  applyParagraphAnnotations,
+  extractCleanSelection,
+  loadLatestFeed,
+  importFromDir,
+  exportPaperMarkdown,
   sendChat,
   sectionsOf,
   saveSession,

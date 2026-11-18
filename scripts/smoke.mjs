@@ -10,10 +10,15 @@
  * v2 追加：段落模型（doc.*）、SSE 流式翻译与对话（ai.*）。没有可用模型时这几项退化为
  * 「路由活着 + 有中文错误提示」的检查，不会误报失败。
  */
+import { execFileSync } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
 const BASE = (process.argv[2] || 'http://127.0.0.1:57571').replace(/\/+$/, '')
 const API = BASE + '/paper-workbench/api/'
 const STREAM = BASE + '/paper-workbench/ai/'
-const SAMPLE = 'G:\\笔记\\LLM知识体系论文\\高效微调\\Prompt Tuning.pdf'
+const LOCAL_SAMPLE = 'G:\\笔记\\LLM知识体系论文\\高效微调\\Prompt Tuning.pdf'
 
 let pass = 0
 let fail = 0
@@ -92,6 +97,30 @@ async function sse(path, body, { timeoutMs = 60000 } = {}) {
 async function main() {
   console.log('BASE ' + BASE)
 
+  let SAMPLE = LOCAL_SAMPLE
+  let tmpPdf = ''
+  if (!fs.existsSync(SAMPLE)) {
+    const { findPython } = await import('../lib/pdf.js')
+    const py = await findPython()
+    if (!py || !py.python) throw new Error('无法生成冒烟样例 PDF：缺少 Python + PyMuPDF')
+    tmpPdf = path.join(os.tmpdir(), 'pb-smoke-' + process.pid + '-' + Date.now() + '.pdf')
+    const pyScript = [
+      'import fitz, sys',
+      'doc = fitz.open()',
+      'p1 = doc.new_page()',
+      'p1.insert_text((72, 72), "The Power of Scale for Parameter-Efficient Prompt Tuning", fontsize=16)',
+      'p1.insert_text((72, 110), "1 Introduction", fontsize=13)',
+      'p1.insert_text((72, 138), "Prompt tuning is a simple and effective mechanism for learning soft prompts to condition frozen language models.", fontsize=10.5)',
+      'p2 = doc.new_page()',
+      'p2.insert_text((72, 72), "2 Experiments", fontsize=13)',
+      'p2.insert_text((72, 100), "We evaluate prompt tuning across SuperGLUE benchmarks and observe strong scaling behavior.", fontsize=10.5)',
+      'doc.save(sys.argv[1])',
+    ].join('\n')
+    execFileSync(py.python, ['-c', pyScript, tmpPdf], { stdio: 'pipe' })
+    SAMPLE = tmpPdf
+  }
+
+  try {
   const health = await rpc('health')
   check('health 返回插件信息', health.plugin === 'dsh-paper-workbench', 'phase=' + health.phase)
   check('PyMuPDF 可用', Boolean(health.pdf && health.pdf.ok), health.pdf && health.pdf.python)
@@ -142,7 +171,11 @@ async function main() {
   }
 
   const vault = await rpc('vault.status')
-  check('Obsidian 论文知识库可识别', vault.ok === true, vault.ok ? vault.cards + ' 张卡片' : vault.error)
+  if (vault.ok) {
+    check('Obsidian 论文知识库可识别', true, vault.cards + ' 张卡片')
+  } else {
+    console.log('SKIP  Obsidian 论文知识库未配置或不可用  ' + String(vault.error || ''))
+  }
 
   // ── v2：段落模型 / 流式翻译 / 侧边对话 ─────────────────────────────
   const docValue = await rpc('doc.get', { id }).catch((error) => ({ error }))
@@ -341,6 +374,9 @@ async function main() {
   console.log('')
   console.log('结果：PASS ' + pass + ' / FAIL ' + fail)
   if (fail > 0) process.exitCode = 1
+  } finally {
+    if (tmpPdf) fs.rmSync(tmpPdf, { force: true })
+  }
 }
 
 main().catch((error) => {
