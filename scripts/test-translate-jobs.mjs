@@ -170,9 +170,9 @@ function createFakeServices(handler) {
 }
 
 async function main() {
-  // ---------------------------------------------------------------- 1. concurrency = 3 FIFO 与真实并发加速
+  // ---------------------------------------------------------------- 1. concurrency = 3 FIFO 与真实并发
 
-  await check('concurrency=3：严格按原文 FIFO 顺序发请求、真实并发数为 3、耗时显著低于串行、写库无丢失', async () => {
+  await check('concurrency=3：严格按原文 FIFO 顺序发请求、真实并发数为 3、写库无丢失', async () => {
     const s1 = makeSection({ id: 's1', order: 0, title: '1 Introduction' })
     const s2 = makeSection({ id: 's2', order: 1, title: '2 Method' })
     // 6 个批次（每批 6 段，共 36 段）：chunk 0..2 在 s1，chunk 3..5 在 s2
@@ -187,15 +187,15 @@ async function main() {
     await store.writeDoc('conc-1', makeDoc({ sections: [s1, s2], paragraphs }))
 
     const startedBatches = []
-    const finishedBatches = []
-    // 故意让 chunk 0 比 chunk 1 慢，验证先完成的 chunk 会流式先吐出来，但发起顺序仍严格 FIFO
-    const perBatchDelay = [90, 30, 50, 70, 30, 40]
+    let releaseFirst
+    let releaseOthers
+    const firstBatchGate = new Promise((resolve) => { releaseFirst = resolve })
+    const otherBatchesGate = new Promise((resolve) => { releaseOthers = resolve })
     const services = createFakeServices(async (options, callIndex) => {
       const ids = idsIn(options)
       startedBatches.push(ids[0])
-      const waitMs = perBatchDelay[callIndex] || 30
-      await delay(waitMs, options.signal)
-      finishedBatches.push(ids[0])
+      if (callIndex === 0) await firstBatchGate
+      else if (callIndex < 3) await otherBatchesGate
       return [
         { type: 'text-delta', index: 0, text: JSON.stringify(ids.map((id) => ({ id, zh: '译-' + id }))) },
         { type: 'finish', reason: { kind: 'stop' } },
@@ -203,16 +203,23 @@ async function main() {
     })
 
     const engine = aiModule.createAi({ store, getServices: services.getServices })
-    const t0 = Date.now()
-    const events = await collect(engine.translate({ id: 'conc-1', concurrency: 3 }))
-    const elapsed = Date.now() - t0
+    const result = collect(engine.translate({ id: 'conc-1', concurrency: 3 }))
+    try {
+      await waitFor(() => services.llm.stats().inFlight >= 3)
+      eq(startedBatches, ['p00', 'p06', 'p12'], '首批仍阻塞时，只能按 FIFO 启动前三批')
+      releaseOthers()
+      await waitFor(() => startedBatches.length > 3)
+      eq(startedBatches[3], 'p18', '较晚批次完成后应立即补位，不必等待首批')
+    } finally {
+      releaseOthers()
+      releaseFirst()
+      await result
+    }
+    const events = await result
 
     eq(services.llm.calls.length, 6, '应分为 6 批')
     eq(services.llm.stats().maxInFlight, 3, '并发数必须确实达到 3')
     eq(startedBatches, ['p00', 'p06', 'p12', 'p18', 'p24', 'p30'], '请求必须严格按原文 chunks 顺序 FIFO 发出')
-    ok(finishedBatches[0] !== 'p00', '较快的 chunk 1 应先于较慢的 chunk 0 完成并流式吐出')
-    const serialTotalMs = perBatchDelay.reduce((a, b) => a + b, 0) // 310ms
-    ok(elapsed < serialTotalMs * 0.72, '并发耗时 (' + elapsed + 'ms) 应显著低于串行耗时 (' + serialTotalMs + 'ms)')
 
     const startMeta = events.find((e) => e.event === 'start' && e.data && e.data.kind === 'start')
     ok(Boolean(startMeta), 'start 事件应包含 kind=start 元信息')
@@ -246,7 +253,7 @@ async function main() {
 
   // ---------------------------------------------------------------- 2. concurrency 并发边界 + 截断重试/兜底/tidyMath 一致性
 
-  await check('concurrency 边界夹在 1..8，且并发池下截断翻倍重试、逐段兜底与 tidyMath 一致', async () => {
+  await check('concurrency 边界夹在 1..100，且并发池下截断翻倍重试、逐段兜底与 tidyMath 一致', async () => {
     const s1 = makeSection({ id: 's1' })
     // 2 批（每批 6 段，共 12 段）
     const paragraphs = Array.from({ length: 12 }, (_, n) =>
@@ -290,9 +297,9 @@ async function main() {
     })
 
     const engine = aiModule.createAi({ store, getServices: services.getServices })
-    const events = await collect(engine.translate({ id: 'conc-edge', concurrency: 99 }))
+    const events = await collect(engine.translate({ id: 'conc-edge', concurrency: 999 }))
     const startMeta = events.find((e) => e.event === 'start' && e.data && e.data.kind === 'start')
-    eq(startMeta.data.concurrency, 8, 'concurrency > 8 应夹到 8')
+    eq(startMeta.data.concurrency, 100, 'concurrency > 100 应夹到 100')
     const end = events[events.length - 1]
     eq(end.data.ok, true)
     eq(end.data.done, 12)
@@ -768,23 +775,214 @@ async function main() {
     eq(Object.keys(trans.entries).length, 6, '并发池中止前已完成的 6 段必须完整落盘')
   })
 
+  // ---------------------------------------------------------------- 10. 高并发 concurrency=24（35+ 批次，不均长分节严格 FIFO）
+
+  await check('高并发 concurrency=24：跨 36 个批次（含不同段落数的跨节批次）100% 严格 FIFO 派发且零漏翻', async () => {
+    // 6 个章节，每节 32 段 => 每节分为 [6,6,6,6,6,2] 共 6 批（含 2 段短批次考验微任务竞争），全篇 36 批共 192 段！
+    const sections = Array.from({ length: 6 }, (_, i) =>
+      makeSection({ id: 'hs' + (i + 1), order: i, title: (i + 1) + ' Section ' + (i + 1) }),
+    )
+    const paragraphs = []
+    let pOrder = 0
+    for (const sec of sections) {
+      for (let j = 0; j < 32; j += 1) {
+        paragraphs.push(
+          makeParagraph({
+            id: 'hp' + String(pOrder).padStart(3, '0'),
+            order: pOrder,
+            section: sec.id,
+            text: 'High concurrency paragraph #' + pOrder + ' in ' + sec.id + '.',
+          }),
+        )
+        pOrder += 1
+      }
+    }
+    await store.writeDoc('high-conc-24', makeDoc({ sections, paragraphs }))
+    const expectedChunks = aiModule.chunkItems(paragraphs, { maxChars: 2000, maxItems: 6 })
+    eq(expectedChunks.length, 36, '应切分为 36 个批次（含每节末尾 2 段短批）')
+
+    const dispatchedFirstIds = []
+    const services = createFakeServices(async (options, callIndex) => {
+      const ids = idsIn(options)
+      dispatchedFirstIds.push(ids[0])
+      // 交错随机感延迟，确保完成顺序高度乱序而发起顺序严格 FIFO
+      const waitMs = 15 + ((callIndex * 17) % 35)
+      await delay(waitMs, options.signal)
+      return [
+        { type: 'text-delta', text: JSON.stringify(ids.map((id) => ({ id, zh: '高并发-' + id }))) },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]
+    })
+
+    const engine = aiModule.createAi({ store, getServices: services.getServices })
+    const events = await collect(engine.translate({ id: 'high-conc-24', concurrency: 24 }))
+
+    eq(services.llm.calls.length, 36)
+    eq(services.llm.stats().maxInFlight, 24, '真实最高在途请求数应达到 24')
+    eq(
+      dispatchedFirstIds,
+      expectedChunks.map((c) => c[0].id),
+      '36 个不均长批次必须严格按 0..35 原文 FIFO 顺序派发',
+    )
+    const end = events[events.length - 1]
+    eq(end.data.ok, true)
+    eq(end.data.done, 192)
+    eq(end.data.failed, 0)
+    const trans = await store.readTrans('high-conc-24')
+    eq(Object.keys(trans.entries).length, 192, '192 段译文必须全部落盘无一遗漏')
+  })
+
+  // ---------------------------------------------------------------- 11. 多重 429 下 AIMD 乘性降窗与加性恢复
+
+  await check('AIMD 429 保护：遭遇多次 429 自动指数退避 + 并发窗口减半，连续成功后线性恢复，全篇零丢段', async () => {
+    const s1 = makeSection({ id: 's1', title: '1 Method' })
+    // 20 批 × 6 段 = 120 段
+    const paragraphs = Array.from({ length: 120 }, (_, n) =>
+      makeParagraph({
+        id: 'aimd' + String(n).padStart(3, '0'),
+        order: n,
+        section: 's1',
+        text: 'AIMD test paragraph #' + n + ' for rate limit protection.',
+      }),
+    )
+    await store.writeDoc('aimd-doc', makeDoc({ sections: [s1], paragraphs }))
+
+    const batchAttempts = new Map()
+    const sleptMs = []
+    const rateLimitSnapshots = []
+
+    const services = createFakeServices(async (options) => {
+      const ids = idsIn(options)
+      const head = ids[0]
+      const prev = batchAttempts.get(head) || 0
+      batchAttempts.set(head, prev + 1)
+      await delay(12, options.signal)
+
+      // 第 2 批连续两次触发 429（验证 2000ms -> 4000ms 二次退避 + 两次减半 8->4->2）
+      if (head === 'aimd006' && prev < 2) {
+        return [{ type: 'finish', reason: { kind: 'error', failure: { message: '429 Too Many Requests', status: 429 } } }]
+      }
+      // 第 3 批触发一次 503 overloaded（验证 2->1 保底不低于 1）
+      if (head === 'aimd012' && prev < 1) {
+        return [{ type: 'finish', reason: { kind: 'error', failure: { message: 'upstream overloaded', status: 503 } } }]
+      }
+      return [
+        { type: 'text-delta', text: JSON.stringify(ids.map((id) => ({ id, zh: '稳-' + id }))) },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]
+    })
+
+    const engine = aiModule.createAi({
+      store,
+      getServices: services.getServices,
+      sleepImpl: async (ms) => {
+        sleptMs.push(ms)
+      },
+    })
+    const events = await collect(
+      engine.translate(
+        { id: 'aimd-doc', concurrency: 8 },
+        {
+          onRateLimit: (info) => rateLimitSnapshots.push(info.activeLimit),
+        },
+      ),
+    )
+
+    eq(rateLimitSnapshots, [4, 2, 1], 'AIMD 应在每次 429/503 时减半 activeLimit 直至保底 1')
+    ok(sleptMs.includes(2000) && sleptMs.includes(4000), '连续 429 应按 2000ms -> 4000ms 指数退避，实际 ' + JSON.stringify(sleptMs))
+
+    const progressLimits = events
+      .filter((e) => e.event === 'progress' && Number.isFinite(e.data.activeConcurrency))
+      .map((e) => e.data.activeConcurrency)
+    const minObserved = Math.min(...progressLimits)
+    const lastObserved = progressLimits[progressLimits.length - 1]
+    ok(minObserved <= 2, '降窗后进度事件应观测到低并发窗口，实际最小 ' + minObserved)
+    ok(lastObserved > minObserved, '后续连续无错批次完成后 activeLimit 应加性恢复上升，实际末尾 ' + lastObserved)
+
+    const end = events[events.length - 1]
+    eq(end.data.ok, true)
+    eq(end.data.done, 120)
+    eq(end.data.failed, 0)
+    const trans = await store.readTrans('aimd-doc')
+    eq(Object.keys(trans.entries).length, 120, 'AIMD 退避恢复后 120 段必须 100% 完成零丢段')
+  })
+
+  // ---------------------------------------------------------------- 12. 后台调度器高并发 (1..100) 与自动术语表注入
+
+  await check('后台调度器：支持 concurrency=24（默认未配时为 10）并自动注入论文摘要/术语/已译节标题锚点', async () => {
+    const s1 = makeSection({ id: 's1', order: 0, title: '1 Hardware-Aware FlashAttention' })
+    const paragraphs = [
+      makeParagraph({
+        id: 'jg0',
+        order: 0,
+        section: 's1',
+        text: 'FlashAttention uses SRAM tiling with LoRA and RoPE to cut HBM traffic.',
+      }),
+      makeParagraph({
+        id: 'jg1',
+        order: 1,
+        section: 's1',
+        text: 'In PyTorch, HBM bandwidth remains the primary bottleneck for FlashAttention.',
+      }),
+    ]
+    await store.addPaper({
+      id: 'job-glossary',
+      title: 'FlashAttention System Paper',
+      abstract: 'We optimize FlashAttention on GPU HBM and SRAM with RoPE and LoRA.',
+    })
+    await store.writeDoc('job-glossary', makeDoc({ title: 'FlashAttention System Paper', sections: [s1], paragraphs }))
+    await store.writeTrans('job-glossary', {
+      target: 'zh',
+      entries: {
+        [aiModule.titleKey(s1)]: { zh: '1 硬件感知的闪存注意力' },
+      },
+    })
+
+    const services = createFakeServices(async (options) => {
+      const ids = idsIn(options)
+      await delay(10, options.signal)
+      return [
+        { type: 'text-delta', text: JSON.stringify(ids.map((id) => ({ id, zh: '精译-' + id }))) },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]
+    })
+    const mgr = createTranslateJobManager({
+      ai: aiModule.createAi({ store, getServices: services.getServices }),
+      store,
+      dbBackendOrDb: db,
+    })
+
+    const started = await mgr.startJob({ paperId: 'job-glossary', concurrency: 24 })
+    eq(started.concurrency, 24, '后台任务应保留 24 并发而不被旧上限 8 截断')
+    await waitFor(async () => (await mgr.status('job-glossary'))?.status === 'done', 5000)
+
+    const promptSent = services.llm.calls[0].messages[0].content[0].text
+    ok(promptSent.includes('FlashAttention') && promptSent.includes('SRAM'), '后台翻译任务提示词应包含自动提取术语')
+    ok(
+      promptSent.includes('1 Hardware-Aware FlashAttention -> 1 硬件感知的闪存注意力'),
+      '后台翻译任务提示词应注入已译章节标题对照锚点',
+    )
+  })
+
   // ---------------------------------------------------------------- 收尾
 
   console.log('')
   console.log('检查 ' + (passed + failed) + ' 项：通过 ' + passed + '，失败 ' + failed)
   if (failed === 0) {
-    await store.closeDb()
-    await fsp.rm(tmpRoot, { recursive: true, force: true })
     console.log('ALL PASS')
   } else {
-    console.log('临时目录保留：' + tmpRoot)
     console.log('FAILED ' + failed)
     process.exitCode = 1
   }
 }
 
-main().catch((error) => {
+try {
+  await main()
+} catch (error) {
   console.log('FAIL  测试脚本异常终止 -> ' + (error && error.stack ? error.stack : String(error)))
   console.log('FAILED 1')
   process.exitCode = 1
-})
+} finally {
+  await store.closeDb().catch(() => {})
+  await fsp.rm(tmpRoot, { recursive: true, force: true }).catch(() => {})
+}

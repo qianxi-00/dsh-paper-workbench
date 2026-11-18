@@ -1,50 +1,103 @@
 # dsh-paper-workbench
 
+[![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
+[![dsh-plugin](https://img.shields.io/badge/dsh--plugin-4d6bfe)](https://github.com/topics/dsh-plugin)
+[![CI](https://github.com/qianxi-00/dsh-paper-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/qianxi-00/dsh-paper-workbench/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/qianxi-00/dsh-paper-workbench)](https://github.com/qianxi-00/dsh-paper-workbench/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) 插件：**论文工作台**。
 
-左侧导航多一行「论文工作台」：左区是**文献库 + 目录 + 双语学术阅读器**（支持 **双语 / 并排 / 原文 / 只看译文** 四种排版、PDF 原文页、高亮笔记与 Obsidian 卡片），右栏直接嵌入 **DSH 原生 Agent 会话**。
+左侧导航多一行「论文工作台」：左区是**文献库 + 目录 + 双语学术阅读器**（支持 **双语 / 并排 / 原文 / 只看译文** 四种排版、PDF 原文页透明可交互文本层与框选截图、富原文标注与 Obsidian 卡片），右栏直接嵌入 **DSH 原生 Agent 会话**。
 
-右栏复用宿主原生 `conversation.content` 组件：消息流、思考过程、工具调用、模型与思考程度、权限、附件、语音输入和排队均由 DSH 原生管理；插件只负责精确的会话绑定、论文范围关联、阅读定位与快捷提问（`导读` / `总结全文` / `讲解本节` / `讲解选中` / 双击段落）。点右栏顶部的 `↗ 完整页` 可跳到主界面同一条完整会话，历史、运行状态与附件完全一致。
+右栏复用宿主原生 `conversation.content` 组件：消息流、思考过程、工具调用、模型与思考程度、权限、附件、语音输入和排队均由 DSH 原生管理；插件只负责精确的会话绑定、论文范围关联、阅读定位与快捷提问（`导读` / `总结全文` / `讲解本节` / `讲解选中` / 原文页框选图表截图讲解 / 双击段落）。点右栏顶部的 `↗ 完整页` 可跳到主界面同一条完整会话，历史、运行状态与附件完全一致。
 翻译继续作为独立工具，通过 SSE 逐段生成并存入本地 SQLite（`workbench.db`），不进入聊天历史或污染对话上下文。
 
-> **状态：v1.0.0（首个正式稳定版）** · 已通过多版本 DSH 桌面端公开契约挂载验证、跨平台 CI 自动化矩阵测试，支持有序并发持久翻译、全篇 + 周围图表深度讲解与工作区 Skills、对照富原文标注、订阅科研主题最新 Feed 与零依赖 SQLite / PostgreSQL / MySQL 多存储后端。
+> **状态：v1.1.0** · 零 npm 依赖、零构建步骤。支持一行命令免克隆安装、1–100 自由高并发持久翻译（含 429 自适应退避与全文术语锚定）、arXiv 八大学科导航与 HTTP/SOCKS5/系统网络代理、划词精译卡片与逐段独立折叠、原文页透明可交互文本层与框选图表/公式截图讲解、智能自适应深度讲解与零依赖 SQLite / PostgreSQL / MySQL 多存储后端。
 
-## 一键交给 AI Agent 自动安装（推荐）
+## 🚀 快速安装
 
-复制下面整段指令发送给你正在使用的 Coding Agent（**DSH / Claude Code / Codex / Antigravity / Cursor**），Agent 会自动探测本机环境与 DSH 桌面端配置、挂载插件并给出待配置清单：
+本插件**零 npm 依赖、零构建步骤**，无需手动 `git clone` 即可一键安装。装完后重启或重载 DSH 即可生效。
+
+### 方式一：终端一行命令安装（自动适配 DSH 桌面端与 Web，免拉取源码）
+
+- **Windows PowerShell 5.1+ / `pwsh` 7**：
+  ```powershell
+  irm https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.ps1 | iex
+  ```
+- **macOS / Linux / Git Bash**：
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.sh | bash
+  ```
+
+> 支持参数预览与指定目录：PowerShell 可跑 `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.ps1))) -DryRun`，Bash 可跑 `curl -fsSL https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.sh | bash -s -- --dry-run`。脚本会自动探测 `DSH_HOME` 与 `desktop`/`web` profile、备份 `package.json.bak` 并检测 `PyMuPDF`。
+
+### 方式二：DSH 插件命令 / 插件管理页安装
+
+- **DSH Web CLI**：
+  ```bash
+  dsh plugin --profile web add github:qianxi-00/dsh-paper-workbench
+  ```
+- **DSH 设置页安装**：打开 **设置 → 插件**，粘贴 `github:qianxi-00/dsh-paper-workbench` 或 [GitHub Releases](https://github.com/qianxi-00/dsh-paper-workbench/releases) 中的 `.tgz` 发布包直链安装并启用。
+
+### 方式三：发一句话让 AI Agent 帮你安装
+
+复制下面 3 行发给任意 Coding Agent（**DSH / Claude Code / Codex / Antigravity / Cursor**）：
 
 ```text
-请帮我安装 DeepSeek Harness 的论文工作台插件（dsh-paper-workbench v1.0.0）：
-1. 若本地尚无仓库，先克隆 https://github.com/qianxi-00/dsh-paper-workbench.git 到合适工作目录；若已存在则更新并拉取最新分支/发布标签；
-2. 阅读仓库内的 skills/install-dsh-paper-workbench/SKILL.md，并先执行 `node scripts/install-agent.mjs --dry-run --json` 确认探测到的 DSH 桌面端与 Python/PyMuPDF 状态；
-3. 确认无阻塞后执行 `node scripts/install-agent.mjs --json` 完成 DSH profile 挂载与工作区 Skills 初始化，再运行 `node scripts/doctor.mjs` 复核环境；
-4. 用中文向我清晰汇报：安装结果、生效方式（在 DSH 插件管理重新启用或重启 DSH），以及可选项配置引导（PaddleOCR Key / PostgreSQL 或 MySQL 外置数据库 / 可选 Obsidian 联动）。
+请帮我安装 DSH 论文工作台插件 dsh-paper-workbench：优先运行免克隆一键安装脚本（Windows: `irm https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.ps1 | iex`；macOS/Linux: `curl -fsSL https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.sh | bash`；若已有本地源码则跑 `node scripts/install-agent.mjs --json`）。
+先用 `-DryRun` / `--dry-run` 预览确认目标 DSH 目录无误后再正式执行，并检查 Python `PyMuPDF`（`import fitz`）是否就绪。
+装完请用中文汇报：安装路径、重启/重载 DSH 生效方式，以及可选项（网络代理如 127.0.0.1:7897 / PaddleOCR Key / PostgreSQL 或 MySQL 外置库 / Obsidian 联动）。
 ```
 
-也可以直接阅读内置技能 [skills/install-dsh-paper-workbench/SKILL.md](skills/install-dsh-paper-workbench/SKILL.md) 或本地运行 `node scripts/install-agent.mjs --help`。
+<details>
+<summary>本地源码开发挂载</summary>
+
+如需二次开发、跑测试套件或以 `link:` 模式实时挂载本地工作树：
+
+```bash
+git clone https://github.com/qianxi-00/dsh-paper-workbench.git
+cd dsh-paper-workbench
+node scripts/install-agent.mjs --dry-run --json
+node scripts/install-agent.mjs --json   # 默认 --mode link；独立复制可用 --mode copy
+npm run doctor                          # 命令行环境自检（与工作台「⚙ 设置 → 环境自检」同一份报告）
+```
+
+也可直接阅读内置技能 [skills/install-dsh-paper-workbench/SKILL.md](skills/install-dsh-paper-workbench/SKILL.md) 或运行 `node scripts/install-agent.mjs --help`。
+</details>
+
+### Python 依赖（PyMuPDF）与装完自检
+
+只有 PDF 文本提取与高清渲页需要 `PyMuPDF`（没有它插件照样能装、能用浏览器原生 PDF 查看器）：
+
+```bash
+# Windows: python -m pip install pymupdf   |   macOS / Linux: python3 -m pip install --user pymupdf
+```
+
+装好无需重启 DSH：打开 **论文工作台 → `⚙ 设置` →「环境自检」**（或本地运行 `node scripts/doctor.mjs`）即可一键复核 Node、SQLite、Python/PyMuPDF、网络代理、宿主能力与 OCR 状态。
 
 ## 能做什么
 
-- **宿主分栏与三栏阅读**：左侧文献库、目录与右侧原生会话均可拖拽调宽、双击分隔条复位（会话栏默认 420px）、一键收起/展开；窄窗口自动切换为覆盖抽屉，状态跨端口重启持久恢复。
-- **四种学术对照排版**：`双语`（上英衬线 + 下中无衬线微缩进，拖选默认只复制干净英文原文）、`并排`（宽屏双栏对齐阅读）、`原文`（临时隐藏译文专注英文）、`只看译文`；正文与图注均支持行内/块级 KaTeX 公式、学术公式右编号、三线算法框排版与复制还原 `$...$`。
-- **对照富原文标注 & 笔记导出**：选中原文或译文可加 **5 色高亮 / 下划线 / 加粗 / 折叠 `💬` 批注气泡 / 行内 `‹+›` 插入注释**，点击即可编辑或按段/全篇清除；支持与 AI 自动整理生成的结构化「研读笔记」同页管理，一键 **导出 Markdown 归档** 或 **JSON 数据包**。
-- **有序并发 & 后台持久翻译**：可在设置里配置 `1–8` 翻译并发数，严格按文档段落顺序派发请求；翻译任务常驻宿主后台，切换标签、切换论文、关闭阅读器或切换 DSH 会话**绝不中断**，仅在明确点击「`⏸ 暂停翻译`」时暂停，支持从断点「`▶ 继续翻译`」及失败段落一键 `重试失败 N`。
-- **全篇上下文讲解 + 专属工作区 Skills/Tools**：新增 `paper_explain` 工具与 `paper-explainer` / `paper-deep-digest` / `paper-literature-synthesis` 工作区 Skills；讲解任意选段/章节时自动拼装全篇（默认 120k 字符预算）与同页/跨页引用图表，并自动通过 `paper_notes` 沉淀研读笔记。
-- **文献库与在线最新论文 Feed**：按专题分组、递归目录批量导入 `.pdf`（子文件夹自动作分组）、路径导入、上传 PDF 与回收站恢复；在线检索页支持订阅 8 个科研方向 + 自定义关键词，按发布时间倒序展示最新论文并一键下载入库。
-- **清晰的 Obsidian 联动边界**：新增 `obsidian.enabled` 独立开关（默认关闭以保持零门槛纯净工作台，已有 Vault 配置的老用户自动兼容开启）；关闭时自动隐藏「卡片」页签并由目录批量导入、Markdown/JSON 导入导出承接完整工作流。
-- **零依赖多存储后端与迁移**：默认内置 `SQLite`（Node < 22.5 自动降级 `JSON`），无需配置即开即用；设置里可按需切换纯 Node 原生协议实现的 **PostgreSQL** 或 **MySQL / MariaDB**，支持连接与建表权限测试、一键跨库全量迁移与全库快照备份/导入。
+- **自由高并发 & 全文术语锚定持久翻译**：支持 `1–100` 自由并发配置，按段落 FIFO 顺序并发调度，内置 **HTTP 429 / 限流指数退避与并发自适应降速**，并自动提取全篇核心术语锚定表注入各批次以保证长文译名统一；翻译常驻宿主后台，切换标签、切换论文或离开工作台**绝不中断**，支持显式 `⏸ 暂停翻译` / `▶ 继续翻译` 与失败段一键重试。
+- **划词精译卡片 + 逐段原文/译文独立折叠**：选中任意词句即可弹出轻量**划词精译卡片**（语境释义、学术对照与一键复制/批注），每段悬浮工具栏支持**单段原文或译文独立折叠/展开**，兼顾精读推敲与高密度扫读。
+- **原文页透明可交互文本层 + 框选图表/公式截图讲解**：PDF 原文页叠加精准对齐的**透明可交互文本层**（原页直接划词复制、划词精译与定位），并支持拖拽**框选任意复杂图表、跨栏表格或公式区域**，一键裁图作为原生图片附件送入右侧 Agent 会话识图精讲。
+- **智能自适应深度讲解 + 专属工作区 Skills/Tools**：根据提问对象（概念术语 / 数学公式推导 / 算法伪代码 / 章节论证 / 全篇脉络）自适应调节讲解深度与上下文配比，通过 `paper_explain` 自动串联全篇上下文（默认 120k 字符预算）与同页/跨页关联图表，并经 `paper_notes` 沉淀结构化研读笔记。
+- **arXiv 八大学科导航 + 自定义主题 + 网络代理**：在线检索页内置 **arXiv 八大学科分类导航**（CS / Math / Physics / Stat / q-Bio / q-Fin / EESS / Econ）与细分方向最新 Feed、自定义订阅主题，并内置零依赖 **HTTP / HTTPS / SOCKS5 代理与系统代理自动探测**（如 `127.0.0.1:7897`），彻底打通受限网络检索与开放获取 PDF 下载。
+- **四种学术对照排版 & 宿主原生分栏**：`双语`、`并排`、`原文`、`只看译文` 四种排版无缝切换，正文与图注支持 KaTeX 公式、公式右编号、三线算法框与干净复制；文献库、目录与右侧原生会话均可拖拽调宽、双击复位与跨端口持久记忆。
+- **对照富原文标注 & Obsidian 清晰边界**：支持 **5 色高亮 / 下划线 / 加粗 / 折叠 `💬` 批注气泡 / 行内 `‹+›` 插入注释**，一键导出 Markdown 归档或 JSON 数据包；`obsidian.enabled` 按需独立开关，不装 Obsidian 同样拥有完整闭环。
+- **零依赖多存储后端与迁移**：默认内置 `SQLite`（Node < 22.5 自动降级 `JSON`），开箱即用；设置内可按需切换纯 Node 原生协议实现的 **PostgreSQL** 或 **MySQL / MariaDB**，支持连接测试与一键跨库全量迁移。
 
 ## 环境要求
 
 | 需要 | 版本 | 没有会怎样 |
 | --- | --- | --- |
-| DeepSeek Harness 桌面端 | 带 `webServer` / `tools` / `sessionController` 的版本 | 装不上 |
+| DeepSeek Harness | Desktop 或 Web（带 `webServer` / `tools` / `sessionController`） | 装不上 |
 | Node.js | ≥ 20（宿主自带） | 低于 22.5 时 `node:sqlite` 不可用，译文自动退化成 JSON 存储，功能不受影响 |
 | Python 3.10+ 与 `PyMuPDF`（`import fitz`） | 推荐 | 页图、段落模型、对照、翻译都用不了，只能走浏览器原生 PDF 查看器 |
 | Obsidian（桌面端） | 可选 | 「卡片」页签与写入不可用，其余照常 |
 | PaddleOCR API Key（百度 AI Studio） | 可选 | 扫描件只能看页图，不能 OCR/翻译/检索；文本层正常的 PDF 不受影响 |
 
-插件**零 npm 依赖**、不需要构建、不会动你的 `node_modules`；除了你主动发起的 arXiv/OpenAlex 检索与
+插件**零 npm 依赖**、不需要构建、不会污染你的 `node_modules`；除了你主动发起的 arXiv/OpenAlex 检索与
 PaddleOCR 识别，它不向第三方发请求。
 
 ### 多版本 DSH 兼容保障
@@ -55,86 +108,25 @@ PaddleOCR 识别，它不向第三方发请求。
 2. **较早桌面版 DSH（无 `agentPresets` 或旧版路由）**：自动回退 `agent.ctx.get('systemPrompt')` 注册上下文、`layout.selectPanel('main.conversation')` 打开会话、`workspaceController` 解析跟随模型。
 3. **精简 / 无原生会话组件的宿主（或独立 `dev-server`）**：诚实提示缺失的公开契约（绝不用自绘气泡伪装原生会话），同时保证文献库、阅读器、独立 SQLite/JSON 翻译、OCR 与设置页环境自检 100% 可用。
 
-## 安装
-
-装完插件记得在「插件」页把它**启用**，然后重启桌面端（宿主侧代码只在插件加载时执行一次）。
-
-### 方式一：插件市场或 npm（推荐）
-
-桌面端 → 设置 →「插件」→ 市场里搜 `paper-workbench`，或直接装 npm 包：
-
-```bash
-dsh plugin --profile desktop add dsh-paper-workbench
-```
-
-### 方式二：从 GitHub 装
-
-```bash
-dsh plugin --profile desktop add github:qianxi-00/dsh-paper-workbench
-```
-
-### 方式三：本地目录（开发、自用、改代码）
-
-```bash
-git clone https://github.com/qianxi-00/dsh-paper-workbench
-dsh plugin --profile desktop add /absolute/path/to/dsh-paper-workbench
-# 想边改边看效果用 link：dsh plugin --profile desktop add link:/absolute/path
-```
-
-也可以在桌面端「插件」页直接选本地包/链接。
-
-> `dsh plugin` 只是把包装进 profile 的 `node_modules`；登记 bundle（`dsh.profile.bundles`）由桌面端的
-> 插件页完成。命令行装完如果侧栏没出现「论文工作台」，去插件页启用一下即可。
-
-### 装 Python 依赖
-
-只有 PDF 取文本/渲页需要 Python，没有它插件照样能装、能开、能看页图（浏览器原生查看器）。
-
-```bash
-# Windows（PowerShell）
-winget install --id Python.Python.3.12  # 或从 python.org 装，勾 Add to PATH
-python -m pip install pymupdf
-
-# macOS
-brew install python && python3 -m pip install --user pymupdf
-
-# Linux（Debian/Ubuntu）
-sudo apt install python3 python3-pip && python3 -m pip install --user pymupdf
-```
-
-装好后不用重启：插件探测失败只缓存 30 秒，在设置里点「重新检测」或直接重开插件即可。
-
-解释器按这个顺序找：设置里填的路径 → `DSH_PAPER_PYTHON` → `PYTHON` → `python3`/`py`/`python`
-（Windows 上还有本机常见的 Anaconda 路径）。全部失败时 `doctor` 会告诉你差什么。
-
-### 装完自检
-
-```bash
-npm run doctor    # 在源码目录里跑；从 npm 装的包也可以直接 node scripts/doctor.mjs
-```
-
-Windows 用户没有 `npm` 也没关系：桌面端 → 论文工作台 → `⚙ 设置` →「环境自检」按钮，报告是同一份
-（Node 版本、数据目录可写、SQLite 引擎、Python/PyMuPDF、Obsidian vault、模型、DSH 宿主能力、OCR Key）。
-它按 `ok / warn / FAIL / skip` 分级，每条都带一句「怎么办」。
-
 ## 配置
 
-零配置可用：默认跟随 DSH 当前模型、自动探测 Python 与 Obsidian vault、数据放
+零配置可用：默认跟随 DSH 当前模型、自动探测 Python、系统代理与 Obsidian vault、数据放
 `~/.dsh/paper-workbench`。要改的都在 `config.json`（设置页改的是同一份文件）：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `storage` | `link` | `link` 只记 PDF 原路径；`copy` 把 PDF 复制进 `papers/<id>/paper.pdf` |
 | `python` | `''` | 留空自动探测；填绝对路径可钉死解释器 |
+| `network.mode` / `network.proxyUrl` | `auto` / `''` | `auto` 自动探测、`custom` 手动指定 HTTP/HTTPS/SOCKS5 代理、`direct` 直连；代理认证不会回传到界面 |
 | `obsidian.enabled` | `false` | 可选 Obsidian 联动开关（已有 `vault`/`kb` 配置老用户自动保持 `true`） |
 | `vault` / `kb` | `''` | 开启 Obsidian 联动后用于自动/手动指定 vault 与知识库目录 |
 | `database.driver` | `'sqlite'` | 存储后端：`sqlite`（默认）/ `postgres` / `mysql`（支持测试连接与跨库迁移） |
 | `ocr.token` | `''` | PaddleOCR Key；写入后文件自动收紧到 0600，界面只回显示尾号 |
 | `ocr.model` | `PaddleOCR-VL-1.6` | 也可 `PP-StructureV3` / `PP-OCRv6` |
 | `ai.translateModel` / `ai.chatModel` | `null` | `null` = 跟随当前会话模型；也可钉 `{provider, model}` |
-| `ai.concurrency` | `1` | 翻译并发数（`1–8`，按原文段落 FIFO 顺序请求） |
+| `ai.concurrency` | `10` | 翻译并发数（`1–100` 自由配置，带 429 自适应退避与全文术语锚定） |
 | `ai.temperature` | `0.2` | 翻译/对话温度 |
-| `topics` | `{ subscribed, custom, feedSource }` | 在线检索页最新论文订阅方向与自定义关键词 |
+| `topics` | `{ subscribed, custom, feedSource }` | arXiv 八大学科方向导航、订阅主题与自定义关键词 |
 | `workspace.title` / `workspace.path` | `论文` / `<数据根>/论文` | 原生会话归属的工作区（自动同步专属 `AGENTS.md` 与科研 `Skills`） |
 
 环境变量（兜底用，适合多套数据或测试）：
@@ -150,7 +142,7 @@ Windows 用户没有 `npm` 也没关系：桌面端 → 论文工作台 → `⚙
 1. 左栏点「论文工作台」。首次可以「按路径导入」一篇 PDF，或「在线检索」。
 2. 选中论文后默认进入 `对照`：滚轮往下就是全文，原文段下面跟着中文（点 `译` 或 `译本节` 才翻，不自动烧钱）。
 3. 目录点一下只跳到那一节；想翻哪节就按那一行右侧的 `译` / `讲`。
-4. `整篇翻译` 会先告诉你「N 节 · M 段」，确认后按节串行推进，状态栏显示进度，`停止` 立即中断并保留已翻部分。
+4. `整篇翻译` 确认后按文档顺序调度，并按设置并发处理批次，状态栏显示进度。切换论文或关闭界面不会取消后台任务；点 `暂停翻译` 保留进度，之后可 `继续翻译`。
 5. 右侧新建或选一条对话，点 `＋ 本篇` 关联论文后可直接手输问题；目录的 `讲` 与划词动作也会自动关联本篇。论文引用链接可跳回对应原页或段落。
 6. `精读整篇` / `导读` / `写入卡片` 等快捷操作同样送到右侧当前会话，执行状态、工具调用和结果在原生界面里查看。
 7. 左栏勾选 ≥2 篇 → `对比综述` → 对比表 + 研究脉络，写入 `方向综述/`。
@@ -165,7 +157,7 @@ Windows 用户没有 `npm` 也没关系：桌面端 → 论文工作台 → `⚙
 - **缓存**：译文按 hash 存进 SQLite（`translations` 表），默认不覆盖（想重翻按 `重新翻译`）；标题另存 `t:<hash>`，`目录翻译` 一次请求翻一批。
 - **名单不翻**：作者/机构那一行（带 `†`、逗号连排人名、没有句末标点）不进翻译请求；模型把原文原样返回时记为 `skipped`，不会在英文下面再贴一遍英文。
 - **版面解析后可以「重填文字」**：`PP-StructureV3` 的 OCR 文字有错字（`rnibenoder` 这类），我们只借它的结构、正文一律回填 PDF 文本层；早期解析出来的 `layout.json` 用工具栏的「重填文字」（`layout.refill`）就地换掉，不上传、不花配额。
-- **划词翻译**：选中原文点 `翻译`，译文**直接贴在那一段下面**（不经过对话）。它是独立小工具：每次都是全新的一次模型请求，
+- **划词翻译**：选中原文点 `翻译`，译文显示在独立精译卡片中（不经过对话），可复制译文、存为批注或重译整段。它是独立小工具：每次都是全新的一次模型请求，
   读不到段落模型时（原文页 / 纯文本页）走 `/ai/translate` 的一次性通道，不写译文库、不写对话、不进上下文。
 - **公式卫生**：prompt 明确要求行内公式只写一次 `$...$`；返回的译文还会过一遍 `tidyMath`（去 MathML、`\(...\)`/`\[...\]` → `$...$`、公式内换行压平）。
 - **对话与翻译分开**：原生聊天使用所选会话的模型与历史。此处的 AI 翻译设置仅控制翻译工具；独立打开旧阅读页面时仍保留旧聊天模式，嵌入 DSH 的阅读器不会启动旧聊天流。
@@ -199,7 +191,7 @@ DSH 侧栏按会话的工作目录分组。插件不再按每篇 PDF 所在目�
 `~/.dsh/paper-workbench/论文`）。想换位置或改标题，在 `config.json` 里加：
 
 ```json
-{ "workspace": { "title": "论文", "path": "G:\\笔记\\LLM知识体系论文" } }
+{ "workspace": { "title": "论文", "path": "D:/Research/papers" } }
 ```
 
 改完重开插件生效。注意：**改动前已经建好的会话**其工作目录是旧的，仍会留在原来的分组里
@@ -314,7 +306,7 @@ AISTUDIO 任务接口**（`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`�
 
 1. **填 Key**：`⚙ 设置 → 扫描件 OCR`，粘贴 AI Studio 的 API Key 并保存。
    Key 只写进本机 `~/.dsh/paper-workbench/config.json`（自动收紧到仅本人可读写），
-   界面只回显 `4148…c5f0` 这样的尾号，**不回传明文、不进日志、不进仓库**。
+   界面只回显 `abcd…wxyz` 这样的尾号，**不回传明文、不进日志、不进仓库**。
 2. **跑 OCR**：打开扫描件，`文本` 页会提示「没有文本层」，点 `OCR 识别整篇`（顶部也有 `OCR 识别` 按钮）。
    提交后按页轮询进度，完成后自动切到文本页按页显示识别结果。
 3. **换模型**：`PaddleOCR-VL-1.6`（默认，版面 Markdown，公式/表格/图片位置保留得最好）、
@@ -438,10 +430,10 @@ lib/db-pg.js          零依赖纯 Node PostgreSQL Wire Protocol v3 客户端（
 lib/db-mysql.js       零依赖纯 Node MySQL Protocol v10 客户端
 lib/db-backend.js     多数据库统一门面（SQLite/JSON/PG/MySQL + 导入导出 + 跨库迁移）
 lib/translate-jobs.js 宿主常驻后台持久化翻译调度器（断连不中止、暂停/断点续翻）
-lib/explain.js        全篇大上下文 + 周围跨页图表关联深度讲解拼装器
+lib/explain.js        智能自适应深度讲解 + 全篇大上下文与周围跨页图表拼装器
 lib/workspace-skills.js 「论文」工作区 AGENTS.md 与科研 Skills 受管同步器
 lib/doc.js            段落模型（块合并、分节、hash、按 sha1 + 目录指纹缓存）
-lib/ai.js             翻译与对话（1-8 FIFO 并发、批量/兜底、标题、公式卫生 tidyMath）
+lib/ai.js             翻译与对话（1-100 FIFO 并发、429 退避、全文术语锚定、公式卫生 tidyMath）
 lib/sse.js            SSE 输出（心跳、客户端断开即 abort）
 lib/session.js        原生 DSH 会话桥（create/prompt/follow + 帧归一化）
 lib/conv.js           对话形状、论文关联、兼容附件与范围提示词
@@ -451,14 +443,17 @@ lib/review.js         译文自检（静态规则 + 模型批检）
 lib/figures.js        正文配图（抽位图、按「图 N」挂段落、缓存 PNG）
 lib/pdf.js            PyMuPDF 子进程桥
 lib/obsidian.js       frontmatter 行级合并、卡片定位/写入、检索（按需开关）
-lib/arxiv.js          arXiv Atom + OpenAlex 解析、订阅主题最新 Feed 与 PDF 下载
+lib/arxiv.js          arXiv 八大学科导航、OpenAlex 解析、HTTP/SOCKS5/系统代理与 PDF 下载
 lib/ocr.js            PaddleOCR 云端任务（指数退避重试 / 取消）
 lib/tools.js          10 个 agent 工具（新增 paper_explain 与研读笔记保存）
 lib/client.js         左栏入口 + 阅读 iframe / 原生会话分栏 + 精确会话绑定与联动
+scripts/install.ps1   Windows PowerShell 零克隆一行命令安装器
+scripts/install.sh    macOS / Linux / Git Bash 零克隆一行命令安装器
 skills/               AI Agent 一键安装 Skill（install-dsh-paper-workbench）
-assets/app/           工作台 SPA（vanilla JS，双语排版 + 富标注 + 多数据库/主题设置）
+assets/app/           工作台 SPA（vanilla JS，双语排版 + 原文透明文本层/框选截图 + 富标注）
 assets/workspace-skills/ 「论文」工作区内置 AGENTS.md 与专精研读 Skills
 assets/pdf_tool.py    PyMuPDF 命令行协处理器（text / outline / render / clip / figures / zhpdf）
+icon.svg              128×128 插件矢量图标
 AGENTS.md             架构契约、安全红线、测试要求与持久化维护记忆
 CHANGELOG.md          版本发布历史
 docs/v2-contracts.md  v2 的数据形状与接口契约
