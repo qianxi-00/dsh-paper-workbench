@@ -120,14 +120,16 @@ try {
   }
   if (!ps) console.log('SKIP PowerShell 不可用；请在 Windows CI 运行 PowerShell 安装回归')
 
-  const workflow = readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8')
+  const workflow = readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8').replace(/\r\n/g, '\n')
   function workflowRun(name) {
     const start = workflow.indexOf(`      - name: ${name}`)
     assert.ok(start >= 0, `缺少工作流步骤 ${name}`)
     const end = workflow.indexOf('\n      - name:', start + 1)
     const step = workflow.slice(start, end < 0 ? undefined : end)
-    const script = step.slice(step.indexOf('        run: |\n') + '        run: |\n'.length)
-    return script.split('\n').map(line => line.startsWith('          ') ? line.slice(10) : line).join('\n')
+    const marker = '\n        run: |\n'
+    const offset = step.indexOf(marker)
+    assert.ok(offset >= 0, `工作流步骤 ${name} 缺少可执行的 run 块`)
+    return step.slice(offset + marker.length).split('\n').map(line => line.slice(10)).join('\n')
   }
   const metadataScript = workflowRun('Resolve release metadata')
   function metadata(version, tag, event = 'workflow_dispatch') {
@@ -148,7 +150,8 @@ try {
   ]) check(`metadata: ${event} ${tag || '自动标签'} ${rejected ? '拒绝不匹配版本' : '输出正确版本'}`, () => {
     const result = metadata(version, tag, event)
     if (rejected) {
-      assert.notEqual(result.status, 0, result.output)
+      assert.equal(result.status, 1, result.output)
+      assert.match(result.output, /与 package\.json 版本 .* 不匹配/)
       assert.equal(result.metadata, '', '失败时不得输出可供发布使用的 metadata')
     } else {
       assert.equal(result.status, 0, result.output)
