@@ -5,6 +5,7 @@
  * 「真实库样例」只读复制 papers/<id>/ 的 text.json + meta.json 过来再跑 getDoc。
  * 运行：node scripts/test-doc.mjs
  */
+import { execFileSync } from 'node:child_process'
 import { promises as fsp } from 'node:fs'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
@@ -519,19 +520,40 @@ async function main() {
   // getDoc 现在会自己抽 PDF 文本层并写回 text.json。
   await check('text.json 缺失时 getDoc 自己抽 PDF 文本层', async () => {
     const realPdf = 'G:\\笔记\\LLM知识体系论文\\加速训练\\FlashAttention.pdf'
-    try {
-      await fsp.access(realPdf)
-    } catch {
-      throw new Error('样例 PDF 不在本机：' + realPdf)
-    }
-    // 复制一份再入库：直接引用真实 PDF 会命中真实库样例的同路径去重，拿不到新建的记录
     const copy = path.join(tmpRoot, 'autoextract.pdf')
-    await fsp.copyFile(realPdf, copy)
+    let useSynth = process.env.PB_FORCE_SYNTH_SAMPLE === '1'
+    if (!useSynth) {
+      try {
+        await fsp.access(realPdf)
+        await fsp.copyFile(realPdf, copy)
+      } catch {
+        useSynth = true
+      }
+    }
+    if (useSynth) {
+      const { findPython } = await import('../lib/pdf.js')
+      const py = await findPython()
+      if (!py || !py.python) throw new Error('无法生成合成样例 PDF：缺少 Python + PyMuPDF')
+      const pyScript = [
+        'import fitz, sys',
+        'stages = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]',
+        'topics = ["attention", "routing", "quantization", "caching", "pruning", "distillation", "alignment", "retrieval", "indexing", "fusion", "decoding", "planning"]',
+        'doc = fitz.open()',
+        'for pno, st in enumerate(stages):',
+        '    page = doc.new_page(width=595, height=842)',
+        '    for idx, tp in enumerate(topics):',
+        '        y = 96 + idx * 56',
+        '        rc = page.insert_textbox(fitz.Rect(72, y, 520, y + 38), f"Section {st} observation on {tp}: SRAM block scheduling lowers memory traffic substantially.", fontsize=10.5, fontname="helv")',
+        '        assert rc >= 0, f"overflow {pno}:{idx}"',
+        'doc.save(sys.argv[1])',
+      ].join('\n')
+      execFileSync(py.python, ['-c', pyScript, copy], { stdio: 'pipe' })
+    }
     const added = await store.addPaper({
       id: 'autoextract-1',
       title: '自动抽文',
       srcPath: copy,
-      pageCount: 34,
+      pageCount: useSynth ? 6 : 34,
       hasText: true,
     })
     ok(added.existed === false, '应新建一条记录，实际命中了已有记录 ' + added.meta.id)
