@@ -54,8 +54,8 @@ let charHit = 0
 let charTotal = 0
 let duplicates = 0
 const seen = new Set()
-for (const blockText of layout.blocks || []) {
-  const key = norm(blockText).slice(0, 400)
+for (const block of layout.blocks || []) {
+  const key = norm(block?.text || block?.latex || '').slice(0, 400)
   if (key.length >= 20) {
     if (seen.has(key)) duplicates += 1
     seen.add(key)

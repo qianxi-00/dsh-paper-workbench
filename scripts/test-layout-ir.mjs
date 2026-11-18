@@ -372,3 +372,63 @@ test('a hyphenated line break keeps the hyphen and drops the PDF extraction spac
   ))
   assert.equal(r.blocks[0].text, 'A pre-dictor now works.')
 })
+
+test('algorithm maps to kind algorithm preserving indentation and formula_number binds equationNumber conservatively', () => {
+  const r = build(fixture(
+    [
+      raw('alg', 'algorithm', 'for i in 1..n do\nreturn x', [20, 40, 320, 120]),
+      raw('eq', 'formula', '$$y = x + 1$$', [60, 160, 260, 200]),
+      raw('eqno', 'formula_number', '(3)', [340, 172, 370, 190]),
+    ],
+    [
+      line('for i in 1..n do', 22, 46, 200, 60),
+      line('return x', 44, 70, 140, 84),
+      line('y = x + 1', 80, 172, 220, 190),
+      line('(3)', 342, 174, 368, 188),
+    ],
+  ))
+  const algo = r.blocks.find(b => b.kind === 'algorithm')
+  const formula = r.blocks.find(b => b.kind === 'formula')
+  assert.ok(algo, 'algorithm block must survive')
+  assert.match(algo.text, /for i in 1\.\.n do\n\s{2,}return x/)
+  assert.equal(r.blocks.some(b => b.text === '(3)'), false, 'standalone formula_number block must be absorbed')
+  assert.equal(formula.equationNumber, '(3)')
+  assert.deepEqual(r.pages[0].unassignedLineIds, [])
+  assert.equal(r.pages[0].lineAssignments.length, 4, 'lineAssignments must account for all 4 PDF lines')
+  assert.equal(r.pages[0].lineAssignments.filter(a => a.excluded && a.reason === 'formula-number').length, 1)
+})
+
+test('refineUnwarpedMatrix corrects shifted UVDoc vertical coordinates onto matching PDF lines', () => {
+  // Simulated UVDoc distortion: y_pdf = 0.8925 * y_layout + 48.4
+  const inv = yPdf => Math.round((yPdf - 48.4) / 0.8925)
+  const r = build({
+    source: { sha256: 'b'.repeat(64) },
+    pageCount: 1,
+    pageSizes: [{ n: 1, w: 400, h: 600 }],
+    servicePages: [{
+      n: 1,
+      width: 400,
+      height: 600,
+      raw: { doc_preprocessor_res: { model_settings: { use_doc_unwarping: true } }, width: 400, height: 600 },
+      blocks: [
+        raw('top', 'text', 'Top sentence sits cleanly here.', [20, inv(80), 300, inv(100)]),
+        raw('mid', 'text', 'Middle sentence matches after linear calibration.', [20, inv(260), 340, inv(280)]),
+        raw('bot', 'text', 'Bottom sentence lands on lower anchor.', [20, inv(480), 320, inv(500)]),
+      ],
+    }],
+    pdfPages: [{
+      page: 1,
+      width: 400,
+      height: 600,
+      lines: [
+        line('Top sentence sits cleanly here.', 20, 80, 290, 96),
+        line('Middle sentence matches after linear calibration.', 20, 260, 330, 276),
+        line('Bottom sentence lands on lower anchor.', 20, 480, 310, 496),
+      ],
+    }],
+  })
+  assert.equal(r.blocks.length, 3)
+  assert.equal(r.blocks[0].text, 'Top sentence sits cleanly here.')
+  assert.equal(r.blocks[1].text, 'Middle sentence matches after linear calibration.')
+  assert.equal(r.blocks[2].text, 'Bottom sentence lands on lower anchor.')
+})

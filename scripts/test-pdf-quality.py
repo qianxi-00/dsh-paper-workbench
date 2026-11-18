@@ -177,6 +177,32 @@ class PdfQuality(unittest.TestCase):
         ])
         self.assertEqual(self.tokens(pdf), ["S1", "S2", "S3"])
 
+    def test_math_control_chars_span_spacing_and_refs_preserved(self):
+        sys.path.insert(0, str(TOOL.parent))
+        import pdf_tool
+
+        self.assertEqual(pdf_tool._sanitize_span_text("\x10H + E\x11", "TXEX10"), "(H + E)")
+        text, _sizes, _bold = pdf_tool._join_spans([
+            {"text": "𝐶", "bbox": [10.0, 10.0, 16.0, 20.0], "size": 10.9, "flags": 0},
+            {"text": "𝑢", "bbox": [16.1, 12.0, 20.5, 21.0], "size": 7.3, "flags": 0},
+            {"text": "and", "bbox": [22.8, 10.0, 42.0, 20.0], "size": 10.9, "flags": 0},
+        ])
+        self.assertEqual(text, "𝐶𝑢 and")
+
+        ref_pdf = self.root / "refs.pdf"
+        with fitz.open() as doc:
+            doc.new_page(width=600, height=800).insert_text((60, 80), "Main body paragraph with normal size.", fontsize=11)
+            page2 = doc.new_page(width=600, height=800)
+            for idx in range(6):
+                y = 90 + idx * 24
+                page2.insert_text((58, y), f"[{idx + 1}] Left column long citation title number {idx}", fontsize=8)
+                page2.insert_text((74, y + 10), "continued hanging line inside the left column.", fontsize=8)
+                page2.insert_text((314, y), f"[{idx + 7}] Right column long citation title item {idx}", fontsize=8)
+                page2.insert_text((330, y + 10), "continued hanging line inside the right column.", fontsize=8)
+            doc.save(ref_pdf)
+        res = self.command("text", ref_pdf, pages=[1, 2])
+        self.assertGreater(len(res["pages"][1]["blocks"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

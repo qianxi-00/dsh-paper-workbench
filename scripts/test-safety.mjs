@@ -131,6 +131,70 @@ async function main() {
   const keptBak = await fsp.readFile(path.join(root, 'index.json.bak'), 'utf8').catch(() => '')
   check('重建索引不会把坏文件复制成 .bak', keptBak === goodBak, keptBak.slice(0, 40))
 
+  // ---- 5) HTTP HEAD 不返回实体、同 reqId 重试不误删新流
+  const http = await import('node:http')
+  const { createHandler } = await import('../lib/server.js')
+  const pagePng = path.join(root, 'page1.png')
+  await fsp.writeFile(pagePng, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  const abortedSignals = []
+  let activeResolve1
+  let activeResolve2
+  let streamCalls = 0
+  const srvHandler = createHandler({
+    prefix: '/paper-workbench',
+    appDir: path.resolve('assets/app'),
+    api: {
+      pageImage: async () => ({ path: pagePng, mime: 'image/png' }),
+      figureImage: async () => ({ path: pagePng, mime: 'image/png' }),
+    },
+    streams: {
+      translate: async function* (_body, { signal }) {
+        const idx = ++streamCalls
+        signal.addEventListener('abort', () => abortedSignals.push(idx), { once: true })
+        yield { event: 'start', data: { idx } }
+        await new Promise(resolve => {
+          if (idx === 1) activeResolve1 = resolve
+          else activeResolve2 = resolve
+        })
+      },
+    },
+  })
+  const server = http.createServer(srvHandler)
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const baseUrl = 'http://127.0.0.1:' + server.address().port + '/paper-workbench'
+  try {
+    for (const urlPath of ['/app/style.css', '/api/page?id=x&page=1', '/api/figure?id=x&index=0']) {
+      const headRes = await fetch(baseUrl + urlPath, { method: 'HEAD' })
+      const bodyText = await headRes.text()
+      check('HEAD ' + urlPath + ' 返回 200 且空响应体', headRes.status === 200 && bodyText.length === 0 && Number(headRes.headers.get('content-length')) > 0)
+    }
+    const req1 = fetch(baseUrl + '/ai/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reqId: 'dup-req-1' }),
+    })
+    await new Promise(r => setTimeout(r, 30))
+    const req2 = await fetch(baseUrl + '/ai/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reqId: 'dup-req-1' }),
+    })
+    await new Promise(r => setTimeout(r, 30))
+    if (activeResolve1) activeResolve1({ done: true })
+    await (await req1).text().catch(() => {})
+    check('相同 reqId 新流会先中止旧流(#1)而不中止自身(#2)', abortedSignals.length === 1 && abortedSignals[0] === 1, abortedSignals.join(','))
+    const cancelRes = await fetch(baseUrl + '/ai/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reqId: 'dup-req-1' }),
+    }).then(r => r.json())
+    if (activeResolve2) activeResolve2({ done: true })
+    await (await req2).text().catch(() => {})
+    check('旧流结束不误删同 reqId 新流控制器，cancel 仍能命中(#2)', cancelRes.ok === true && abortedSignals.includes(2), JSON.stringify(cancelRes))
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+  }
+
   console.log('')
   console.log(pass + ' PASS / ' + fail + ' FAIL')
   await store.closeDb()

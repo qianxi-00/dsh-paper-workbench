@@ -404,7 +404,8 @@ function extractCleanSelection(selection, anchorElement) {
     if (node.nodeType !== 1) return
     if (!startedInZh && !onlyZh && node.classList?.contains('para-zh')) return
     if ((startedInZh || onlyZh) && node.classList?.contains('para-orig')) return
-    if (node.classList?.contains('formula-link')) return
+    const cls = node.classList
+    if (cls && (cls.contains('formula-link') || cls.contains('para-tools') || cls.contains('page-divider') || cls.contains('formula-meta') || cls.contains('algo-ln') || cls.contains('footnote-tag'))) return
     const tex = typeof node.getAttribute === 'function' ? node.getAttribute('data-tex') : null
     if (tex) {
       chunks.push(tex)
@@ -412,7 +413,7 @@ function extractCleanSelection(selection, anchorElement) {
     }
     const children = node.childNodes || node.children || []
     for (const child of children) visit(child)
-    if (node.classList?.contains('para') || node.classList?.contains('sec-head') || /^(P|DIV|H[1-4]|FIGURE|BLOCKQUOTE)$/.test(node.tagName || '')) {
+    if (cls?.contains('para') || cls?.contains('sec-head') || cls?.contains('algo-line') || /^(P|DIV|H[1-4]|FIGURE|BLOCKQUOTE)$/.test(node.tagName || '')) {
       if (chunks.length > 0 && !/\n$/.test(chunks[chunks.length - 1])) chunks.push('\n')
     }
   }
@@ -513,6 +514,7 @@ function saveLayout() {
   } catch {
     /* 隐私模式禁用 localStorage 时忽略：只影响刷新后的宽度记忆 */
   }
+  saveSessionSoon({ layout: state.layout })
 }
 
 function loadTree() {
@@ -530,6 +532,7 @@ function saveTree() {
   } catch {
     /* 同上 */
   }
+  saveSessionSoon({ expanded: [...state.expanded] })
 }
 
 // ---------------------------------------------------------------- 会话（界面状态）记忆
@@ -546,18 +549,23 @@ function loadSession() {
 }
 
 let sessionSaveTimer = 0
-function saveSession(patch = {}) {
+function saveSession(patch = {}, opts = {}) {
   if (sessionRestoring) return
   const meta = state.current && state.current.meta
   const scroller = document.querySelector('.compare-scroll')
   const existing = loadSession()
-  // 没打开论文时（刚启动）不要把上次的 paperId 抹成 null，否则下次进来就回到空态
+  const hasExplicitPaper = Object.hasOwn(patch, 'paperId')
+  // 没打开论文时（刚启动）不要把上次的 paperId 抹成 null，除非显式传了 paperId: null
   const next = {
-    paperId: (meta && meta.id) || existing.paperId || null,
+    paperId: hasExplicitPaper ? patch.paperId : (meta && meta.id) || existing.paperId || null,
     tab: state.tab,
     page: state.page,
     sectionId: state.sectionId || null,
     scrollTop: scroller ? scroller.scrollTop : existing.scrollTop,
+    layout: { ...state.layout },
+    expanded: [...state.expanded],
+    readerAi: { ...state.ai },
+    dark: state.dark,
     ...patch,
   }
   try {
@@ -567,10 +575,29 @@ function saveSession(patch = {}) {
   }
   // 同时写一份到插件自己的数据目录：桌面端重启后端口会变，localStorage 按站点隔离会丢，
   // 服务端这份能让「退出再进」跨重启也回到原处。
-  if (state.current || patch.paperId) {
-    rpc('ui.set', { state: { paperId: next.paperId, tab: next.tab, page: next.page, scrollTop: next.scrollTop, sectionId: next.sectionId } }).catch(
-      () => {},
-    )
+  const hasPrefPatch = ['paperId', 'layout', 'expanded', 'readerAi', 'dark'].some((k) => Object.hasOwn(patch, k))
+  if (state.current || hasPrefPatch) {
+    const remoteState = {
+      paperId: next.paperId,
+      tab: next.tab,
+      page: next.page,
+      scrollTop: next.scrollTop,
+      sectionId: next.sectionId,
+      layout: next.layout,
+      expanded: next.expanded,
+      readerAi: next.readerAi,
+      dark: next.dark,
+    }
+    if (opts && opts.keepalive && typeof fetch === 'function') {
+      fetch(API + 'ui.set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: remoteState }),
+        keepalive: true,
+      }).catch(() => {})
+    } else {
+      rpc('ui.set', { state: remoteState }).catch(() => {})
+    }
   }
 }
 
@@ -586,9 +613,17 @@ async function loadSessionRemote() {
 }
 
 function pickSession(local, remote) {
-  if (!remote || !remote.paperId) return local || {}
-  if (!local || !local.paperId) return remote
-  return String(remote.at || '') > String(local.at || '') ? remote : local
+  const remoteTime = String((remote && (remote.updatedAt || remote.at)) || '')
+  const localTime = String((local && (local.updatedAt || local.at)) || '')
+  const hasRemote = Boolean(
+    remote && (remote.paperId || remoteTime || remote.layout || remote.readerAi || typeof remote.dark === 'number' || Array.isArray(remote.expanded)),
+  )
+  const hasLocal = Boolean(local && (local.paperId || localTime))
+  if (!hasRemote) return local || {}
+  if (!hasLocal) return remote
+  if (Object.hasOwn(remote, 'paperId') && remote.paperId === null && remoteTime > localTime) return remote
+  if (!remote.paperId && local.paperId) return local
+  return remoteTime > localTime ? remote : local
 }
 
 /** 滚动很密，别每帧写 localStorage。 */
@@ -620,6 +655,7 @@ function saveAiState() {
   } catch {
     /* 同上 */
   }
+  saveSessionSoon({ readerAi: { ...state.ai } })
 }
 
 // ---------------------------------------------------------------- 布局（三栏 + 目录列）
@@ -2484,8 +2520,29 @@ function renderCompare() {
         titleKey ? h('div', { class: 'sec-title-zh', 'data-zh': titleKey }) : null,
       ),
     )
+    let prevPage = Number(section.page) || 0
     for (const paragraph of bySection.get(section.id) || []) {
       if (paragraph.kind === 'heading' && sameHeading(paragraph.text, section.title)) continue
+      const pPage = Number(paragraph.page) || 0
+      if (pPage && prevPage && pPage !== prevPage) {
+        compare.append(
+          h(
+            'div',
+            { class: 'page-divider', 'data-page': pPage },
+            h(
+              'button',
+              {
+                type: 'button',
+                class: 'page-divider-btn',
+                title: '跳转到原文第 ' + pPage + ' 页',
+                onclick: () => jumpToPage(pPage),
+              },
+              'p.' + pPage,
+            ),
+          ),
+        )
+      }
+      if (pPage) prevPage = pPage
       compare.append(renderParagraph(paragraph))
     }
   }
@@ -2601,9 +2658,8 @@ function renderTableGrid(paragraph) {
  * 行内公式：图注/表注里模型给的是 `$n=12$` 这类 LaTeX，直接显示会是源码。
  * 只切 `$…$`（不含跨行），渲染失败退回原文，绝不拼 HTML。
  */
-function renderInlineMath(text) {
+function appendInlineMath(box, text) {
   const value = String(text || '')
-  const box = h('div', { class: 'para-orig' })
   const pattern = /\$(?!\s)([^$\n]{1,240}?)(?<!\s)\$/g
   let last = 0
   let match = null
@@ -2625,8 +2681,168 @@ function renderInlineMath(text) {
     box.append(span)
     last = match.index + match[0].length
   }
-  if (last === 0) return h('div', { class: 'para-orig' }, value)
+  if (last === 0) {
+    if (value) box.append(document.createTextNode(value))
+    return false
+  }
   if (last < value.length) box.append(document.createTextNode(value.slice(last)))
+  return true
+}
+
+function renderInlineMath(text) {
+  const box = h('div', { class: 'para-orig' })
+  appendInlineMath(box, text)
+  return box
+}
+
+function renderCaptionOrig(textValue) {
+  const match = /^((?:Figure|Fig\.?|Table|Algorithm|Alg\.?|图|表|算法)\s*(?:\d+(?:\.\d+)*|[IVXLC]+)\s*[:：.]?\s*)/i.exec(textValue)
+  if (!match) return renderInlineMath(textValue)
+  const box = h('div', { class: 'para-orig' }, h('span', { class: 'caption-prefix' }, match[1]))
+  appendInlineMath(box, textValue.slice(match[1].length))
+  return box
+}
+
+function renderParaTools(paragraph, key, textValue) {
+  return h(
+    'div',
+    {
+      class: 'para-tools',
+      onmousedown: (e) => e.stopPropagation(),
+      ondblclick: (e) => e.stopPropagation(),
+    },
+    key
+      ? h(
+          'button',
+          {
+            type: 'button',
+            class: 'para-tool-btn',
+            title: '翻译或重译这一段',
+            onclick: (e) => {
+              e.stopPropagation()
+              retryKey(key)
+            },
+          },
+          '译本段',
+        )
+      : null,
+    h(
+      'button',
+      {
+        type: 'button',
+        class: 'para-tool-btn',
+        title: '让右侧 Agent 讲解这一段',
+        onclick: (e) => {
+          e.stopPropagation()
+          askSelection(textValue, {
+            blockId: paragraph.blockId || null,
+            page: paragraph.page || state.page,
+            sectionId: paragraph.section || state.sectionId || null,
+            revision: state.doc?.revision || null,
+          })
+        },
+      },
+      '讲解',
+    ),
+    paragraph.page
+      ? h(
+          'button',
+          {
+            type: 'button',
+            class: 'para-tool-btn para-tool-page',
+            title: '跳转到原文第 ' + paragraph.page + ' 页',
+            onclick: (e) => {
+              e.stopPropagation()
+              jumpToPage(paragraph.page)
+            },
+          },
+          'p.' + paragraph.page,
+        )
+      : null,
+  )
+}
+
+const ALGO_LEAD_KW_RE = /^((?:Hyperparam|Inputs?|Outputs?|Require|Ensure):)\s*/i
+const ALGO_CTRL_KW_RE = /\b(?:for|while|repeat|until|if|then|else|elif|end\s+for|end\s+if|end\s+while|do|return|def|function|procedure|in|to)\b/g
+
+function appendAlgoPlainTokens(box, segment, isStart) {
+  let rest = String(segment || '')
+  if (!rest) return
+  if (isStart) {
+    const lead = ALGO_LEAD_KW_RE.exec(rest)
+    if (lead) {
+      box.append(h('span', { class: 'algo-kw' }, lead[1]), document.createTextNode(rest.slice(lead[1].length) ? ' ' : ''))
+      rest = rest.slice(lead[0].length)
+    }
+  }
+  if (!rest) return
+  ALGO_CTRL_KW_RE.lastIndex = 0
+  let last = 0
+  let match = null
+  while ((match = ALGO_CTRL_KW_RE.exec(rest)) !== null) {
+    if (match.index > last) box.append(document.createTextNode(rest.slice(last, match.index)))
+    box.append(h('span', { class: 'algo-kw' }, match[0]))
+    last = match.index + match[0].length
+  }
+  if (last === 0) box.append(document.createTextNode(rest))
+  else if (last < rest.length) box.append(document.createTextNode(rest.slice(last)))
+}
+
+function appendAlgoCodeContent(box, lineText) {
+  const commentMatch = /(^|\s)(\/\/.*)$/.exec(lineText)
+  const codePart = commentMatch ? lineText.slice(0, commentMatch.index + commentMatch[1].length) : lineText
+  const commentPart = commentMatch ? commentMatch[2] : ''
+  const mathPattern = /\$(?!\s)([^$\n]{1,240}?)(?<!\s)\$/g
+  let last = 0
+  let match = null
+  let isStart = true
+  while ((match = mathPattern.exec(codePart)) !== null) {
+    if (/^\d+(?:[.,]\d+)?(?:\s|\)|,|\b\s+(?:and|or|to|vs\.?)\b)/i.test(match[1])) continue
+    if (match.index > last) {
+      appendAlgoPlainTokens(box, codePart.slice(last, match.index), isStart)
+      isStart = false
+    }
+    appendInlineMath(box, match[0])
+    isStart = false
+    last = match.index + match[0].length
+  }
+  if (last < codePart.length) appendAlgoPlainTokens(box, codePart.slice(last), isStart)
+  if (commentPart) box.append(h('span', { class: 'algo-comment' }, commentPart))
+}
+
+function renderAlgorithmOrig(textValue) {
+  const lines = String(textValue || '').split(/\r?\n/)
+  const box = h('div', { class: 'para-orig algo-box' })
+  let startIdx = 0
+  if (lines.length >= 2 && /^Algorithm\s+\d+(?:[:.\s]|$)/i.test(lines[0].trim())) {
+    const head = h('div', { class: 'algo-head' })
+    appendInlineMath(head, lines[0].trim())
+    box.append(head)
+    startIdx = 1
+  }
+  let lineNo = 1
+  for (let idx = startIdx; idx < lines.length; idx += 1) {
+    const rawLine = lines[idx]
+    if (!rawLine.trim()) continue
+    const m = /^(\s*)(.*)$/.exec(rawLine)
+    const leadCols = m ? m[1].length : 0
+    const content = m ? m[2] : rawLine
+    const indentSteps = Math.min(10, leadCols / 2)
+    const codeSpan = h('span', {
+      class: 'algo-code',
+      ...(indentSteps > 0 ? { style: { paddingLeft: (indentSteps * 1.15).toFixed(2) + 'em' } } : {}),
+    })
+    appendAlgoCodeContent(codeSpan, content)
+    box.append(
+      h(
+        'div',
+        { class: 'algo-line' },
+        h('span', { class: 'algo-ln' }, String(lineNo)),
+        codeSpan,
+      ),
+    )
+    lineNo += 1
+  }
   return box
 }
 
@@ -2664,9 +2880,19 @@ function renderParagraph(paragraph) {
   const key = paragraphKey(paragraph)
   const entry = key ? state.trans[key] : null
   const textValue = String(kind === 'formula' ? (paragraph.latex || paragraph.text || '') : (paragraph.text || ''))
-  const origNode = (kind === 'caption' || kind === 'body' || kind === 'list' || kind === 'footnote') && textValue.includes('$')
-    ? renderInlineMath(textValue)
-    : h('div', { class: 'para-orig' }, textValue)
+  let origNode = null
+  if (kind === 'algorithm') {
+    origNode = renderAlgorithmOrig(textValue)
+  } else if (kind === 'caption') {
+    origNode = renderCaptionOrig(textValue)
+  } else if ((kind === 'body' || kind === 'list' || kind === 'footnote') && textValue.includes('$')) {
+    origNode = renderInlineMath(textValue)
+  } else {
+    origNode = h('div', { class: 'para-orig' }, textValue)
+  }
+  if (kind === 'footnote' && origNode) {
+    origNode.prepend(h('span', { class: 'footnote-tag' }, '注'))
+  }
   const para = h(
     'div',
     {
@@ -2696,14 +2922,35 @@ function renderParagraph(paragraph) {
   if (kind === 'formula') {
     para.classList.add('kind-formula')
     const tex = textValue.trim()
+    const eqNo = typeof paragraph.equationNumber === 'string' ? paragraph.equationNumber.trim() : ''
     para.replaceChildren(
-      renderFormula(tex),
-      h('button', { class: 'link formula-link', onclick: () => jumpToPage(paragraph.page || 1) },
-        '见原文页 p.' + (paragraph.page || '?')),
+      h(
+        'div',
+        { class: 'formula-row' },
+        h('span', { class: 'formula-spacer', 'aria-hidden': 'true' }),
+        h('div', { class: 'formula-main' }, renderFormula(tex)),
+        h(
+          'div',
+          { class: 'formula-meta' },
+          eqNo ? h('span', { class: 'formula-eqno' }, eqNo) : null,
+          h(
+            'button',
+            {
+              type: 'button',
+              class: 'link formula-link',
+              title: '跳转到原文第 ' + (paragraph.page || 1) + ' 页',
+              onclick: () => jumpToPage(paragraph.page || 1),
+            },
+            'p.' + (paragraph.page || '?'),
+          ),
+        ),
+      ),
+      renderParaTools(paragraph, '', textValue),
     )
     return para
   }
   if (key) para.append(h('div', { class: 'para-zh', 'data-zh': key }, ...zhContent(key, entry && entry.zh, state.streams.get(key))))
+  para.append(renderParaTools(paragraph, key, textValue))
   const figures = key && state.figuresByKey ? state.figuresByKey[key] : null
   // 图挂在自己的图注段落上时，段落正文就是图注，图里不必再重复一遍
   const ownCaption = kind === 'caption'
@@ -4039,6 +4286,7 @@ function cycleDark() {
     /* 隐私模式下 localStorage 可能不可写，忽略 */
   }
   applyDark()
+  saveSessionSoon({ dark: state.dark })
   toast(state.dark === 0 ? 'PDF 深色：关' : state.dark === 1 ? 'PDF 深色：柔和' : 'PDF 深色：强')
   render()
 }
@@ -4247,8 +4495,10 @@ function buildFiguresByKey() {
   state.figuresByKey = map
   const paragraphs = (state.doc && state.doc.paragraphs) || []
   // 版面模型给的图已经按位置渲染在「图块自己那一段」里了，不用再按图注/正文猜着挂
-  const figures = (state.figures || []).filter(item => item.attachOrder === undefined || item.attachOrder === null)
-  if (figures.length === 0) return
+  const entries = (state.figures || [])
+    .map((figure, position) => ({ figure, position }))
+    .filter(({ figure }) => figure.attachOrder === undefined || figure.attachOrder === null)
+  if (entries.length === 0) return
   const labelOf = (text) => {
     const match = /(?:图|圖|Figure|Fig\.?)\s*([0-9]+|[IVXLC]+)/i.exec(String(text || ''))
     if (!match) return null
@@ -4271,13 +4521,13 @@ function buildFiguresByKey() {
     if (!label) continue
     const key = paragraphKey(paragraph)
     if (!key) continue
-    const position = figures.findIndex(
-      (figure, index) => !used.has(index) && Number(figure.label) === label &&
+    const hit = entries.find(
+      ({ figure, position }) => !used.has(position) && Number(figure.label) === label &&
         Number(figure.page) === Number(paragraph.page))
-    if (position < 0) continue
-    used.add(position)
+    if (!hit) continue
+    used.add(hit.position)
     if (!map[key]) map[key] = []
-    map[key].push({ ...figures[position], position })
+    map[key].push({ ...hit.figure, position: hit.position })
   }
   // ② 正文提到「图 N / Figure N」的段落
   for (const paragraph of paragraphs) {
@@ -4286,9 +4536,7 @@ function buildFiguresByKey() {
     if (!label) continue
     const key = paragraphKey(paragraph)
     if (!key) continue
-    const hits = state.figures
-      .map((figure, position) => ({ figure, position }))
-      .filter(({ figure }) => Number(figure.label) === label && !used.has(figure.position ?? -1))
+    const hits = entries.filter(({ figure, position }) => Number(figure.label) === label && !used.has(position))
     for (const { figure, position } of hits) {
       if (used.has(position)) continue
       used.add(position)
@@ -4297,9 +4545,8 @@ function buildFiguresByKey() {
     }
   }
   // 没有 label 的图：按同页最近段落兜底，至少让读者能看到
-  for (let position = 0; position < state.figures.length; position += 1) {
+  for (const { figure, position } of entries) {
     if (used.has(position)) continue
-    const figure = state.figures[position]
     if (figure.label) continue
     const samePage = paragraphs.find((paragraph) => Number(paragraph.page) === Number(figure.page))
     if (!samePage) continue
@@ -5665,6 +5912,51 @@ async function bootInner() {
   // 面板关掉再打开等于重开页面：把上次看到哪儿、停在哪个页签还原回去。
   // 本地一份（同端口刷新快）+ 服务端一份（桌面端重启换端口也不丢），取较新的。
   const session = pickSession(loadSession(), await loadSessionRemote())
+  if (session && typeof session === 'object') {
+    let localHasLayout = false
+    let localHasTree = false
+    let localHasAi = false
+    let localHasDark = false
+    try {
+      localHasLayout = localStorage.getItem(LAYOUT_KEY) !== null
+      localHasTree = localStorage.getItem(TREE_KEY) !== null
+      localHasAi = localStorage.getItem(AI_KEY) !== null
+      localHasDark = localStorage.getItem(DARK_KEY) !== null
+    } catch {
+      /* 隐私模式下忽略 */
+    }
+    let appliedRemotePrefs = false
+    if (!localHasLayout && session.layout && typeof session.layout === 'object') {
+      state.layout = {
+        side: clampNumber(session.layout.side, LAYOUT_LIMITS.side.min, LAYOUT_LIMITS.side.max, state.layout.side),
+        outline: clampNumber(session.layout.outline, LAYOUT_LIMITS.outline.min, LAYOUT_LIMITS.outline.max, state.layout.outline),
+        chat: clampNumber(session.layout.chat, LAYOUT_LIMITS.chat.min, LAYOUT_LIMITS.chat.max, state.layout.chat),
+        sideOpen: session.layout.sideOpen !== false,
+        outlineOpen: session.layout.outlineOpen !== false,
+        chatOpen: session.layout.chatOpen !== false,
+      }
+      appliedRemotePrefs = true
+    }
+    if (!localHasTree && Array.isArray(session.expanded)) {
+      state.expanded = new Set(session.expanded.filter((item) => typeof item === 'string'))
+      appliedRemotePrefs = true
+    }
+    if (!localHasAi && session.readerAi && typeof session.readerAi === 'object') {
+      state.ai = {
+        translateOn: session.readerAi.translateOn === true,
+        onlyZh: session.readerAi.onlyZh === true,
+        hideZh: session.readerAi.hideZh === true,
+        sideBySide: session.readerAi.sideBySide === true,
+      }
+      appliedRemotePrefs = true
+    }
+    if (!localHasDark && [0, 1, 2].includes(session.dark)) {
+      state.dark = session.dark
+      applyDark()
+      appliedRemotePrefs = true
+    }
+    if (appliedRemotePrefs) render()
+  }
   if (session && session.paperId && state.papers.some((paper) => paper.id === session.paperId)) {
     sessionRestoring = true
     try {
@@ -5689,9 +5981,9 @@ async function bootInner() {
 }
 
 // 关闭 / 切走时把当前位置记下来（pagehide 比 beforeunload 在嵌入场景更可靠）
-window.addEventListener('pagehide', () => saveSession())
+window.addEventListener('pagehide', () => saveSession({}, { keepalive: true }))
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') saveSession()
+  if (document.visibilityState === 'hidden') saveSession({}, { keepalive: true })
 })
 
 // 调试/自测钩子：浏览器控制台里可以直接读 state、注入 mock、手动触发渲染。

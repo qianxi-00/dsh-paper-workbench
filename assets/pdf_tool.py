@@ -93,10 +93,89 @@ def _join_lines(lines):
     return out
 
 
-def _span_meta(span):
-    """返回 (原始文本, 字号, 小写字体名)。"""
-    return (str(span.get("text") or "").replace("\u00a0", " "),
-            float(span.get("size") or 0), str(span.get("font") or "").lower())
+_TEX_CONTROL_MAP = {
+    0x10: "(", 0x11: ")", 0x12: "(", 0x13: ")",
+    0x14: "[", 0x15: "]", 0x16: "⌊", 0x17: "⌋",
+    0x18: "⌈", 0x19: "⌉", 0x1A: "{", 0x1B: "}",
+}
+_TEX_EX_LOW_MAP = {
+    0x00: "(", 0x01: ")", 0x02: "[", 0x03: "]",
+    0x04: "⌊", 0x05: "⌋", 0x06: "⌈", 0x07: "⌉",
+    0x08: "{", 0x09: "}", 0x0C: "|",
+}
+_TEX_EX_FONTS = ("txexs", "cmex", "euex", "lmex", "mathex")
+_CTRL_STRIP_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _sanitize_span_text(raw, font=""):
+    """清理 span 文本中的控制字符：TeX 数学扩展字体的括号槽位还原为对应符号。"""
+    text = str(raw or "").replace("\u00a0", " ")
+    if not text:
+        return ""
+    lowered = str(font or "").lower()
+    is_tex_ex = any(mark in lowered for mark in _TEX_EX_FONTS)
+    is_dingbats = "dingbat" in lowered
+    if any(ord(ch) < 32 and ch not in "\t\r\n" for ch in text):
+        chars = []
+        for ch in text:
+            code = ord(ch)
+            if code < 32 and ch not in "\t\r\n":
+                if is_tex_ex and code in _TEX_EX_LOW_MAP:
+                    chars.append(_TEX_EX_LOW_MAP[code])
+                elif not is_dingbats and code in _TEX_CONTROL_MAP:
+                    chars.append(_TEX_CONTROL_MAP[code])
+                else:
+                    continue
+            else:
+                chars.append(ch)
+        text = "".join(chars)
+    return _CTRL_STRIP_RE.sub("", text)
+
+
+def _join_spans(spans):
+    """按水平坐标间隙拼接一行内的 spans，修掉数学斜体/正文字体切换丢空格。"""
+    pieces = []
+    char_sizes = []
+    bold = False
+    prev_x1 = None
+    prev_size = 0.0
+    prev_tail = ""
+    pending_space = False
+    for span in spans or []:
+        font = str(span.get("font") or "").lower()
+        size = float(span.get("size") or 0)
+        raw = _sanitize_span_text(span.get("text") or "", font)
+        if not raw.strip():
+            if raw and pieces:
+                pending_space = True
+            continue
+        bbox = span.get("bbox")
+        has_box = isinstance(bbox, (list, tuple)) and len(bbox) == 4
+        x0 = float(bbox[0]) if has_box else None
+        x1 = float(bbox[2]) if has_box else None
+        if pieces:
+            lead = raw[0]
+            tail = prev_tail
+            need_space = pending_space
+            if not need_space and not tail.isspace() and not lead.isspace() and not tail.endswith("-"):
+                if prev_x1 is not None and x0 is not None:
+                    ref_size = max(prev_size, size, 8.0)
+                    gap = x0 - prev_x1
+                    if gap >= max(1.6, ref_size * 0.16) and not (CJK_RE.match(tail) and CJK_RE.match(lead)):
+                        need_space = True
+            if need_space and not (pieces[-1] and pieces[-1][-1].isspace()) and not lead.isspace():
+                pieces.append(" ")
+        pieces.append(raw)
+        pending_space = raw[-1].isspace()
+        prev_tail = raw.rstrip()[-1:] if raw.strip() else ""
+        if x1 is not None:
+            prev_x1 = x1
+        prev_size = size
+        bold = bold or any(mark in font for mark in BOLD_MARKS)
+        if size > 0:                    # 按字符数重复字号，中位数才是字符中位数
+            char_sizes.extend([size] * len(raw.strip()))
+    text = re.sub(r"\s+", " ", "".join(pieces)).strip()
+    return text, char_sizes, bold
 
 
 def _block_record(block):
@@ -105,15 +184,9 @@ def _block_record(block):
         return None
     lines, char_sizes, bold = [], [], False
     for line in block.get("lines") or []:
-        pieces = []
-        for raw, size, font in map(_span_meta, line.get("spans") or []):
-            if not raw.strip():
-                continue
-            pieces.append(raw)              # 行内 span 直接拼接，保留原始空格
-            bold = bold or any(mark in font for mark in BOLD_MARKS)
-            if size > 0:                    # 按字符数重复字号，中位数才是字符中位数
-                char_sizes.extend([size] * len(raw.strip()))
-        text = re.sub(r"\s+", " ", "".join(pieces)).strip()
+        text, line_sizes, line_bold = _join_spans(line.get("spans") or [])
+        bold = bold or line_bold
+        char_sizes.extend(line_sizes)
         if text:
             lines.append(text)
     text = _join_lines(lines).strip()       # 行与行之间用空格拼成一段（行尾断词先合上）
@@ -202,26 +275,42 @@ def _line_records(block):
     """把一个文本块的每一行拆成 {text, rect, size, bold}（PDF 原生坐标，未旋转）。"""
     out = []
     for line in block.get("lines") or []:
-        pieces, char_sizes, bold = [], [], False
-        for span in line.get("spans") or []:
-            raw = str(span.get("text") or "")
-            font = str(span.get("font") or "").lower()
-            size = float(span.get("size") or 0)
-            if raw.strip():
-                pieces.append(raw)
-                bold = bold or any(mark in font for mark in BOLD_MARKS)
-                if size > 0:
-                    char_sizes.extend([size] * len(raw.strip()))
-        text = _clean_inline("".join(pieces))
+        text, char_sizes, bold = _join_spans(line.get("spans") or [])
+        text = _clean_inline(text)
         if not text:
             continue
         rect = fitz.Rect(line.get("bbox") or (0, 0, 0, 0))
-        out.append({
+        record = {
             "text": text,
             "rect": rect,
             "size": round(statistics.median(char_sizes), 2) if char_sizes else 0.0,
             "bold": bold,
-        })
+            "_sizes": char_sizes,
+        }
+        if out:
+            prev = out[-1]
+            min_h = max(1.0, min(prev["rect"].height, rect.height))
+            overlap_y = min(prev["rect"].y1, rect.y1) - max(prev["rect"].y0, rect.y0)
+            max_size = max(prev["size"], record["size"], 8.0)
+            horiz_gap = rect.x0 - prev["rect"].x1
+            # 同一视觉基线被 PyMuPDF 拆成多个 line（加粗段首词组、行内下标/大括号片段）：合回一行，
+            # 否则 _split_paragraphs 会误把右侧行首 x0 当新段缩进，造成段内倒序。
+            if (overlap_y / min_h >= 0.45
+                    and horiz_gap >= -6.0
+                    and rect.x0 >= prev["rect"].x0 - 2.0
+                    and horiz_gap <= max_size * 1.2
+                    and not (re.fullmatch(r"[-+]?\d+(?:\.\d+)?%?", prev["text"])
+                             and re.fullmatch(r"[-+]?\d+(?:\.\d+)?%?", record["text"]))):
+                sep = " " if horiz_gap >= max(1.6, max_size * 0.16) and not prev["text"].endswith("-") else ""
+                prev["text"] = _clean_inline(prev["text"] + sep + record["text"])
+                prev["rect"] |= rect
+                prev["_sizes"].extend(char_sizes)
+                prev["size"] = round(statistics.median(prev["_sizes"]), 2) if prev["_sizes"] else 0.0
+                prev["bold"] = prev["bold"] and record["bold"]
+                continue
+        out.append(record)
+    for item in out:
+        item.pop("_sizes", None)
     return out
 
 
@@ -464,6 +553,8 @@ def _table_regions(info, body_size=0.0, repeated=None):
                     rect = fitz.Rect(rect.x0, max(rect.y0, cap_rect.y1 + 2), rect.x1, rect.y1)
                 elif cap_rect.y0 >= rect.y1:
                     rect = fitz.Rect(rect.x0, rect.y0, rect.x1, min(rect.y1, cap_rect.y0 - 2))
+        if caption is None and statistics.median(line["rect"].width for line in group) >= width * 0.30:
+            continue
         rect = fitz.Rect(max(24.0, rect.x0 - 10), max(12.0, rect.y0 - 4),
                          min(width - 20, rect.x1 + 10), min(height - 12, rect.y1 + 4)) & fitz.Rect(0, 0, width, height)
         regions.append({"rect": _to_rendered(info, rect), "caption": caption,
@@ -543,7 +634,9 @@ def _looks_like_title(text, numbered=False):
 def _paragraph_kind(text, size, body_size, rect, page_h, bold=False):
     if _is_caption_line(text):
         return "caption"
-    if size and body_size and size < body_size * 0.82:
+    in_footnote_zone = bool(page_h and rect and rect.y0 >= page_h * 0.68)
+    footnote_lead = bool(re.match(r"^(?:\d{1,2}|[*†‡§])\s*[A-Za-z\u4e00-\u9fff]", text))
+    if size and body_size and size < body_size * 0.82 and (in_footnote_zone or footnote_lead):
         return "footnote"
     # 小节标题在不少论文里和正文同字号，只是加粗（subsection* 之类）；这种一定带编号，
     # 或者整行就是编号（"2.1"，标题在同一个块的下一段/下一块里）。
@@ -958,16 +1051,13 @@ def _heuristic_outline(doc):
             if block.get("type", 0) != 0:
                 continue
             for line in block.get("lines") or []:
-                pieces, size = [], 0.0
-                for raw, span_size, _font in map(_span_meta, line.get("spans") or []):
-                    if not raw.strip() or span_size <= 0:
-                        continue
-                    pieces.append(raw)
-                    size = max(size, span_size)
-                    size_chars[span_size] = size_chars.get(span_size, 0) + len(raw.strip())
-                text = re.sub(r"\s+", " ", "".join(pieces)).strip()
-                if text:
-                    rows.append((index + 1, round(size, 1), text))
+                text, line_sizes, _bold = _join_spans(line.get("spans") or [])
+                if not text or not line_sizes:
+                    continue
+                size = max(line_sizes)
+                for span_size in line_sizes:
+                    size_chars[span_size] = size_chars.get(span_size, 0) + 1
+                rows.append((index + 1, round(size, 1), text))
     if not size_chars:
         return [], True  # 扫描件没有文字层，大纲只能为空
     threshold = _clustered_body_size(size_chars) * HEURISTIC_RATIO
@@ -1577,17 +1667,13 @@ def _page_text_lines(page):
     lines = []
     for block in page.get_text("dict").get("blocks", []):
         for line in block.get("lines", []):
-            spans = [span for span in line.get("spans", []) if str(span.get("text") or "").strip()]
-            if not spans:
-                continue
-            text = "".join(str(span.get("text") or "") for span in spans).strip()
+            text, char_sizes, _bold = _join_spans(line.get("spans", []))
             if text == "":
                 continue
-            sizes = [float(span.get("size") or 0) for span in spans if float(span.get("size") or 0) > 0]
             lines.append({
                 "rect": fitz.Rect(line["bbox"]),
                 "text": text,
-                "size": (sum(sizes) / len(sizes)) if sizes else 0.0,
+                "size": (sum(char_sizes) / len(char_sizes)) if char_sizes else 0.0,
             })
     return lines
 

@@ -786,6 +786,120 @@ equal('远端恢复：没有重复提交', remoteSubmits, 1)
 equal('远端恢复：续拉同一个 job', remotePolls, 2)
 equal('远端恢复：页数正确', remoteResumed.blocks.map(item => item.page), [1])
 fs.rmSync(remoteRoot, { recursive: true, force: true })
+
+// v1 refillText：线性 Y 标定 + formula_number 吸附到公式右编号并移除孤立 (3) 块
+const v1CalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-layout-v1cal-'))
+const v1CalPdf = path.join(v1CalRoot, 'paper.pdf')
+fs.writeFileSync(v1CalPdf, 'fake pdf')
+const v1CalFile = path.join(v1CalRoot, 'paper-v1cal', 'layout.json')
+fs.mkdirSync(path.dirname(v1CalFile), { recursive: true })
+const invY = y => Math.round((y - 48.4) / 0.8925)
+fs.writeFileSync(v1CalFile, JSON.stringify({
+  version: LAYOUT_VERSION,
+  at: '2026-01-01T00:00:00.000Z',
+  model: LAYOUT_MODEL,
+  source: { size: 8, mtimeMs: 1 },
+  pageCount: 1,
+  servicePages: 1,
+  warnings: [],
+  blocks: [
+    { order: 0, page: 1, label: 'text', kind: 'body', bbox: { x: 40, y: invY(60), width: 320, height: 18 }, text: 'Top calibrated' },
+    { order: 1, page: 1, label: 'text', kind: 'body', bbox: { x: 40, y: invY(200), width: 320, height: 18 }, text: 'Middle calibrated' },
+    { order: 2, page: 1, label: 'formula', kind: 'formula', bbox: { x: 80, y: invY(320), width: 220, height: 22 }, latex: 'y = x + 1', text: '' },
+    { order: 3, page: 1, label: 'formula_number', kind: 'body', bbox: { x: 500, y: invY(322), width: 30, height: 16 }, text: '(3)' },
+    { order: 4, page: 1, label: 'text', kind: 'body', bbox: { x: 40, y: invY(620), width: 320, height: 18 }, text: 'Bottom calibrated' },
+  ],
+  figures: [],
+}))
+const v1CalRunner = createLayout({
+  store: {
+    paperFile: (id, name) => path.join(v1CalRoot, id, name),
+    resolvePdf: async () => ({ path: v1CalPdf }),
+    readJson: async (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return fallback } },
+    writeJsonAtomic: async (file, value) => { fs.writeFileSync(file, JSON.stringify(value)) },
+  },
+  pdf: {
+    callTool: async (_cmd, payload) => ({
+      ok: true,
+      page: payload.page,
+      lines: [
+        { x: 42, y: 60, x2: 350, y2: 78, text: 'Top calibrated end' },
+        { x: 42, y: 200, x2: 350, y2: 218, text: 'Middle calibrated end' },
+        { x: 82, y: 320, x2: 290, y2: 340, text: 'y = x + 1' },
+        { x: 502, y: 322, x2: 526, y2: 338, text: '(3)' },
+        { x: 42, y: 620, x2: 350, y2: 638, text: 'Bottom calibrated end' },
+      ],
+    }),
+  },
+})
+await v1CalRunner.refillText('paper-v1cal')
+const v1CalSaved = JSON.parse(fs.readFileSync(v1CalFile, 'utf8'))
+equal('v1 refillText 吸附 formula_number 并删除孤立编号块', v1CalSaved.blocks.map(b => b.kind), ['body', 'body', 'formula', 'body'])
+equal('v1 refillText 公式带上右编号 (3)', v1CalSaved.blocks[2].equationNumber, '(3)')
+equal('v1 refillText 线性 Y 标定修正首段文本', v1CalSaved.blocks[0].text, 'Top calibrated end')
+equal('v1 refillText 线性 Y 标定修正末段文本', v1CalSaved.blocks[3].text, 'Bottom calibrated end')
+fs.rmSync(v1CalRoot, { recursive: true, force: true })
+
+// v2 refillText：离线读 raw/*.jsonl + 新 PDF page_lines 发布新版 revision（不重传）
+const v2Root = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-layout-v2refill-'))
+const v2Pdf = path.join(v2Root, 'paper.pdf')
+fs.writeFileSync(v2Pdf, 'fake v2 pdf')
+const { createLayoutArchive } = await import('../lib/layout-archive.js')
+const v2Store = {
+  paperFile: (id, name) => path.join(v2Root, id, name),
+  resolvePdf: async () => ({ path: v2Pdf }),
+  readJson: async (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return fallback } },
+  writeJsonAtomic: async (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value)) },
+}
+const v2Archive = createLayoutArchive({ store: v2Store })
+const v2RawPayload = JSON.stringify({
+  result: {
+    layoutParsingResults: [{
+      prunedResult: {
+        width: 400,
+        height: 600,
+        parsing_res_list: [
+          { block_id: 'b0', block_label: 'text', block_content: 'stale service text', block_bbox: [20, 40, 320, 64] },
+        ],
+      },
+    }],
+  },
+})
+const savedRaw = await v2Archive.saveRaw('paper-v2', v2RawPayload)
+await v2Archive.publish('paper-v2', {
+  version: 1,
+  schemaVersion: 2,
+  revision: 'rev-v2-init',
+  source: { sha256: 'a'.repeat(64) },
+  model: LAYOUT_MODEL,
+  jobId: 'job-v2',
+  pageCount: 1,
+  pages: [{ n: 1, width: 400, height: 600, rawRef: { hash: savedRaw.hash }, lineAssignments: [], excludedLines: [], issues: [], quality: { status: 'passed', summary: { blocking: 0, informational: 0 } } }],
+  blocks: [{ id: 'p1:0', blockId: 'p1:0', page: 1, order: 0, kind: 'body', text: 'old buggy text' }],
+  figures: [],
+  tables: 0,
+  warnings: [],
+  quality: { status: 'passed', summary: { blocking: 0, informational: 0 } },
+}, { model: LAYOUT_MODEL })
+let v2Submits = 0
+const v2Runner = createLayout({
+  store: v2Store,
+  pdf: {
+    callTool: async (_cmd, payload) => ({
+      ok: true,
+      page: payload.page,
+      lines: [{ x: 22, y: 42, x2: 300, y2: 58, text: 'Fresh PDF line after v2 refill' }],
+    }),
+  },
+  ocr: { submitJob: async () => { v2Submits += 1; return {} } },
+})
+const v2Out = await v2Runner.refillText('paper-v2')
+const v2Published = await v2Archive.readPublished('paper-v2')
+equal('v2 refillText 不触发 OCR 上传', v2Submits, 0)
+equal('v2 refillText 发布有效 blocks', v2Published.blocks[0].text, 'Fresh PDF line after v2 refill')
+check('v2 refillText 返回新 revision', Boolean(v2Out.revision && v2Published.revision === v2Out.revision))
+fs.rmSync(v2Root, { recursive: true, force: true })
+
 console.log(`\n${pass} PASS / ${fail} FAIL`)
 process.exit(fail === 0 ? 0 : 1)
 

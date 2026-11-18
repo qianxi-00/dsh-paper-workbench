@@ -41,6 +41,7 @@ class Element {
   getAttribute(key) { return this.attributes[key] ?? null }
   removeAttribute(key) { delete this.attributes[key] }
   append(...nodes) { for (let node of nodes.flat()) { if (!(node instanceof Element)) node = new Element('#text', String(node)); node.parentElement = this; this.children.push(node) } }
+  prepend(...nodes) { const list = nodes.flat().map(node => { if (!(node instanceof Element)) node = new Element('#text', String(node)); node.parentElement = this; return node }); this.children.unshift(...list) }
   replaceChildren(...nodes) { this._text = ''; this.children = []; this.append(...nodes) }
   remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(node => node !== this) }
   insertBefore(node, next) { const index = this.children.indexOf(next); if (index < 0) return this.append(node); node.parentElement = this; this.children.splice(index, 0, node) }
@@ -370,6 +371,86 @@ await check('floating translate button works after selection collapses, clamps n
   const mathAsk = f.messages.findLast(item => item.data.type === 'paper-ask').data
   assert.equal(mathAsk.text, '讲解这段选中的原文：\n> $x^2 + y^2 = z^2$')
   f.window.getSelection = prevGetSel
+})
+
+await check('compare typography renders algorithm box, equationNumber, footnote tag, caption prefix, page divider and cleans selection', async () => {
+  const f = await fixture('?embed=1&native=1')
+  await f.open(paper.id)
+  await f.receive({ type: 'native-state', available: true, open: true, conversationId: 'c-one' })
+  f.api.state.doc = {
+    revision: 'rev-typo',
+    sections: [{ id: 's1', title: '1 Method', page: 1 }],
+    paragraphs: [
+      { id: 'ptop', section: 's1', page: 1, kind: 'body', hash: 'h-top', text: 'Intro sentence on page one.' },
+      { id: 'palg', section: 's1', page: 2, kind: 'algorithm', hash: 'h-alg', text: 'Algorithm 1: Retrieval block.\nfor i in 1..n do\n  return $x_i$ // finish' },
+      { id: 'peq', section: 's1', page: 2, kind: 'formula', hash: 'h-eq', latex: 'y = x + 1', text: 'y = x + 1', equationNumber: '(3)' },
+      { id: 'pfn', section: 's1', page: 2, kind: 'footnote', hash: 'h-fn', text: '1 Further details in appendix.' },
+      { id: 'pcap', section: 's1', page: 2, kind: 'caption', hash: 'h-cap', text: 'Figure 2: Pipeline summary.' },
+    ],
+  }
+  f.api.render()
+  await f.settle()
+
+  const divider = f.document.querySelector('.page-divider-btn')
+  assert.ok(divider && divider.textContent === 'p.2', 'cross-page paragraph inside same section must render p.2 divider')
+  const algNode = f.document.getElementById('para-palg')
+  assert.ok(algNode.classList.contains('kind-algorithm'))
+  assert.equal(algNode.querySelector('.algo-head')?.textContent, 'Algorithm 1: Retrieval block.')
+  assert.deepEqual(algNode.querySelectorAll('.algo-ln').map(n => n.textContent), ['1', '2'])
+  assert.ok(algNode.querySelectorAll('.algo-kw').some(n => n.textContent === 'for'))
+  assert.ok(algNode.querySelectorAll('.algo-kw').some(n => n.textContent === 'return'))
+  assert.equal(algNode.querySelector('.algo-comment')?.textContent, '// finish')
+  const secondCodeSpan = algNode.querySelectorAll('.algo-code')[1]
+  assert.match(secondCodeSpan?.style?.paddingLeft || '', /em/)
+
+  assert.equal(f.document.querySelector('#para-peq .formula-eqno')?.textContent, '(3)')
+  assert.equal(f.document.querySelector('#para-pfn .footnote-tag')?.textContent, '注')
+  assert.equal(f.document.querySelector('#para-pcap .caption-prefix')?.textContent.trim(), 'Figure 2:')
+
+  const cloneNode = node => {
+    const copy = new Element(node.tagName.toLowerCase(), node._text)
+    copy.attributes = { ...node.attributes }
+    for (const child of node.children) copy.append(cloneNode(child))
+    return copy
+  }
+  const fnNode = f.document.getElementById('para-pfn')
+  const compare = f.document.querySelector('.compare')
+  const prevGetSel = f.window.getSelection
+  f.window.getSelection = () => ({
+    rangeCount: 1,
+    anchorNode: algNode,
+    toString: () => 'dirty algo selection',
+    getRangeAt: () => ({
+      commonAncestorContainer: compare,
+      cloneContents: () => {
+        const frag = new Element('fragment')
+        frag.append(cloneNode(algNode), cloneNode(fnNode))
+        return frag
+      },
+    }),
+  })
+  await f.document.emit('selectionchange')
+  await f.button('讲解选中').emit('click')
+  const ask = f.messages.findLast(item => item.data.type === 'paper-ask').data
+  const quoted = ask.text.split('\n').slice(1).join('\n')
+  assert.equal(quoted.includes('译本段'), false, 'must strip .para-tools button text')
+  assert.equal(quoted.includes('讲解'), false, 'must strip .para-tools explain button text')
+  assert.equal(quoted.includes('注'), false, 'must strip .footnote-tag')
+  assert.equal(quoted.includes('p.2'), false, 'must strip .para-tool-page text')
+  assert.equal(/^\s*1\b/m.test(quoted.split('\n')[1] || ''), false, 'must strip .algo-ln line numbers')
+  assert.match(quoted, /return \$x_i\$ \/\/ finish/)
+  assert.match(quoted, /1 Further details in appendix\./)
+  f.window.getSelection = prevGetSel
+
+  const { mergeUiState } = await import('../lib/paper-context.js')
+  const merged = mergeUiState(
+    { version: 2, dark: 1, readerAi: { translateOn: true, sideBySide: false } },
+    { dark: 99, readerAi: { sideBySide: true, hacked: 'bad', onlyZh: 'nope' } },
+  )
+  assert.equal(merged.dark, 1, 'invalid dark value must keep valid previous value')
+  assert.deepEqual(merged.readerAi, { translateOn: true, sideBySide: true })
+  const updated = mergeUiState(merged, { dark: 2 })
+  assert.equal(updated.dark, 2)
 })
 
 console.log(`\nPASS ${passed} / FAIL 0`)
