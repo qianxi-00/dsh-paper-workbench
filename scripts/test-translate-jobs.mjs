@@ -170,9 +170,9 @@ function createFakeServices(handler) {
 }
 
 async function main() {
-  // ---------------------------------------------------------------- 1. concurrency = 3 FIFO 与真实并发加速
+  // ---------------------------------------------------------------- 1. concurrency = 3 FIFO 与真实并发
 
-  await check('concurrency=3：严格按原文 FIFO 顺序发请求、真实并发数为 3、耗时显著低于串行、写库无丢失', async () => {
+  await check('concurrency=3：严格按原文 FIFO 顺序发请求、真实并发数为 3、写库无丢失', async () => {
     const s1 = makeSection({ id: 's1', order: 0, title: '1 Introduction' })
     const s2 = makeSection({ id: 's2', order: 1, title: '2 Method' })
     // 6 个批次（每批 6 段，共 36 段）：chunk 0..2 在 s1，chunk 3..5 在 s2
@@ -187,15 +187,15 @@ async function main() {
     await store.writeDoc('conc-1', makeDoc({ sections: [s1, s2], paragraphs }))
 
     const startedBatches = []
-    const finishedBatches = []
-    // 故意让 chunk 0 比 chunk 1 慢，验证先完成的 chunk 会流式先吐出来，但发起顺序仍严格 FIFO
-    const perBatchDelay = [90, 30, 50, 70, 30, 40]
+    let releaseFirst
+    let releaseOthers
+    const firstBatchGate = new Promise((resolve) => { releaseFirst = resolve })
+    const otherBatchesGate = new Promise((resolve) => { releaseOthers = resolve })
     const services = createFakeServices(async (options, callIndex) => {
       const ids = idsIn(options)
       startedBatches.push(ids[0])
-      const waitMs = perBatchDelay[callIndex] || 30
-      await delay(waitMs, options.signal)
-      finishedBatches.push(ids[0])
+      if (callIndex === 0) await firstBatchGate
+      else if (callIndex < 3) await otherBatchesGate
       return [
         { type: 'text-delta', index: 0, text: JSON.stringify(ids.map((id) => ({ id, zh: '译-' + id }))) },
         { type: 'finish', reason: { kind: 'stop' } },
@@ -203,16 +203,23 @@ async function main() {
     })
 
     const engine = aiModule.createAi({ store, getServices: services.getServices })
-    const t0 = Date.now()
-    const events = await collect(engine.translate({ id: 'conc-1', concurrency: 3 }))
-    const elapsed = Date.now() - t0
+    const result = collect(engine.translate({ id: 'conc-1', concurrency: 3 }))
+    try {
+      await waitFor(() => services.llm.stats().inFlight >= 3)
+      eq(startedBatches, ['p00', 'p06', 'p12'], '首批仍阻塞时，只能按 FIFO 启动前三批')
+      releaseOthers()
+      await waitFor(() => startedBatches.length > 3)
+      eq(startedBatches[3], 'p18', '较晚批次完成后应立即补位，不必等待首批')
+    } finally {
+      releaseOthers()
+      releaseFirst()
+      await result
+    }
+    const events = await result
 
     eq(services.llm.calls.length, 6, '应分为 6 批')
     eq(services.llm.stats().maxInFlight, 3, '并发数必须确实达到 3')
     eq(startedBatches, ['p00', 'p06', 'p12', 'p18', 'p24', 'p30'], '请求必须严格按原文 chunks 顺序 FIFO 发出')
-    ok(finishedBatches[0] !== 'p00', '较快的 chunk 1 应先于较慢的 chunk 0 完成并流式吐出')
-    const serialTotalMs = perBatchDelay.reduce((a, b) => a + b, 0) // 310ms
-    ok(elapsed < serialTotalMs * 0.72, '并发耗时 (' + elapsed + 'ms) 应显著低于串行耗时 (' + serialTotalMs + 'ms)')
 
     const startMeta = events.find((e) => e.event === 'start' && e.data && e.data.kind === 'start')
     ok(Boolean(startMeta), 'start 事件应包含 kind=start 元信息')
