@@ -52,9 +52,11 @@ const byId = (report, id) => (report.checks || []).find((entry) => entry.id === 
 // 1. 全绿
 {
   const report = await runDoctor(baseInput())
+  const [maj, min] = String(process.versions.node || '0.0').split('.').map((v) => Number(v) || 0)
+  const expectedNode = maj > 22 || (maj === 22 && min >= 5) ? 'ok' : 'warn'
   check('全绿时 ok=true', report.ok === true)
   check('检查项数量 = 8', report.checks.length === 8, String(report.checks.length))
-  check('node 项为 ok', byId(report, 'node').status === 'ok')
+  check('node 项符合当前 Node 版本状态', byId(report, 'node').status === expectedNode, byId(report, 'node').status)
   check('python 项带上版本', byId(report, 'python').detail.includes('3.12.3'))
   check('ai 项带上 provider 数与默认模型', byId(report, 'ai').detail.includes('1 个 provider') && byId(report, 'ai').detail.includes('magic/m1'))
 }
