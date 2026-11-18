@@ -214,31 +214,43 @@ await check('the floating native action preserves full text and its source after
   await f.document.emit('selectionchange')
   await f.document.emit('mouseup', { target: f.document.getElementById('para-p2') })
   f.clearSelection()
-  await f.button('发送到会话').emit('click')
+  await f.button('讲解选中').emit('click')
   const request = f.messages.findLast(item => item.data.type === 'paper-ask').data
   assert.ok(request.text.includes(text), 'full selected text must be retained')
   assert.equal(request.scope, 'selection')
   assert.equal(request.page, 3)
   assert.equal(request.blockId, 'b-two')
+
+  // Test 引用追问 (paper-draft) sends blockquote + citation without auto-prompting
+  f.select('Quoted snippet for follow-up.', ['para-p2'])
+  await f.document.emit('selectionchange')
+  await f.document.emit('mouseup', { target: f.document.getElementById('para-p2') })
+  f.clearSelection()
+  await f.button('引用追问').emit('click')
+  const draftMsg = f.messages.findLast(item => item.data.type === 'paper-draft')?.data
+  assert.ok(draftMsg, '引用追问 should post paper-draft to native host')
+  assert.match(draftMsg.text, /> Quoted snippet for follow-up\./)
+  assert.match(draftMsg.text, /\[p\.3\]/)
 })
 
 await check('native reading actions expose whole-paper scope and connection status without repainting selections', async () => {
   const f = await fixture()
   await f.open()
   const original = f.document.getElementById('para-p1')
+  assert.equal(f.document.getElementById('translate-toggle'), null, 'conflicting • 译 switch must be removed')
   assert.match(f.document.getElementById('native-reader-status')?.textContent || '', /尚未连接/)
   await f.receive({ type: 'native-state', available: true, open: false, conversationId: 'c-one' })
   assert.equal(f.document.getElementById('para-p1'), original, 'connection status must not replace reader nodes')
   assert.equal(f.document.getElementById('native-reader-status').textContent, '')
   f.select('leftover selected paragraph', ['para-p1'])
-  await f.button('总结全文').emit('click')
+  await f.button('全文导读').emit('click')
   const request = f.messages.findLast(item => item.data.type === 'paper-ask').data
   assert.equal(request.scope, 'paper')
   assert.equal(request.paperId, paper.id)
   assert.equal(request.blockId, null)
   await f.receive({ type: 'native-state', available: false, open: false })
   assert.match(f.document.getElementById('native-reader-status').textContent, /尚未连接/)
-  assert.equal(f.button('总结全文').disabled, true)
+  assert.equal(f.button('全文导读').disabled, true)
 })
 
 await check('library comparison keeps both selected papers without requiring one to be open', async () => {
@@ -294,17 +306,17 @@ await check('section citation jump, reading display modes, guide action, and gen
   await f.button('双语').emit('click')
   assert.equal(f.document.querySelector('.compare').classList.contains('show-zh'), true)
 
-  await f.button('导读').emit('click')
+  await f.button('全文导读').emit('click')
   const guideAsk = f.messages.findLast(item => item.data.type === 'paper-ask')?.data
   assert.equal(guideAsk?.scope, 'paper')
   assert.match(guideAsk?.text || '', /3 分钟阅读导览/)
 })
 
-await check('floating translate button works after selection collapses, clamps negative top, and extractCleanSelection preserves TeX while stripping translations', async () => {
+await check('floating translate button opens snippet card, supports 重译整段, clamps negative top, and extractCleanSelection preserves TeX', async () => {
   const f = await fixture()
   await f.open()
   await f.receive({ type: 'native-state', available: true, open: true, conversationId: 'c-one' })
-  f.select('Second paragraph.', ['para-p2'])
+  f.select('Second', ['para-p2'])
   // Simulate selection starting scrolled above viewport (top: -300)
   const p2 = f.document.getElementById('para-p2')
   f.window.innerHeight = 800
@@ -313,20 +325,27 @@ await check('floating translate button works after selection collapses, clamps n
     getBoundingClientRect: () => ({ left: 40, top: -300 }),
   }
   const prevGetSel = f.window.getSelection
-  f.window.getSelection = () => ({ rangeCount: 1, anchorNode: p2, toString: () => 'Second paragraph.', getRangeAt: () => customRange })
+  f.window.getSelection = () => ({ rangeCount: 1, anchorNode: p2, toString: () => 'Second', getRangeAt: () => customRange })
   await f.document.emit('selectionchange')
   await f.document.emit('mouseup', { target: p2 })
   const menu = f.document.querySelector('.floating-menu')
   assert.ok(menu, 'floating menu should render')
   assert.ok(parseFloat(menu.style.top) >= 8, 'menu top must never be negative: ' + menu.style.top)
+  assert.equal(menu.textContent.includes('解释公式/术语'), false, 'redundant 解释公式/术语 button must be removed')
   // Collapse selection before clicking 翻译 (real browser mousedown behavior)
   f.window.getSelection = () => null
   const beforeTrans = f.requests.filter(r => r.url === '/paper-workbench/ai/translate').length
   await f.button('翻译').emit('click')
   await f.settle()
+  assert.ok(f.document.querySelector('.sel-trans'), 'must render anchored .sel-trans snippet card even when paragraph has key')
   const transReq = f.requests.filter(r => r.url === '/paper-workbench/ai/translate').at(-1)
   assert.equal(f.requests.filter(r => r.url === '/paper-workbench/ai/translate').length, beforeTrans + 1)
-  assert.deepEqual(transReq.args.keys, ['hash-two'], 'must translate paragraph key rather than ad-hoc fallback')
+  assert.equal(transReq.args.text, 'Second', 'must send selected snippet text to ad-hoc translate')
+  assert.equal(transReq.args.contextText, 'Second paragraph.', 'must include surrounding paragraph contextText')
+  await f.button('重译整段').emit('click')
+  await f.settle()
+  const fullParaReq = f.requests.filter(r => r.url === '/paper-workbench/ai/translate').at(-1)
+  assert.deepEqual(fullParaReq.args.keys, ['hash-two'], '重译整段 must retranslate the whole paragraph key')
 
   // Real cloneContents() test: bilingual selection strips .para-zh and keeps [data-tex]; interior math selection returns data-tex
   const compare = f.document.querySelector('.compare')
@@ -343,6 +362,7 @@ await check('floating translate button works after selection collapses, clamps n
     toString: () => 'dirty selection including 缓存译文 and katex spans',
     getRangeAt: () => ({
       commonAncestorContainer: compare,
+      getBoundingClientRect: () => ({ left: 40, top: 90 }),
       cloneContents: () => {
         const frag = new Element('fragment')
         frag.append(cloneNode(p1), cloneNode(p2))
@@ -351,6 +371,7 @@ await check('floating translate button works after selection collapses, clamps n
     }),
   })
   await f.document.emit('selectionchange')
+  await f.document.emit('mouseup', { target: p1 })
   await f.button('讲解选中').emit('click')
   const cleanAsk = f.messages.findLast(item => item.data.type === 'paper-ask').data
   assert.match(cleanAsk.text, /\$x\^2 \+ y\^2 = z\^2\$/)
@@ -363,10 +384,12 @@ await check('floating translate button works after selection collapses, clamps n
     toString: () => 'x2+y2=z2',
     getRangeAt: () => ({
       commonAncestorContainer: inlineMath,
+      getBoundingClientRect: () => ({ left: 40, top: 90 }),
       cloneContents: () => new Element('fragment', 'x2+y2=z2'),
     }),
   })
   await f.document.emit('selectionchange')
+  await f.document.emit('mouseup', { target: inlineMath })
   await f.button('讲解选中').emit('click')
   const mathAsk = f.messages.findLast(item => item.data.type === 'paper-ask').data
   assert.equal(mathAsk.text, '讲解这段选中的原文：\n> $x^2 + y^2 = z^2$')
@@ -422,6 +445,7 @@ await check('compare typography renders algorithm box, equationNumber, footnote 
     toString: () => 'dirty algo selection',
     getRangeAt: () => ({
       commonAncestorContainer: compare,
+      getBoundingClientRect: () => ({ left: 40, top: 90 }),
       cloneContents: () => {
         const frag = new Element('fragment')
         frag.append(cloneNode(algNode), cloneNode(fnNode))
@@ -430,6 +454,7 @@ await check('compare typography renders algorithm box, equationNumber, footnote 
     }),
   })
   await f.document.emit('selectionchange')
+  await f.document.emit('mouseup', { target: algNode })
   await f.button('讲解选中').emit('click')
   const ask = f.messages.findLast(item => item.data.type === 'paper-ask').data
   const quoted = ask.text.split('\n').slice(1).join('\n')

@@ -678,6 +678,143 @@ async function main() {
     eq(llm.calls[1].messages[0].content[0].text, 'second sentence')
   })
 
+  await check('translate 带 text + contextText/paperTitle：注入只读消歧上下文且不泄漏到译文', async () => {
+    const llm = fakeLlm(() => textChunks('【待译片段】它显著降低了高带宽内存访问开销。'))
+    const engine = ai.createAi({ store, ...fakeServices(llm) })
+    const events = await collect(
+      engine.translate({
+        id: 'adhoc-ctx',
+        text: 'It significantly lowers HBM access overhead.',
+        contextText:
+          'In FlashAttention-2, online softmax delays rescaling until the end of the inner loop. It significantly lowers HBM access overhead.',
+        paperTitle: 'FlashAttention-2',
+      }),
+    )
+    eq(llm.calls.length, 1)
+    const sentPrompt = llm.calls[0].messages[0].content[0].text
+    const sentSystem = llm.calls[0].system
+    ok(sentPrompt.includes('FlashAttention-2'), 'user 提示词应包含论文标题')
+    ok(sentPrompt.includes('online softmax delays rescaling'), 'user 提示词应包含所在段落只读上下文')
+    ok(
+      sentPrompt.includes('只翻译【待译片段】本身，【所在段落上下文】仅供理解指代与专业术语，绝不要把上下文一起翻译出来'),
+      'user 提示词应包含只读消歧硬约束',
+    )
+    ok(
+      sentSystem.includes('只翻译【待译片段】本身，【所在段落上下文】仅供理解指代与专业术语，绝不要把上下文一起翻译出来'),
+      'system 提示词应包含只读消歧硬约束',
+    )
+    const done = events.find((e) => e.event === 'done')
+    eq(done.data.key, 'selection')
+    eq(done.data.text, '它显著降低了高带宽内存访问开销。', '不应把上下文或【待译片段】标签带入译文结果')
+    const trans = await store.readTrans('adhoc-ctx')
+    eq(Object.keys(trans.entries || {}).length, 0)
+  })
+
+  await check('并发常量、clampConcurrency(1..100, 默认10) 与连续多次 429/503 指数退避重试 (2s/4s/8s)', async () => {
+    eq(ai.DEFAULT_TRANSLATE_CONCURRENCY, 10)
+    eq(ai.MAX_TRANSLATE_CONCURRENCY, 100)
+    eq(ai.clampConcurrency(undefined), 10)
+    eq(ai.clampConcurrency(null), 10)
+    eq(ai.clampConcurrency('bad'), 10)
+    eq(ai.clampConcurrency(0), 1)
+    eq(ai.clampConcurrency(-5), 1)
+    eq(ai.clampConcurrency(24), 24)
+    eq(ai.clampConcurrency(100), 100)
+    eq(ai.clampConcurrency(250), 100)
+    eq(ai.clampConcurrency(undefined, 1), 1)
+
+    const section = makeSection({ id: 's1' })
+    const paragraphs = [makeParagraph({ id: 'p0', order: 0, text: 'Retry test sentence.' })]
+    await store.writeDoc('tr-multi-429', makeDoc({ sections: [section], paragraphs }))
+    const slept = []
+    const llm = fakeLlm((options, index) => {
+      if (index === 0) {
+        return [{ type: 'finish', reason: { kind: 'error', failure: { message: '429 Too Many Requests', status: 429 } } }]
+      }
+      if (index === 1) {
+        return [{ type: 'finish', reason: { kind: 'error', failure: { message: 'Service overloaded', status: 503 } } }]
+      }
+      if (index === 2) {
+        return [{ type: 'finish', reason: { kind: 'error', failure: { message: 'rate limit exceeded', status: 429 } } }]
+      }
+      return echoBatch(options)
+    })
+    const events = await collect(
+      ai.createAi({
+        store,
+        ...fakeServices(llm),
+        sleepImpl: async (ms) => {
+          slept.push(ms)
+        },
+      }).translate({ id: 'tr-multi-429' }),
+    )
+    eq(slept, [2000, 4000, 8000])
+    eq(llm.calls.length, 4)
+    eq(events[events.length - 1].data.ok, true)
+    const trans = await store.readTrans('tr-multi-429')
+    eq(trans.entries[paragraphs[0].hash].zh, '译-p0')
+  })
+
+  await check('buildPaperGlossary：提取标题/摘要(<=600字)/缩写与混合大小写专名/已译节标题并自动注入提示词', async () => {
+    const s1 = makeSection({ id: 's1', order: 0, title: '1 Introduction' })
+    const s2 = makeSection({ id: 's2', order: 1, title: '2 Multi-Head Latent Attention' })
+    const s3 = makeSection({ id: 's3', order: 2, title: '3 Ablation Study' })
+    const longAbstract =
+      'We introduce DeepSeek-V3 with Multi-Head Latent Attention (MLA) and FlashAttention kernels to compress KV cache in HBM and SRAM. ' +
+      'Combined with LoRA, RoPE, and AdamW in PyTorch, our MoE architecture scales cleanly. '.repeat(6)
+    const paragraphs = [
+      makeParagraph({
+        id: 'gp0',
+        order: 0,
+        section: 's1',
+        text: 'DeepSeek models adopt MLA and FlashAttention to reduce HBM bandwidth bottlenecks while keeping SRAM utilization high.',
+      }),
+      makeParagraph({
+        id: 'gp1',
+        order: 1,
+        section: 's2',
+        text: 'Using RoPE positional embeddings, LoRA adapters, and AdamW in PyTorch, HBM traffic drops substantially for MLA and MoE.',
+      }),
+    ]
+    const doc = makeDoc({ title: 'Doc Fallback Title', sections: [s1, s2, s3], paragraphs })
+    const meta = { title: 'DeepSeek-V3 Technical Report', abstract: longAbstract }
+    const trans = {
+      entries: {
+        [ai.titleKey(s1)]: { zh: '1 引言' },
+        [ai.titleKey(s2)]: { zh: '2 多头潜在注意力机制' },
+      },
+    }
+
+    const t0 = performance.now()
+    const glossary = ai.buildPaperGlossary({ doc, meta, trans })
+    const elapsedMs = performance.now() - t0
+    ok(elapsedMs < 25, '术语表提取应纯确定性零延迟完成，实际 ' + elapsedMs.toFixed(2) + 'ms')
+    eq(glossary.title, 'DeepSeek-V3 Technical Report')
+    ok(glossary.abstract.length > 0 && glossary.abstract.length <= 600, '摘要概览应截断在 600 字以内，实际 ' + glossary.abstract.length)
+    for (const term of ['FlashAttention', 'DeepSeek', 'LoRA', 'RoPE', 'AdamW', 'PyTorch', 'MLA', 'HBM', 'SRAM', 'MoE']) {
+      ok(glossary.terms.some((t) => t.includes(term) || term.includes(t)), '应提取出关键术语：' + term + '，实际：' + glossary.terms.join(','))
+    }
+    ok(glossary.terms.length <= 24, '术语上限 24')
+    eq(glossary.headings, [
+      { en: '1 Introduction', zh: '1 引言' },
+      { en: '2 Multi-Head Latent Attention', zh: '2 多头潜在注意力机制' },
+    ])
+    ok(glossary.glossaryBlock.includes('2 Multi-Head Latent Attention -> 2 多头潜在注意力机制'), 'glossaryBlock 应包含已译标题对照锚点')
+
+    await store.addPaper({ id: 'tr-glossary', title: meta.title, abstract: meta.abstract })
+    await store.writeDoc('tr-glossary', doc)
+    await store.writeTrans('tr-glossary', trans)
+    const llm = fakeLlm(echoBatch)
+    const events = await collect(ai.createAi({ store, ...fakeServices(llm) }).translate({ id: 'tr-glossary' }))
+    eq(events[events.length - 1].data.ok, true)
+    const batchUserPrompt = llm.calls[0].messages[0].content[0].text
+    ok(batchUserPrompt.includes('FlashAttention') && batchUserPrompt.includes('LoRA'), '批量翻译请求应自动注入术语表')
+    ok(
+      batchUserPrompt.includes('2 Multi-Head Latent Attention -> 2 多头潜在注意力机制'),
+      '批量翻译请求应自动注入已译章节标题术语锚点',
+    )
+  })
+
   // ---------------------------------------------------------------- chat
 
   await check('chat：delta 聚合、done、chat.json 落盘与历史接续', async () => {
@@ -865,18 +1002,20 @@ async function main() {
   console.log('')
   console.log('检查 ' + (passed + failed) + ' 项：通过 ' + passed + '，失败 ' + failed)
   if (failed === 0) {
-    await store.closeDb()
-    await fsp.rm(tmpRoot, { recursive: true, force: true })
     console.log('ALL PASS')
   } else {
-    console.log('临时目录保留：' + tmpRoot)
     console.log('FAILED ' + failed)
     process.exitCode = 1
   }
 }
 
-main().catch((error) => {
+try {
+  await main()
+} catch (error) {
   console.log('FAIL  测试脚本异常终止 -> ' + (error && error.stack ? error.stack : String(error)))
   console.log('FAILED 1')
   process.exitCode = 1
-})
+} finally {
+  await store.closeDb().catch(() => {})
+  await fsp.rm(tmpRoot, { recursive: true, force: true }).catch(() => {})
+}

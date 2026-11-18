@@ -75,6 +75,9 @@ jobs:
       - name: Run agent installer regression tests
         run: node scripts/test-install-agent.mjs
 
+      - name: Run release safety regression tests
+        run: node scripts/test-release-safety.mjs
+
       - name: Run JSON fallback DB engine regression
         env:
           PB_DB_ENGINE: json
@@ -86,6 +89,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
     steps:
       - name: Checkout repository
@@ -112,6 +118,10 @@ jobs:
           else
             TAG="v${VERSION}"
           fi
+          if [ "$TAG" != "v${VERSION}" ]; then
+            echo "发布标签 ${TAG} 与 package.json 版本 ${VERSION} 不匹配；请使用 v${VERSION}。" >&2
+            exit 1
+          fi
           case "$TAG" in
             *-*) PRERELEASE="true" ;;
             *) PRERELEASE="false" ;;
@@ -128,6 +138,56 @@ jobs:
           echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
           (cd dist && sha256sum "${TARBALL}" > SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
+
+      - name: Publish to npm with provenance (when NPM_TOKEN secret is configured)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+          RELEASE_TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const { createHash } = require('node:crypto');
+          const { spawnSync } = require('node:child_process');
+          if (!process.env.NPM_TOKEN) {
+            console.log('未配置 NPM_TOKEN，跳过 npm 发布；GitHub Release 将继续。');
+            process.exit(0);
+          }
+          const registry = 'https://registry.npmjs.org';
+          const tarball = path.resolve('dist', process.env.RELEASE_TARBALL);
+          const integrity = 'sha512-' + createHash('sha512').update(fs.readFileSync(tarball)).digest('base64');
+          const view = spawnSync('npm', ['view', `dsh-paper-workbench@${process.env.RELEASE_VERSION}`, 'dist.integrity', '--json', '--registry', registry], { encoding: 'utf8' });
+          if (view.error) throw view.error;
+          if (view.status === 0) {
+            if (JSON.parse(view.stdout) !== integrity) throw new Error('npm 上已有同版本，但 dist.integrity 与本地 tgz 不一致；请核对发布产物。');
+            console.log('npm 上已有相同版本和完整性，安全跳过重复发布。');
+            process.exit(0);
+          }
+          let registryError;
+          for (const text of [view.stdout, view.stderr]) {
+            try { registryError = JSON.parse(text).error; } catch {}
+            if (registryError) break;
+          }
+          if (registryError?.code !== 'E404') {
+            throw new Error('查询 npm 版本失败，停止发布：' + (view.stderr || view.stdout || `exit ${view.status}`));
+          }
+          // npm publish 仅在 registry 明确返回 E404 后执行，不修改用户级 npm 配置。
+          const configDir = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'pb-npm-'));
+          const userconfig = path.join(configDir, 'npmrc');
+          try {
+            fs.writeFileSync(userconfig, '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n', { mode: 0o600 });
+            const published = spawnSync('npm', ['publish', tarball, '--access', 'public', '--provenance', '--tag', process.env.RELEASE_PRERELEASE === 'true' ? 'next' : 'latest', '--registry', registry], {
+              stdio: 'inherit', env: { ...process.env, NPM_CONFIG_USERCONFIG: userconfig },
+            });
+            if (published.error) throw published.error;
+            if (published.status !== 0) throw new Error(`npm 发布失败（退出码 ${published.status}），请检查日志后重试。`);
+          } finally {
+            fs.rmSync(configDir, { recursive: true, force: true });
+          }
+          NODE
 
       - name: Generate bilingual release notes
         env:
@@ -147,49 +207,41 @@ jobs:
             "",
             "---",
             "",
-            "### Agent 一键安装（中文）",
-            "适用支持 Skill / CLI 的 Coding Agent（Claude Code / Codex / Antigravity / DSH 等）：",
+            "### 一行命令快速安装（免 git clone · 中文）",
             "",
-            "1. 克隆仓库（或解压发布包）：",
-            "   ```bash",
-            "   git clone https://github.com/qianxi-00/dsh-paper-workbench.git",
-            "   cd dsh-paper-workbench",
-            "   ```",
-            "2. 预览与执行自动安装器（零 npm 依赖，自动探测 DSH Home、校验 Node/PyMuPDF、备份 `.bak` 后写入 `profiles/desktop/package.json`）：",
-            "   ```bash",
-            "   node scripts/install-agent.mjs --dry-run --json",
-            "   node scripts/install-agent.mjs --json",
-            "   ```",
-            "3. 环境自检：",
-            "   ```bash",
-            "   npm run doctor",
-            "   ```",
-            "4. 把仓库中的 `skills/install-dsh-paper-workbench/SKILL.md` 复制给任意 AI Agent，即可引导完成全流程安装，并清晰汇报以下可选项：",
-            "   - PaddleOCR Token（仅扫描件 OCR / PP-StructureV3 云端版面解析需要）",
-            "   - 可选远程数据库 PostgreSQL / MySQL（默认使用本地 SQLite / JSON 退化引擎，无需外置库）",
-            "   - 可选 Obsidian Vault（自动探测或手动设置知识库路径）",
-            "   - 在 DSH 桌面端「插件管理」启用并重启/重载 `dsh-paper-workbench`",
+            "- **Windows PowerShell 5.1+ / pwsh 7**（自动适配 DSH 桌面端与 Web 端）：",
+            "  ```powershell",
+            "  irm https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.ps1 | iex",
+            "  ```",
+            "- **macOS / Linux / Git Bash**：",
+            "  ```bash",
+            "  curl -fsSL https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.sh | bash",
+            "  ```",
+            "- **DSH Web CLI / 插件管理页**：",
+            "  ```bash",
+            "  dsh plugin --profile web add github:qianxi-00/dsh-paper-workbench",
+            "  ```",
+            "- **AI Coding Agent 本地/自动化安装**（Claude Code / Codex / Antigravity / DSH）：",
+            "  可执行上面的一行安装脚本，或在仓库目录运行 `node scripts/install-agent.mjs --dry-run --json`、`node scripts/install-agent.mjs --json` 与 `npm run doctor`（详见 `skills/install-dsh-paper-workbench/SKILL.md`）。装完重启/重载 DSH 即可生效，并在「⚙ 设置」按需配置网络代理（如 `127.0.0.1:7897`）、PaddleOCR Token、可选 PostgreSQL/MySQL 与 Obsidian Vault。",
             "",
             "---",
             "",
-            "### One-Click Agent Install (English)",
-            "Works with any CLI-capable AI Coding Agent (Claude Code, Codex, Antigravity, DSH):",
+            "### One-Line Zero-Clone Install (English)",
             "",
-            "1. Clone the repository (or extract the release `.tgz` tarball):",
-            "   ```bash",
-            "   git clone https://github.com/qianxi-00/dsh-paper-workbench.git",
-            "   cd dsh-paper-workbench",
-            "   ```",
-            "2. Preview and execute the zero-dependency cross-platform installer (backs up `profiles/desktop/package.json` to `.bak` before writing):",
-            "   ```bash",
-            "   node scripts/install-agent.mjs --dry-run --json",
-            "   node scripts/install-agent.mjs --json",
-            "   ```",
-            "3. Verify the runtime environment:",
-            "   ```bash",
-            "   npm run doctor",
-            "   ```",
-            "4. Or provide `skills/install-dsh-paper-workbench/SKILL.md` to your AI Agent to automate cloning, verifying PyMuPDF, updating DSH desktop dependencies, and reporting optional post-install steps (PaddleOCR token, optional PostgreSQL/MySQL external DB, optional Obsidian Vault, and enabling/restarting `dsh-paper-workbench` in DSH Plugin Manager).",
+            "- **Windows PowerShell 5.1+ / pwsh 7** (auto-detects DSH Desktop & Web):",
+            "  ```powershell",
+            "  irm https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.ps1 | iex",
+            "  ```",
+            "- **macOS / Linux / Git Bash**:",
+            "  ```bash",
+            "  curl -fsSL https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.sh | bash",
+            "  ```",
+            "- **DSH Web CLI / Plugin Manager**:",
+            "  ```bash",
+            "  dsh plugin --profile web add github:qianxi-00/dsh-paper-workbench",
+            "  ```",
+            "- **AI Coding Agent Install** (Claude Code, Codex, Antigravity, DSH):",
+            "  Run the 1-line installer above or follow `skills/install-dsh-paper-workbench/SKILL.md` (`node scripts/install-agent.mjs --dry-run --json` -> `node scripts/install-agent.mjs --json` -> `npm run doctor`). Reload/restart DSH after install; optional settings include Network Proxy, PaddleOCR Token, PostgreSQL/MySQL, and Obsidian Vault.",
           ];
           fs.writeFileSync("dist/RELEASE_NOTES.md", lines.join("\n") + "\n", "utf8");
           '

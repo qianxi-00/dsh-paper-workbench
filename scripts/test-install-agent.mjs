@@ -13,6 +13,9 @@ import { fileURLToPath } from 'node:url'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '..')
 const INSTALLER = path.join(REPO_ROOT, 'scripts', 'install-agent.mjs')
+const INSTALL_PS1 = path.join(REPO_ROOT, 'scripts', 'install.ps1')
+const INSTALL_SH = path.join(REPO_ROOT, 'scripts', 'install.sh')
+const ICON_SVG = path.join(REPO_ROOT, 'icon.svg')
 const SKILL_MD = path.join(REPO_ROOT, 'skills', 'install-dsh-paper-workbench', 'SKILL.md')
 const CI_YML = path.join(REPO_ROOT, '.github', 'workflows', 'ci.yml')
 const RELEASE_YML = path.join(REPO_ROOT, '.github', 'workflows', 'release.yml')
@@ -176,7 +179,8 @@ try {
     eq(report.writtenFiles, [])
     ok(report.plannedFiles.includes(pkg1Path), 'plannedFiles 应含 package.json')
     ok(report.plannedFiles.includes(pkg1Path + '.bak'), 'plannedFiles 应含 .bak')
-    ok(Array.isArray(report.optionalUserConfigs) && report.optionalUserConfigs.length === 4, '应列出 4 项用户可选/待确认项')
+    ok(Array.isArray(report.optionalUserConfigs) && report.optionalUserConfigs.length === 5, '应列出 5 项用户可选/待确认项')
+    ok(report.optionalUserConfigs.some((x) => /代理|Proxy/i.test(x.title)), '应包含网络代理项')
     ok(report.optionalUserConfigs.some((x) => /PaddleOCR/i.test(x.title)), '应包含 PaddleOCR Token 项')
     ok(report.optionalUserConfigs.some((x) => /PostgreSQL|MySQL/i.test(x.title)), '应包含 PostgreSQL/MySQL 项')
     ok(report.optionalUserConfigs.some((x) => /Obsidian/i.test(x.title)), '应包含 Obsidian Vault 项')
@@ -186,6 +190,59 @@ try {
     ok(!existsSync(pkg1Path + '.bak'), 'dry-run 不应生成 .bak')
     ok(!existsSync(data1), 'dry-run 不应创建数据目录')
     ok(!existsSync(ws1), 'dry-run 不应创建工作区目录')
+  })
+
+  await check('安装报告识别 network.proxyUrl 模式并脱敏认证信息', async () => {
+    const proxyData = path.join(tmpRoot, 'proxy-data')
+    const directData = path.join(tmpRoot, 'direct-data')
+    const autoData = path.join(tmpRoot, 'auto-data')
+    await Promise.all([proxyData, directData, autoData].map((dir) => fsp.mkdir(dir, { recursive: true })))
+    await fsp.writeFile(path.join(proxyData, 'config.json'), JSON.stringify({
+      network: { mode: 'custom', proxyUrl: 'http://config-user:config-secret@127.0.0.1:7897' },
+    }))
+    await fsp.writeFile(path.join(directData, 'config.json'), JSON.stringify({
+      network: { mode: 'direct', proxyUrl: 'http://config-user:config-secret@127.0.0.1:7897' },
+    }))
+    await fsp.writeFile(path.join(autoData, 'config.json'), JSON.stringify({ network: { mode: 'auto', proxyUrl: '' } }))
+    const env = {
+      HTTPS_PROXY: '', https_proxy: '',
+      HTTP_PROXY: 'http://env-user:env-secret@127.0.0.1:8888', http_proxy: '',
+      ALL_PROXY: '', all_proxy: '', PB_DISABLE_SYSTEM_PROXY: '1',
+    }
+    const args = (dataDir) => [
+      '--dsh-home', dsh1, '--data-dir', dataDir, '--workspace', ws1,
+      '--dry-run', '--json', '--skip-py-install',
+    ]
+
+    const custom = runInstaller(args(proxyData), env)
+    eq(custom.status, 0, custom.stderr || custom.stdout)
+    const customReport = JSON.parse(custom.stdout)
+    eq(customReport.checks.proxy, {
+      configured: true,
+      url: 'http://127.0.0.1:7897',
+      authConfigured: true,
+      source: 'custom',
+    })
+    ok(!custom.stdout.includes('config-secret') && !custom.stdout.includes('env-secret'), 'JSON 安装报告不得泄漏代理凭据')
+
+    const direct = runInstaller(args(directData), env)
+    eq(direct.status, 0, direct.stderr || direct.stdout)
+    eq(JSON.parse(direct.stdout).checks.proxy.configured, false, 'direct 必须压过系统代理环境变量')
+    eq(JSON.parse(direct.stdout).checks.proxy.source, 'direct')
+    ok(JSON.parse(direct.stdout).optionalUserConfigs.find((item) => item.id === 'network_proxy').how.includes('不会覆盖该模式'))
+    ok(!direct.stdout.includes('config-secret') && !direct.stdout.includes('env-secret'))
+
+    const auto = runInstaller(args(autoData), env)
+    eq(auto.status, 0, auto.stderr || auto.stdout)
+    const autoReport = JSON.parse(auto.stdout)
+    eq(autoReport.checks.proxy.url, 'http://127.0.0.1:8888')
+    eq(autoReport.checks.proxy.authConfigured, true)
+    eq(autoReport.checks.proxy.source, 'env')
+    ok(!auto.stdout.includes('env-secret'), '自动探测环境代理也不得泄漏认证信息')
+
+    const human = runInstaller(args(proxyData).filter((arg) => arg !== '--json'), env)
+    eq(human.status, 0, human.stderr || human.stdout)
+    ok(!human.stdout.includes('config-secret'), '人类可读安装报告不得泄漏代理凭据')
   })
 
   // 3. 实际写入（--mode link）：验证依赖、原字段保留、.bak 备份、node_modules 链接
@@ -362,7 +419,7 @@ try {
     ok(!fm[1].includes('\t'), 'SKILL.md frontmatter 不能含 Tab')
     ok(/^name:\s*install-dsh-paper-workbench\s*$/m.test(fm[1]), 'frontmatter name 应为 install-dsh-paper-workbench')
     ok(/^description:\s*\S+/m.test(fm[1]), 'frontmatter 必须包含非空 description')
-    for (const token of ['install-agent.mjs', '--dry-run', '--json', 'doctor.mjs', 'PaddleOCR', 'PostgreSQL', 'Obsidian']) {
+    for (const token of ['install.ps1', 'install.sh', 'install-agent.mjs', '--dry-run', '--json', 'doctor.mjs', '127.0.0.1:7897', 'PaddleOCR', 'PostgreSQL', 'Obsidian']) {
       ok(content.includes(token), 'SKILL.md 缺少关键说明：' + token)
     }
   })
@@ -410,12 +467,176 @@ try {
       'npm test',
       'npm pack',
       'SHA256SUMS.txt',
+      'NPM_TOKEN',
+      'npm publish',
+      '--provenance',
+      'id-token: write',
       'softprops/action-gh-release@v2',
+      'install.ps1',
+      'install.sh',
       'install-agent.mjs',
       'SKILL.md',
     ]) {
       ok(yml.includes(token), 'release.yml 缺少要素：' + token)
     }
+  })
+
+  // 10. icon.svg 存在且为合法独立 SVG XML (< 3 KB)
+  await check('icon.svg 存在、体积 < 3 KB 且为合法独立 SVG XML', () => {
+    ok(existsSync(ICON_SVG), '仓库根目录缺少 icon.svg')
+    const raw = readFileSync(ICON_SVG, 'utf8')
+    const bytes = Buffer.byteLength(raw, 'utf8')
+    ok(bytes > 100 && bytes < 3072, 'icon.svg 体积应小于 3 KB，当前为 ' + bytes + ' bytes')
+    ok(/^\s*<svg\b[\s\S]*<\/svg>\s*$/.test(raw), 'icon.svg 应以 <svg ...> 包裹并以 </svg> 结尾')
+    ok(raw.includes('xmlns="http://www.w3.org/2000/svg"'), 'icon.svg 应包含 SVG 命名空间 xmlns')
+    ok(raw.includes('viewBox="0 0 128 128"'), 'icon.svg 应包含 viewBox="0 0 128 128"')
+    ok(/#2563EB/i.test(raw) && /#1D4ED8/i.test(raw), 'icon.svg 应包含约定品牌蓝渐变色')
+    const pyXml = spawnSync('python', ['-c', 'import sys,xml.etree.ElementTree as ET; ET.fromstring(open(sys.argv[1], encoding="utf-8").read())', ICON_SVG], {
+      encoding: 'utf8',
+      timeout: 8000,
+    })
+    if (pyXml.status === 0 || (pyXml.stderr && pyXml.stderr.trim())) {
+      eq(pyXml.status, 0, 'XML 解析 icon.svg 失败：' + pyXml.stderr)
+    }
+  })
+
+  // 11. scripts/install.ps1 存在且在假 DSH_HOME 下通过 -DryRun
+  await check('scripts/install.ps1 存在且在隔离假 DSH_HOME 下通过 -DryRun 预览', async () => {
+    ok(existsSync(INSTALL_PS1), '缺少 scripts/install.ps1')
+    const psRaw = readFileSync(INSTALL_PS1, 'utf8')
+    for (const token of ['-Version', '-Profile', '-DshHome', '-DryRun', 'minimumReleaseAgeExclude', 'dsh.profile.bundles', 'pymupdf']) {
+      ok(psRaw.includes(token), 'install.ps1 缺少关键逻辑：' + token)
+    }
+
+    const psBins = []
+    const winPs51 = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    const candidates = [
+      { bin: 'pwsh', legacy: false },
+      ...(process.platform === 'win32' && existsSync(winPs51) ? [{ bin: winPs51, legacy: true }] : []),
+      ...(process.platform === 'win32' ? [{ bin: 'powershell', legacy: true }] : []),
+    ]
+    for (const item of candidates) {
+      const probe = spawnSync(item.bin, ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], {
+        encoding: 'utf8',
+        timeout: 8000,
+      })
+      if (probe.status === 0 && String(probe.stdout || '').trim()) {
+        psBins.push(item)
+        if (psBins.length >= 2) break
+      }
+    }
+
+    if (psBins.length === 0 && process.platform !== 'win32') {
+      return
+    }
+    ok(psBins.length > 0, 'Windows 环境应存在可用的 pwsh 或 powershell')
+
+    const fakePsHome = path.join(tmpRoot, 'dsh-ps-dry')
+    const fakePsProf = path.join(fakePsHome, 'profiles', 'desktop')
+    const fakePsPkg = path.join(fakePsProf, 'package.json')
+    const fakePsWs = path.join(fakePsProf, 'pnpm-workspace.yaml')
+    const initPkg = JSON.stringify({ name: 'dsh-profile-desktop', private: true, dependencies: {} }, null, 2) + '\n'
+    await fsp.mkdir(fakePsProf, { recursive: true })
+    await fsp.writeFile(fakePsPkg, initPkg, 'utf8')
+    await fsp.writeFile(fakePsWs, 'packages:\n  - .\n', 'utf8')
+
+    for (const { bin, legacy } of psBins) {
+      const args = [
+        '-NoProfile',
+        '-NonInteractive',
+        ...(legacy ? ['-ExecutionPolicy', 'Bypass'] : []),
+        '-File',
+        INSTALL_PS1,
+        '-DryRun',
+        '-DshHome',
+        fakePsHome,
+        '-Version',
+        'v1.1.0',
+      ]
+      const run = spawnSync(bin, args, {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30000,
+        env: {
+          ...process.env,
+          DSH_HOME: fakePsHome,
+          DSH_PAPER_WORKBENCH_DATA: path.join(tmpRoot, 'data-ps-dry'),
+        },
+      })
+      eq(run.status, 0, bin + ' 执行失败：' + String(run.stderr || run.stdout))
+      ok(/dry-run/i.test(run.stdout), bin + ' 执行 install.ps1 -DryRun 应输出 dry-run 预览信息')
+      eq(readFileSync(fakePsPkg, 'utf8'), initPkg, 'install.ps1 -DryRun 不应修改 package.json')
+      ok(!existsSync(fakePsPkg + '.bak'), 'install.ps1 -DryRun 不应创建 .bak')
+      ok(!existsSync(path.join(fakePsHome, 'plugins')), 'install.ps1 -DryRun 不应创建 plugins 目录')
+    }
+  })
+
+  // 12. scripts/install.sh 存在、严格 LF 换行且在假 DSH_HOME 下通过 --dry-run
+  await check('scripts/install.sh 存在、严格 LF 换行（无 CRLF）且通过 bash --dry-run', async () => {
+    ok(existsSync(INSTALL_SH), '缺少 scripts/install.sh')
+    const shBuf = readFileSync(INSTALL_SH)
+    ok(!shBuf.includes(0x0d), 'scripts/install.sh 严禁包含 CR (\\r\\n) 字符，必须保持纯 LF 换行以兼容 curl ... | bash')
+    const shRaw = shBuf.toString('utf8')
+    ok(shRaw.startsWith('#!/usr/bin/env bash\n'), 'scripts/install.sh 必须以 #!/usr/bin/env bash\\n 开头')
+    for (const token of ['--version', '--profile', '--dsh-home', '--dry-run', 'minimumReleaseAgeExclude', 'dsh.profile.bundles', 'pymupdf']) {
+      ok(shRaw.includes(token), 'install.sh 缺少关键逻辑：' + token)
+    }
+
+    let bashBin = ''
+    if (process.platform === 'win32') {
+      const cands = []
+      const whereGit = spawnSync('where.exe', ['git'], { encoding: 'utf8', timeout: 4000 })
+      if (whereGit.status === 0) {
+        for (const gitExe of String(whereGit.stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+          const gitRoot = path.resolve(path.dirname(gitExe), '..')
+          cands.push(path.join(gitRoot, 'bin', 'bash.exe'), path.join(gitRoot, 'usr', 'bin', 'bash.exe'))
+        }
+      }
+      cands.push('C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git\\usr\\bin\\bash.exe')
+      for (const cand of cands) {
+        if (!existsSync(cand)) continue
+        const probe = spawnSync(cand, ['-c', 'printf ok'], { encoding: 'utf8', timeout: 4000 })
+        if (probe.status === 0 && probe.stdout === 'ok') {
+          bashBin = cand
+          break
+        }
+      }
+    } else {
+      const probe = spawnSync('bash', ['-c', 'printf ok'], { encoding: 'utf8', timeout: 4000 })
+      if (probe.status === 0 && probe.stdout === 'ok') bashBin = 'bash'
+    }
+
+    if (!bashBin) {
+      return
+    }
+
+    const syntaxRes = spawnSync(bashBin, ['-n', INSTALL_SH], { encoding: 'utf8', timeout: 8000 })
+    eq(syntaxRes.status, 0, 'bash -n 语法检查失败：' + (syntaxRes.stderr || syntaxRes.stdout))
+
+    const fakeShHome = path.join(tmpRoot, 'dsh-sh-dry')
+    const fakeShProf = path.join(fakeShHome, 'profiles', 'desktop')
+    const fakeShPkg = path.join(fakeShProf, 'package.json')
+    const fakeShWs = path.join(fakeShProf, 'pnpm-workspace.yaml')
+    const initPkg = JSON.stringify({ name: 'dsh-profile-desktop', private: true, dependencies: {} }, null, 2) + '\n'
+    await fsp.mkdir(fakeShProf, { recursive: true })
+    await fsp.writeFile(fakeShPkg, initPkg, 'utf8')
+    await fsp.writeFile(fakeShWs, 'packages:\n  - .\n', 'utf8')
+
+    const run = spawnSync(bashBin, [INSTALL_SH, '--dry-run', '--dsh-home', fakeShHome, '--version', 'v1.1.0'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      timeout: 30000,
+      env: {
+        ...process.env,
+        DSH_HOME: fakeShHome,
+        DSH_PAPER_WORKBENCH_DATA: path.join(tmpRoot, 'data-sh-dry'),
+      },
+    })
+    eq(run.status, 0, String(run.stderr || run.stdout))
+    ok(/dry-run/i.test(run.stdout), 'install.sh --dry-run 应输出 dry-run 预览信息')
+    eq(readFileSync(fakeShPkg, 'utf8'), initPkg, 'install.sh --dry-run 不应修改 package.json')
+    ok(!existsSync(fakeShPkg + '.bak'), 'install.sh --dry-run 不应创建 .bak')
+    ok(!existsSync(path.join(fakeShHome, 'plugins')), 'install.sh --dry-run 不应创建 plugins 目录')
   })
 } finally {
   try {

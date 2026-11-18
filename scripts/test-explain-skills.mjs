@@ -13,7 +13,13 @@ import path from 'node:path'
 const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'pb-explain-skills-test-'))
 process.env.DSH_PAPER_WORKBENCH_DATA = tmpRoot
 
-const { buildExplainPacket, buildPaperExplain, extractTextReferences, formatExplainPacket } = await import('../lib/explain.js')
+const {
+  buildExplainPacket,
+  buildPaperExplain,
+  detectExplainFocusProfile,
+  extractTextReferences,
+  formatExplainPacket,
+} = await import('../lib/explain.js')
 const { BEGIN_MARKER, END_MARKER, ensureWorkspaceSkills } = await import('../lib/workspace-skills.js')
 
 let pass = 0
@@ -337,7 +343,73 @@ async function runExplainTests() {
   )
   check('buildPaperExplain: 自动解析匹配配图的 PNG 磁盘路径并生成完整文本',
     asyncRes.packet.surroundingFigures.some((f) => f.label === 2 && f.pngPath && f.pngPath.endsWith('fig-1.png')) &&
-    asyncRes.text.includes('## 3. 周围与引用关联图表'))
+    asyncRes.text.includes('## 3. 周围与引用关联图表') &&
+    Boolean(asyncRes.explainGuide && asyncRes.systemHint))
+
+  // ---- 7. 自适应深度讲解画像 detectExplainFocusProfile 与动态框架测试
+  const formulaProf = detectExplainFocusProfile({
+    selection: 'O^{(j)} = \\text{diag}(\\ell^{(j)})^{-1} \\tilde{O}^{(j)}, \\quad \\mathcal{L}(\\theta) = -\\sum_{t=1}^T \\log p_\\theta(y_t)',
+    focusParagraphs: [sample.doc.paragraphs[6]],
+  })
+  check('detectExplainFocusProfile: 识别公式选段 (profile=formula)',
+    formulaProf.profile === 'formula' &&
+    formulaProf.hasFormula === true &&
+    formulaProf.hasAlgorithm === false &&
+    formulaProf.hasTableOrMetric === false,
+    JSON.stringify(formulaProf))
+
+  const algProf = detectExplainFocusProfile({
+    selection: 'Algorithm 1: FlashAttention-2 Forward Pass\n1: Divide Q into Tr blocks\n2: for i = 1..Tr do\n3: Compute unnormalized output in O(N^2 d / M)',
+    focusParagraphs: [sample.doc.paragraphs[11]],
+  })
+  check('detectExplainFocusProfile: 识别算法/伪代码与复杂度选段 (profile=algorithm)',
+    algProf.profile === 'algorithm' &&
+    algProf.hasAlgorithm === true &&
+    algProf.hasTableOrMetric === false,
+    JSON.stringify(algProf))
+
+  const expProf = detectExplainFocusProfile({
+    selection: 'In Table 1, our ablation study achieves 225 TFLOPs/s (92.4 ± 0.3), outperforming SOTA baselines by +41%.',
+    focusParagraphs: [sample.doc.paragraphs[12], sample.doc.paragraphs[13]],
+  })
+  check('detectExplainFocusProfile: 识别实验表格/消融/SOTA 选段 (profile=experiment)',
+    expProf.profile === 'experiment' &&
+    expProf.hasTableOrMetric === true &&
+    expProf.hasFormula === false,
+    JSON.stringify(expProf))
+
+  const conceptProf = detectExplainFocusProfile({
+    selection: 'Standard attention materializes the intermediate matrix in high-bandwidth memory, creating a fundamental memory-hierarchy bottleneck for long sequences.',
+    focusParagraphs: [{ kind: 'body', text: 'Standard attention materializes the intermediate matrix in high-bandwidth memory.' }],
+  })
+  check('detectExplainFocusProfile: 识别纯概念与机制论述选段 (profile=concept)',
+    conceptProf.profile === 'concept' &&
+    conceptProf.hasFormula === false &&
+    conceptProf.hasAlgorithm === false &&
+    conceptProf.hasTableOrMetric === false,
+    JSON.stringify(conceptProf))
+
+  // 验证方法节（同时含公式+算法+引用表）与纯实验节的自适应 explainGuide 注入
+  check('secPacket (s4): explainGuide 组合注入公式符号表、算法数据流与实验维度及 save_study_note 提示',
+    secPacket.focusProfile.hasFormula === true &&
+    secPacket.focusProfile.hasAlgorithm === true &&
+    secPacket.explainGuide.includes('逐符号物理/数学含义表') &&
+    secPacket.explainGuide.includes('输入输出与张量/数据流追踪') &&
+    secPacket.explainGuide.includes('/paper-workbench/app?paper=flash-attn-v2') &&
+    secPacket.explainGuide.includes('save_study_note') &&
+    formatExplainPacket(secPacket).includes('## 6. 自适应深度讲解分析框架'))
+
+  const expSecPacket = buildExplainPacket({
+    ...sample,
+    mode: 'section',
+    sectionId: 's5',
+  })
+  check('expSecPacket (s5): 实验章节自适应注入实验设定公平性、增益来源与消融结论要求',
+    expSecPacket.focusProfile.profile === 'experiment' &&
+    expSecPacket.focusProfile.hasTableOrMetric === true &&
+    expSecPacket.explainGuide.includes('实验设定公平性') &&
+    expSecPacket.explainGuide.includes('核心指标增益来源') &&
+    expSecPacket.explainGuide.includes('消融实验证明了什么'))
 }
 
 async function runWorkspaceSkillsTests() {

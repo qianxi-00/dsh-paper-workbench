@@ -5,9 +5,18 @@
  * 运行：node scripts/test-arxiv-feed.mjs
  */
 import assert from 'node:assert/strict'
+import { promises as fsp } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+const TMP_DATA_DIR = await fsp.mkdtemp(path.join(os.tmpdir(), 'pb-test-arxiv-feed-'))
+process.env.DSH_PAPER_WORKBENCH_DATA = TMP_DATA_DIR
 
 import {
+  ARXIV_DOMAINS,
   PRESET_TOPICS,
+  normalizeTopicsConfig,
+  resolveSubscribedTopics,
   parseArxivAtom,
   parseOpenAlexWorks,
   normalizeTitle,
@@ -493,6 +502,216 @@ await check('mergeFeedItems：DOI 大小写无关去重与 limit 截断保留最
   assert.equal(deduped[1].abstract, 'Detailed abstract from OpenAlex.')
   assert.equal(deduped[1].publishedAt, '2026-11-10T08:00:00Z')
 })
+
+await check('ARXIV_DOMAINS：完整覆盖官方 8 大学科领域与子分类编码', () => {
+  const expectedDomains = {
+    cs: ['cs.AI', 'cs.CL', 'cs.CV', 'cs.LG', 'cs.IR', 'cs.RO', 'cs.SE', 'cs.CR', 'cs.DB', 'cs.DC', 'cs.HC'],
+    physics: ['quant-ph', 'cond-mat', 'astro-ph', 'hep-th', 'hep-ph', 'gr-qc', 'physics.optics'],
+    math: ['math.OC', 'math.PR', 'math.NA', 'math.ST', 'math.CO', 'math.AG'],
+    stat: ['stat.ML', 'stat.ME', 'stat.TH', 'stat.AP'],
+    eess: ['eess.AS', 'eess.IV', 'eess.SP', 'eess.SY'],
+    'q-bio': ['q-bio.NC', 'q-bio.GN', 'q-bio.BM', 'q-bio.QM'],
+    'q-fin': ['q-fin.CP', 'q-fin.PM', 'q-fin.ST', 'q-fin.TR'],
+    econ: ['econ.EM', 'econ.TH', 'econ.GN'],
+  }
+
+  assert.equal(ARXIV_DOMAINS.length, 8, 'ARXIV_DOMAINS 必须包含全部 8 大官方领域')
+  assert.ok(Object.isFrozen(ARXIV_DOMAINS))
+  const byId = new Map(ARXIV_DOMAINS.map((d) => [d.id, d]))
+  assert.equal(byId.size, 8)
+
+  for (const [id, codes] of Object.entries(expectedDomains)) {
+    const dom = byId.get(id)
+    assert.ok(dom, '缺少领域：' + id)
+    assert.ok(typeof dom.label === 'string' && dom.label.length > 0)
+    assert.ok(typeof dom.labelEn === 'string' && dom.labelEn.length > 0)
+    assert.ok(Array.isArray(dom.categories) && dom.categories.length === codes.length)
+    const actualCodes = dom.categories.map((c) => c.code)
+    assert.deepEqual(actualCodes, codes)
+    for (const c of dom.categories) {
+      assert.ok(typeof c.label === 'string' && c.label.length > 0)
+    }
+  }
+})
+
+await check('normalizeTopicsConfig & resolveSubscribedTopics：旧版迁移、空数组尊重、新增非 AI 领域与编辑删除', () => {
+  // 1. 默认初始化（未传 subscribed）：从 PRESET_TOPICS 播种 8 项，前 3 个默认主题启用
+  const seeded = normalizeTopicsConfig({})
+  assert.equal(seeded.items.length, PRESET_TOPICS.length)
+  assert.deepEqual(seeded.subscribed, ['llm-agents', 'multimodal-ocr', 'efficient-training'])
+  assert.equal(seeded.feedSource, 'arxiv')
+
+  // 2. 兼容旧别名 efficient-sys 与旧版 custom 数组
+  const migrated = normalizeTopicsConfig({
+    subscribed: ['llm-agents', 'efficient-sys'],
+    custom: ['拓扑量子计算'],
+    feedSource: 'both',
+  })
+  assert.deepEqual(migrated.subscribed, ['llm-agents', 'efficient-training'])
+  assert.deepEqual(migrated.customKeywords, ['拓扑量子计算'])
+  assert.equal(migrated.feedSource, 'both')
+  const resolvedMigrated = resolveSubscribedTopics(migrated)
+  assert.deepEqual(
+    resolvedMigrated.map((t) => t.id),
+    ['llm-agents', 'efficient-training', 'custom:拓扑量子计算'],
+  )
+
+  // 3. 显式 subscribed: [] 必须保持全部关闭，不能被默认值覆盖
+  const explicitEmpty = normalizeTopicsConfig({ subscribed: [] })
+  assert.equal(explicitEmpty.items.length, PRESET_TOPICS.length)
+  assert.deepEqual(explicitEmpty.subscribed, [])
+  assert.ok(explicitEmpty.items.every((it) => it.enabled === false))
+  assert.deepEqual(resolveSubscribedTopics(explicitEmpty), [])
+  const explicitEmptyItems = normalizeTopicsConfig({ items: [], subscribed: [] })
+  assert.deepEqual(explicitEmptyItems.items, [])
+  assert.deepEqual(explicitEmptyItems.subscribed, [])
+  assert.deepEqual(resolveSubscribedTopics(explicitEmptyItems), [])
+
+  // 4. 自定义主题列表应保留每项的分类、关键词与启用状态
+  const customEdited = normalizeTopicsConfig({
+    items: [
+      {
+        id: 'quantum-ec',
+        label: '量子纠错与表面码',
+        domain: 'physics',
+        categories: ['quant-ph', 'cond-mat'],
+        keywords: ['quantum error correction', 'surface code'],
+        enabled: true,
+      },
+      {
+        id: 'quant-portfolio',
+        label: '统计套利与微观结构',
+        domain: 'q-fin',
+        categories: ['q-fin.PM', 'q-fin.TR'],
+        keywords: [],
+        enabled: true,
+      },
+      {
+        id: 'llm-agents',
+        label: '智能体系统（自定义扩充）',
+        domain: 'cs',
+        categories: ['cs.AI', 'cs.SE'],
+        keywords: 'autonomous coding, SWE-bench',
+        enabled: false,
+      },
+    ],
+    customKeywords: ['随机微分方程'],
+    feedSource: 'arxiv',
+  })
+
+  assert.equal(customEdited.items.length, 3)
+  assert.deepEqual(customEdited.subscribed, ['quantum-ec', 'quant-portfolio'])
+  assert.deepEqual(customEdited.items[2].keywords, ['autonomous coding', 'SWE-bench'])
+
+  // 模拟删除第一项并开启第三项
+  const afterDelete = normalizeTopicsConfig({
+    ...customEdited,
+    items: [customEdited.items[1], { ...customEdited.items[2], enabled: true }],
+    customKeywords: [],
+  })
+  assert.equal(afterDelete.items.length, 2)
+  assert.deepEqual(afterDelete.subscribed, ['quant-portfolio', 'llm-agents'])
+  const activeAfterDelete = resolveSubscribedTopics(afterDelete)
+  assert.deepEqual(
+    activeAfterDelete.map((t) => t.id),
+    ['quant-portfolio', 'llm-agents'],
+  )
+  assert.deepEqual(activeAfterDelete[1].categories, ['cs.AI', 'cs.SE'])
+})
+
+await check('fetchTopicFeed：支持按 domainId（8 大领域）、category（子分类）、topicId 与自定义 items 拉取', async () => {
+  const capturedUrls = []
+  const mockFetch = async (url) => {
+    const target = String(url)
+    capturedUrls.push(target)
+    if (target.startsWith('https://export.arxiv.org/')) {
+      return new Response(ARXIV_LATEST_FIXTURE, { status: 200 })
+    }
+    return new Response(JSON.stringify(OPENALEX_LATEST_FIXTURE), { status: 200 })
+  }
+
+  // 1. 按 domainId = 'q-fin' 检索整个定量金融领域
+  capturedUrls.length = 0
+  const domainFeed = await fetchTopicFeed({
+    domainId: 'q-fin',
+    limit: 10,
+    fetchImpl: mockFetch,
+  })
+  assert.equal(capturedUrls.length, 1)
+  const domainQuery = new URL(capturedUrls[0]).searchParams.get('search_query')
+  assert.equal(domainQuery, '(cat:q-fin.CP OR cat:q-fin.PM OR cat:q-fin.ST OR cat:q-fin.TR)')
+  assert.equal(domainFeed.topics[0].id, 'domain:q-fin')
+  assert.equal(domainFeed.topics[0].kind, 'domain')
+  assert.equal(domainFeed.items.length, 2)
+
+  // 2. 按具体子分类 category = 'quant-ph' 检索
+  capturedUrls.length = 0
+  const catFeed = await fetchTopicFeed({
+    category: 'quant-ph',
+    limit: 6,
+    fetchImpl: mockFetch,
+  })
+  assert.equal(capturedUrls.length, 1)
+  assert.equal(new URL(capturedUrls[0]).searchParams.get('search_query'), 'cat:quant-ph')
+  assert.equal(catFeed.topics[0].id, 'cat:quant-ph')
+  assert.equal(catFeed.topics[0].kind, 'category')
+
+  // 3. 按自定义可编辑 items 与单主题 topicId 拉取非 AI 方向
+  const myTopicsCfg = normalizeTopicsConfig({
+    items: [
+      {
+        id: 'quantum-optics',
+        label: '量子光学实验',
+        domain: 'physics',
+        categories: ['quant-ph', 'physics.optics'],
+        keywords: ['photon entanglement'],
+        enabled: true,
+      },
+      {
+        id: 'econometrics-ml',
+        label: '因果推断与计量经济',
+        domain: 'econ',
+        categories: ['econ.EM', 'stat.ME'],
+        keywords: ['causal inference'],
+        enabled: false,
+      },
+    ],
+  })
+
+  // 即使 econometrics-ml 为 enabled: false，点选单主题 pill (topicId) 仍可单独预览
+  capturedUrls.length = 0
+  const singleCustom = await fetchTopicFeed({
+    topicsConfig: myTopicsCfg,
+    topicId: 'econometrics-ml',
+    fetchImpl: mockFetch,
+  })
+  assert.equal(capturedUrls.length, 1)
+  assert.equal(
+    new URL(capturedUrls[0]).searchParams.get('search_query'),
+    '(cat:econ.EM OR cat:stat.ME) AND all:"causal inference"',
+  )
+  assert.equal(singleCustom.topics[0].id, 'econometrics-ml')
+
+  // 不传 topicId 时只拉取 enabled: true 的主题（quantum-optics）
+  capturedUrls.length = 0
+  const allEnabledRes = await fetchTopicFeed({
+    topicsConfig: myTopicsCfg,
+    source: 'both',
+    fetchImpl: mockFetch,
+  })
+  assert.equal(capturedUrls.length, 2, '1 个启用主题 × 双源 = 2 次请求')
+  assert.deepEqual(
+    allEnabledRes.topics.map((t) => t.id),
+    ['quantum-optics'],
+  )
+
+  // 非法 domainId / category / topicId 抛清晰中文错误
+  await assert.rejects(fetchTopicFeed({ domainId: 'unknown-domain', fetchImpl: mockFetch }), /未知的学科领域/)
+  await assert.rejects(fetchTopicFeed({ category: 'bad category!', fetchImpl: mockFetch }), /无效的 arXiv 分类/)
+  await assert.rejects(fetchTopicFeed({ topicId: 'missing-topic', fetchImpl: mockFetch }), /未找到主题/)
+})
+
+await fsp.rm(TMP_DATA_DIR, { recursive: true, force: true }).catch(() => {})
 
 console.log('\n结果：PASS ' + stats.pass + ' / FAIL ' + stats.fail)
 if (stats.fail > 0) {

@@ -209,6 +209,28 @@ async function main() {
       paragraphs,
     })
 
+    await check('pdf.pageLines 与 pdf.cropRegion：返回精确页面尺寸、行坐标缓存与高清局部裁剪 PNG', async () => {
+      const health = await rpcCall(baseUrl, 'health')
+      if (!health.pdf || !health.pdf.ok) return
+      const pl = await rpcCall(baseUrl, 'pdf.pageLines', { id: paperId, page: 1 })
+      assert.equal(pl.page, 1)
+      assert.equal(pl.width, 612)
+      assert.equal(pl.height, 792)
+      assert.ok(Array.isArray(pl.lines))
+
+      const cropped = await rpcCall(baseUrl, 'pdf.cropRegion', {
+        id: paperId,
+        page: 1,
+        rect: { x0: 0.1, y0: 0.1, x1: 0.5, y1: 0.4 },
+      })
+      assert.equal(cropped.page, 1)
+      assert.equal(cropped.mime, 'image/png')
+      // 612 × 792 pt 页面，按 2.2 倍渲染；允许裁剪边界对齐到整数像素。
+      assert.ok(Math.abs(cropped.width - 539) <= 2, `裁剪宽度异常：${cropped.width}`)
+      assert.ok(Math.abs(cropped.height - 523) <= 2, `裁剪高度异常：${cropped.height}`)
+      assert.match(cropped.imageBase64, /^iVBORw0KGgo/, '必须返回合法的 PNG base64')
+    })
+
     await check('annotations / studyNotes CRUD 与 paper.exportMarkdown', async () => {
       const pKey = paragraphs[0].hash
       await rpcCall(baseUrl, 'annotations.save', {
@@ -271,21 +293,96 @@ async function main() {
       assert.equal(st?.status, 'done', '显式暂停后应可通过 translate.resume 继续完成')
     })
 
-    await check('设置页：并发度 1-8、Obsidian 开关与 publicConfig 密码掩码', async () => {
+    await check('设置页：并发度 1-100、网络代理配置、全学科自定义主题与密码掩码', async () => {
       const s0 = await rpcCall(baseUrl, 'settings.get')
       assert.equal(s0.config.obsidian.enabled, false, '新用户默认关闭 Obsidian 联动')
+      assert.equal(s0.config.ai.concurrency, 10, '默认翻译并发应为 10')
+      assert.equal(s0.config.network.mode, 'auto', '默认代理模式应为 auto')
+      const topicMeta = await rpcCall(baseUrl, 'search.topics')
+      assert.equal(topicMeta.domains.length, 8, 'search.topics 应返回官方 8 大 arXiv 学科领域')
+
       const saved = await rpcCall(baseUrl, 'settings.set', {
         patch: {
-          ai: { concurrency: 6 },
+          ai: { concurrency: 28 },
           obsidian: { enabled: false },
+          network: { mode: 'custom', proxyUrl: 'http://proxy-user:proxy-test-secret@127.0.0.1:7897' },
+          topics: {
+            items: [
+              { id: 'llm-agents', label: '大模型与智能体', domain: 'cs', categories: ['cs.AI'], keywords: ['agent'], enabled: true },
+              { id: 'quantum-ec', label: '量子纠错与表面码', domain: 'physics', categories: ['quant-ph'], keywords: ['surface code'], enabled: true },
+            ],
+            feedSource: 'arxiv',
+          },
           database: { driver: 'postgres', password: 'secret-pg-password', host: '127.0.0.1', port: 5432, database: 'pb', user: 'u' },
         },
       })
-      assert.equal(saved.config.ai.concurrency, 6)
+      assert.equal(saved.config.ai.concurrency, 28, '应支持超过 8 的高并发设置（如 28）')
+      assert.equal(saved.config.network.mode, 'custom')
+      assert.equal(saved.config.network.proxyUrl, 'http://127.0.0.1:7897')
+      assert.equal(saved.config.network.proxyAuthConfigured, true)
+      assert.ok(!JSON.stringify(saved.config.network).includes('proxy-test-secret'))
+      assert.deepEqual(saved.config.topics.subscribed, ['llm-agents', 'quantum-ec'])
       assert.equal(saved.config.database.password, '', '密码绝不能回传明文')
       assert.equal(saved.config.database.passwordConfigured, true)
-      // 恢复默认 sqlite 供后续 UI 沙箱测试
-      await rpcCall(baseUrl, 'settings.set', { patch: { database: { driver: 'sqlite' } } })
+
+      const publicNetwork = saved.config.network
+      const roundTripped = await rpcCall(baseUrl, 'settings.set', {
+        patch: {
+          network: { mode: 'custom', proxyUrl: publicNetwork.proxyUrl },
+          topics: { items: [] },
+          database: { driver: 'sqlite', clearPassword: true },
+        },
+      })
+      assert.equal(roundTripped.config.network.proxyAuthConfigured, true, '保存脱敏代理地址时应保留既有认证信息')
+      assert.ok(!JSON.stringify(await rpcCall(baseUrl, 'settings.get')).includes('proxy-test-secret'), 'settings.get 不得泄漏代理密码')
+      assert.deepEqual((await rpcCall(baseUrl, 'settings.get')).config.topics.items, [], '显式空方向列表应在重新读取后保持为空')
+      assert.equal((await store.getConfig()).network.proxyUrl, 'http://proxy-user:proxy-test-secret@127.0.0.1:7897')
+      if (process.platform !== 'win32') {
+        const configStat = await fsp.stat(path.join(dataRoot, 'config.json'))
+        assert.equal(configStat.mode & 0o077, 0, '代理认证配置文件应限制为仅当前用户可读写')
+      }
+
+      const changedEndpoint = await rpcCall(baseUrl, 'settings.set', {
+        patch: { network: { mode: 'custom', proxyUrl: 'http://127.0.0.1:8888' } },
+      })
+      assert.equal(changedEndpoint.config.network.proxyAuthConfigured, false, '换代理端点不得继承旧凭据')
+      await rpcCall(baseUrl, 'settings.set', {
+        patch: { network: { mode: 'custom', proxyUrl: 'http://proxy-user:proxy-test-secret@127.0.0.1:7897' } },
+      })
+      const clearedAuth = await rpcCall(baseUrl, 'settings.set', {
+        patch: { network: { mode: 'custom', proxyUrl: publicNetwork.proxyUrl, clearProxyAuth: true } },
+      })
+      assert.equal(clearedAuth.config.network.proxyAuthConfigured, false, '显式清除认证应删除已存凭据')
+      assert.equal((await store.getConfig()).network.proxyUrl, publicNetwork.proxyUrl)
+
+      await store.setConfig({ network: { mode: 'custom', proxyUrl: null, proxy: 'http://legacy-user:legacy-secret@127.0.0.1:7897' } })
+      const legacyCleared = await rpcCall(baseUrl, 'settings.set', {
+        patch: { network: { mode: 'custom', proxyUrl: publicNetwork.proxyUrl, clearProxyAuth: true } },
+      })
+      assert.equal(legacyCleared.config.network.proxyAuthConfigured, false)
+      const legacyNetwork = (await store.getConfig()).network
+      assert.ok(!Object.hasOwn(legacyNetwork, 'proxy'), '清除认证时也必须移除旧 proxy 别名')
+      assert.ok(!JSON.stringify(legacyNetwork).includes('legacy-secret'))
+      for (const legacyProxy of [
+        { mode: 'custom', proxy: 'http://legacy-user:legacy-secret@127.0.0.1:7897' },
+        { mode: 'custom', proxyUrl: 'http://legacy-user:legacy-secret@127.0.0.1:7897', proxy: 'http://legacy-user:legacy-secret@127.0.0.1:7897' },
+      ]) {
+        const config = await store.getConfig()
+        await fsp.writeFile(store.CONFIG_FILE, JSON.stringify({ ...config, network: legacyProxy }))
+        globalThis.__pbStoreShared.config = null
+        const migrated = await rpcCall(baseUrl, 'settings.get')
+        assert.equal(migrated.config.network.proxyAuthConfigured, true, '旧代理配置应在真实装载后可用且脱敏')
+        assert.ok(!JSON.stringify(migrated).includes('legacy-secret'))
+        await rpcCall(baseUrl, 'settings.set', { patch: { network: { mode: 'custom', proxyUrl: publicNetwork.proxyUrl, clearProxyAuth: true } } })
+        const disk = JSON.parse(await fsp.readFile(store.CONFIG_FILE, 'utf8'))
+        assert.ok(!Object.hasOwn(disk.network, 'proxy'))
+        assert.ok(!JSON.stringify(disk.network).includes('legacy-secret'))
+      }
+
+      const clamped = await rpcCall(baseUrl, 'ai.settings.set', { patch: { concurrency: 250 } })
+      assert.equal(clamped.config.ai.concurrency, 100, '并发度上限收敛到 100')
+      // 恢复默认 sqlite + auto 代理供后续 UI 沙箱测试
+      await rpcCall(baseUrl, 'settings.set', { patch: { database: { driver: 'sqlite' }, network: { mode: 'auto', proxyUrl: '' }, topics: { resetDefaults: true } } })
     })
 
     // 2. 在隔离 DOM 中加载真实 app.js 并验证富标注渲染 / 选区清洁 / Obsidian 开关 UI / 在线 Feed
@@ -417,9 +514,54 @@ async function main() {
       assert.match(clean, /\$E=mc\^2\$/, 'extractCleanSelection 必须保留 data-tex 公式')
     })
 
-    await check('UI：切走论文仅 detach 流而不调 pause，在线页正确加载订阅主题与最新 Feed', async () => {
+    await check('UI：逐段原文/译文独立收起展开、数字版原文页不误报扫描件且支持框选讲解与 8 大学科导航', async () => {
+      const pKey = paragraphs[0].hash
+      pb.toggleParaCollapse(pKey, 'orig')
+      let pEl = document.getElementById('para-p1')
+      assert.equal(pEl.classList.contains('collapsed-orig'), true, '应能单独收起原文')
+      assert.ok(pEl.querySelector('.para-collapse-bar[data-collapse-part="orig"]'), '应展示原文收起提示条')
+
+      pb.toggleParaCollapse(pKey, 'zh')
+      pEl = document.getElementById('para-p1')
+      assert.equal(pEl.classList.contains('collapsed-zh'), true, '应能同时收起译文')
+
+      pb.toggleParaCollapse(pKey, 'all')
+      pEl = document.getElementById('para-p1')
+      assert.equal(pEl.classList.contains('collapsed-all'), true, '应能整段折叠为单行')
+      pb.toggleParaCollapse(pKey, 'all')
+      pEl = document.getElementById('para-p1')
+      assert.equal(pEl.classList.contains('collapsed-all'), false, '再次点击应恢复展开')
+
+      // 切到数字版 PDF 的「原文页」（meta.hasText = true），验证绝不误报「扫描件」且具备透明文本层与框选讲解入口
+      await store.updateMeta(paperId, { hasText: true })
+      pb.state.current.meta.hasText = true
+      pb.state.blocks = []
+      const pageTabBtn = document.querySelector('[data-tab="page"]')
+      assert.ok(pageTabBtn)
+      await pageTabBtn.emit('click')
+      await settle()
+      assert.equal(document.querySelector('.ocr-bar'), null, '数字版 PDF 即使当前 blocks 为空也绝不能误报扫描件')
+      assert.ok(document.querySelector('.pdf-text-layer'), '原文页应挂载透明可交互文本层容器 .pdf-text-layer')
+      assert.equal(document.querySelector('.page-wrap')?.textContent.includes('null'), false, '.page-wrap 绝不能渲染多余的 null 文本节点')
+      // 验证 pdf_tool.py 真实返回的 { x, y, x2, y2, size, text } 行坐标可被渲染成 .pdf-line
+      pb.state.pageLinesByPage[1] = {
+        page: 1,
+        width: 595,
+        height: 842,
+        lines: [{ x: 72, y: 96, x2: 420, y2: 112, size: 14, text: 'Improving Language Models' }],
+      }
+      await pb.ensurePageTextLayer(paperId, 1, document.querySelector('.page-wrap[data-page="1"]'))
+      assert.equal(document.querySelectorAll('.pdf-line').length, 1, '应把 {x,y,x2,y2} 行坐标渲染为 .pdf-line span')
+      const cropBtn = document.getElementById('page-crop-explain')
+      assert.ok(cropBtn && cropBtn.textContent.includes('框选讲解'), '原文页应提供框选讲解按钮')
+      await cropBtn.emit('click')
+      assert.ok(document.querySelector('.crop-overlay'), '开启框选模式后应在页图上方渲染 .crop-overlay')
+      await cropBtn.emit('click')
+    })
+
+    await check('UI：切走论文仅 detach 流而不调 pause，在线页正确加载 8 大学科、自定义订阅与最新 Feed', async () => {
       pb.state.translateBusy = true
-      pb.state.translateJob = { paperId, status: 'running', completed: 2, total: 8, concurrency: 2 }
+      pb.state.translateJob = { paperId, status: 'running', completed: 2, total: 8, concurrency: 10 }
       pb.state.translateAbort = new AbortController()
       pausedByClient = false
       // 模拟切论文
@@ -427,7 +569,7 @@ async function main() {
       await settle()
       assert.equal(pausedByClient, false, '切论文绝对不能调用 pause 或 ai/cancel')
 
-      // 打开在线检索页并加载最新 Feed
+      // 打开在线检索页并加载最新 Feed + 8 大学科导航
       const onlineBtn = document.querySelectorAll('button').find((b) => b.textContent === '在线检索')
       assert.ok(onlineBtn)
       await onlineBtn.emit('click')
@@ -435,6 +577,8 @@ async function main() {
       const pageText = document.body.textContent
       assert.match(pageText, /Latest Agent Paper/)
       assert.match(pageText, /大模型与智能体/)
+      assert.match(pageText, /物理学/)
+      assert.match(pageText, /定量金融/)
       assert.match(pageText, /问文献库/)
     })
 

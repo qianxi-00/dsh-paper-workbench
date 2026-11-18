@@ -1040,19 +1040,43 @@ button.switch.on::before { content: '●'; }
   border-radius: 12px;
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
-  width: min(680px, 92vw);
+  width: min(720px, 92vw);
   max-height: 88vh;
-  overflow: auto;
-  padding: 16px;
+  overflow-y: auto;
+  padding: 0 20px 0;
+  position: relative;
 }
 .content > .modal { margin: auto; }
+.modal > :last-child:not(.foot) { padding-bottom: 16px; }
 .modal h3 { margin: 0 0 10px; }
-.modal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.modal-head h3 { margin: 0; }
+.modal-head {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 0 11px;
+  margin-bottom: 12px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--line);
+}
+.modal-head h3 { margin: 0; font-size: 15px; }
 .modal .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
 .modal .field label { color: var(--muted); font-size: 12px; }
 .modal .field input, .modal .field textarea, .modal .field select { width: 100%; }
-.modal .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.modal .foot {
+  position: sticky;
+  bottom: 0;
+  z-index: 9;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 11px 0 14px;
+  background: var(--bg-raised);
+  border-top: 1px solid var(--line);
+}
 
 .toast {
   position: fixed;
@@ -1681,4 +1705,231 @@ body.pdf-dark .ann-insert-chip { background: rgba(91, 33, 182, 0.32); color: #dd
 .btn-resume-trans {
   border-color: var(--accent) !important;
   color: var(--accent) !important;
+}
+
+/* ---------------- v1.1 并发快捷档 / 网络代理 / 学科导航与自定义主题 ---------------- */
+.quick-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+.quick-chip {
+  padding: 2px 8px;
+  font-size: 11.5px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+}
+.quick-chip:hover,
+.quick-chip.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.domain-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-soft);
+}
+.domain-row,
+.subcat-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.domain-row-label {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-right: 4px;
+  font-weight: 600;
+}
+.domain-pill {
+  padding: 3px 10px;
+  font-size: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg-raised);
+  color: var(--text);
+  cursor: pointer;
+}
+.domain-pill.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.subcat-pill {
+  padding: 2px 8px;
+  font-size: 11.5px;
+  border-radius: 999px;
+  border: 1px dashed var(--line-strong);
+  background: var(--bg-raised);
+  color: var(--muted);
+  cursor: pointer;
+}
+.subcat-pill.active,
+.subcat-pill:hover {
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.topic-manage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0 10px;
+}
+.topic-manage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 12.5px;
+}
+.topic-manage-row .topic-meta {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+.topic-editor-box {
+  padding: 10px 12px;
+  margin: 6px 0 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--bg-soft);
+}
+
+/* ---------------- v1.1 划词精译小卡片 & 逐段原文/译文独立折叠 ---------------- */
+.sel-trans-quote {
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  border-left: 2px solid var(--line-strong);
+  background: var(--bg);
+  border-radius: 0 4px 4px 0;
+  max-height: 54px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sel-trans-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line);
+  font-size: 12px;
+}
+
+.para-collapse-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  margin: 3px 0;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg-soft);
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.para-collapse-bar:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.para-collapse-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.para.collapsed-orig > .para-orig { display: none !important; }
+.para.collapsed-zh > .para-zh { display: none !important; }
+.para.collapsed-all > .para-orig,
+.para.collapsed-all > .para-zh { display: none !important; }
+
+/* ---------------- v1.1 原文页透明可交互文本层与框选截图讲解 ---------------- */
+.page-wrap {
+  container-type: inline-size;
+}
+.pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  user-select: text;
+  line-height: 1;
+}
+.pdf-line {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: left top;
+  user-select: text;
+  line-height: 1.08;
+}
+.pdf-line::selection {
+  background: rgba(37, 99, 235, 0.28);
+  color: transparent;
+}
+.hl-layer { z-index: 1; }
+.hl.c-yellow { background: rgba(250, 204, 21, 0.36); }
+.hl.c-green { background: rgba(34, 197, 94, 0.28); }
+.hl.c-blue { background: rgba(59, 130, 246, 0.28); }
+.hl.c-pink { background: rgba(236, 72, 153, 0.28); }
+.hl.c-purple { background: rgba(168, 85, 247, 0.28); }
+
+.page-wrap.crop-mode {
+  cursor: crosshair;
+  user-select: none;
+}
+.page-wrap.crop-mode .pdf-text-layer {
+  pointer-events: none;
+}
+.crop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  cursor: crosshair;
+}
+.crop-box {
+  position: absolute;
+  border: 2px dashed var(--accent, #2563eb);
+  background: rgba(37, 99, 235, 0.12);
+  border-radius: 4px;
+  pointer-events: none;
+}
+.crop-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-bottom: 1px solid var(--line);
 }

@@ -1,24 +1,51 @@
 ---
 name: install-dsh-paper-workbench
-description: Install, link, update, or verify the dsh-paper-workbench plugin inside DeepSeek Harness (DSH) Desktop across Windows, macOS, and Linux. Use when a user asks an AI Coding Agent to set up dsh-paper-workbench, connect a local clone or release package to DSH, or troubleshoot Python/PyMuPDF and DSH plugin registration.
+description: Install, link, update, or verify the dsh-paper-workbench plugin inside DeepSeek Harness (DSH) Desktop or Web across Windows, macOS, and Linux — either via zero-clone 1-line installers (install.ps1 / install.sh) or local repository agent installer (install-agent.mjs).
 ---
 
 # Install `dsh-paper-workbench` into DeepSeek Harness (DSH)
 
-Follow these steps in order. Do not skip the dry-run preview, and never overwrite or fabricate DSH paths without verifying `profiles/desktop/package.json` exists.
+Choose **Path A (Zero-Clone One-Line Install)** when the user simply wants the plugin installed quickly without keeping a local git clone, or **Path B (Local Repository / Dev Mount)** when a local clone already exists or live code editing is desired. Always run dry-run preview first before modifying any DSH profile files.
 
-## 1. Obtain or update the repository
+## Path A: Zero-Clone One-Line Install (Recommended for End Users)
 
-If `dsh-paper-workbench` is not yet on disk, clone it (or extract the release `.tgz` tarball from GitHub Releases):
+`dsh-paper-workbench` has **zero npm dependencies and zero build steps**, so the standalone scripts auto-detect `DSH_HOME` and target profile (`desktop` or `web`), back up `package.json` to `.bak`, extract the release tarball cleanly, and check `PyMuPDF`:
+
+- **Windows (PowerShell 5.1+ / `pwsh` 7)**:
+  ```powershell
+  # 1) Preview first (no network download, no file writes)
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.ps1))) -DryRun
+  # 2) Execute zero-clone install
+  irm https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.ps1 | iex
+  ```
+- **macOS / Linux / Git Bash**:
+  ```bash
+  # 1) Preview first (no network download, no file writes)
+  curl -fsSL https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.sh | bash -s -- --dry-run
+  # 2) Execute zero-clone install
+  curl -fsSL https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.sh | bash
+  ```
+- **DSH Web CLI** (when targeting `web` profile with `dsh` on PATH):
+  ```bash
+  dsh plugin --profile web add github:qianxi-00/dsh-paper-workbench
+  ```
+
+Optional flags for `install.ps1` / `install.sh`: `-Version` / `--version <v1.1.0>`, `-Profile` / `--profile <auto|desktop|web>`, `-DshHome` / `--dsh-home <path>`, `-SkipPyInstall` / `--skip-py-install`.
+
+---
+
+## Path B: Local Repository Install (`install-agent.mjs`)
+
+### 1. Obtain or locate the repository
+
+If working from a local checkout (or passing `--repo "<path>"`):
 
 ```bash
 git clone https://github.com/qianxi-00/dsh-paper-workbench.git
 cd dsh-paper-workbench
 ```
 
-If already cloned, confirm the working tree is at the desired branch/tag before proceeding.
-
-## 2. Preview with dry-run (`--dry-run --json`)
+### 2. Preview with dry-run (`--dry-run --json`)
 
 Run the zero-dependency cross-platform installer in preview mode first and parse its JSON output:
 
@@ -29,13 +56,13 @@ node scripts/install-agent.mjs --dry-run --json
 Inspect the returned JSON before writing anything:
 
 - `checks.node`: requires Node.js >= 20 (`22.5+` enables built-in `node:sqlite`; `20–22.4` falls back cleanly to JSON storage). Stop and tell the user if Node < 20.
-- `checks.dsh`: auto-discovers `DSH_HOME` and platform defaults (`F:\ProGramApp\DSH`, `%LOCALAPPDATA%\DSH`, `~/DSH`, `~/.dsh`).
+- `checks.dsh`: auto-discovers `DSH_HOME` and platform defaults (`%LOCALAPPDATA%\DeepSeek Harness`, `%LOCALAPPDATA%\DSH`, `F:\ProGramApp\DSH`, `~/DSH`, `~/.dsh`).
   - If `checks.dsh.status === "not_found"`, ask the user for their DSH installation root and re-run with `--dsh-home "<path>"`.
 - `checks.python`: probes for Python 3 with `import fitz` (PyMuPDF).
   - If `missing`, note whether the user wants automatic `pip install --user pymupdf` attempted or pass `--skip-py-install` in restricted/offline environments.
-- Mode choice: default `--mode link` (live link to repo for updates/dev) or `--mode copy` (standalone copy into `<DSH_HOME>/plugins/dsh-paper-workbench` and `profiles/desktop/node_modules`).
+- Mode choice: default `--mode link` (live link to `--repo` for updates/dev) or `--mode copy` (standalone copy into `<DSH_HOME>/plugins/dsh-paper-workbench` and `profiles/desktop/node_modules`).
 
-## 3. Execute installation (`--json`)
+### 3. Execute installation (`--json`)
 
 Once the dry-run plan looks right, run the installer without `--dry-run`:
 
@@ -43,41 +70,27 @@ Once the dry-run plan looks right, run the installer without `--dry-run`:
 node scripts/install-agent.mjs --json
 ```
 
-Useful optional flags:
+Useful optional flags: `--dsh-home "<path>"`, `--repo "<path>"`, `--data-dir "<path>"`, `--workspace "<path>"`, `--mode link|copy`, `--skip-py-install`.
 
-- `--dsh-home "<path>"` — explicit DSH Home containing `profiles/desktop/package.json`
-- `--data-dir "<path>"` — custom data directory (default `$DSH_PAPER_WORKBENCH_DATA` or `~/.dsh/paper-workbench`)
-- `--workspace "<path>"` — target workspace directory (for preparing workspace / syncing `assets/workspace-skills/` when present)
-- `--mode link|copy` — install mode (`link` or `copy`)
-- `--skip-py-install` — only check `fitz`, do not attempt `pip install pymupdf`
-
-Confirm the command exits `0` and returns `"ok": true` with:
-- `profiles/desktop/package.json.bak` created before updating `dependencies["dsh-paper-workbench"]`
-- All existing fields and dependencies in `profiles/desktop/package.json` preserved
-- `checks.dsh.nodeModulesStatus` is `linked`, `already_linked`, or `copied`
-
-## 4. Verify runtime health (`doctor`)
-
-Run the repository environment check to confirm everything works together:
+### 4. Verify runtime health (`doctor`)
 
 ```bash
 node scripts/doctor.mjs
 ```
 
-If `Python + PyMuPDF` reports `FAIL` / `missing` (e.g., no system Python or PEP 668 externally-managed environment), give the user the exact OS command rather than forcing system flags:
+If `Python + PyMuPDF` reports `FAIL` / `missing`, give the user the exact 1-line OS command:
+- **Windows**: `python -m pip install pymupdf` (or `winget install --id Python.Python.3.12` first)
+- **macOS**: `python3 -m pip install --user pymupdf`
+- **Linux**: `python3 -m pip install --user pymupdf`
 
-- **Windows (PowerShell)**: `winget install --id Python.Python.3.12` then `python -m pip install pymupdf`
-- **macOS**: `brew install python` then `python3 -m pip install --user pymupdf`
-- **Linux (Debian/Ubuntu)**: `sudo apt install python3 python3-pip` then `python3 -m pip install --user pymupdf`
+---
 
-## 5. Report status and remaining user options
+## Report Status & Optional Post-Install Checks
 
-Present a concise summary built directly from the JSON report (`writtenFiles`, `checks`, `todos`, and `optionalUserConfigs`):
+Present a concise summary to the user covering installed path, `PyMuPDF` status, and these post-install items:
 
-1. **Installed / Verified**:
-   - DSH Home path, `dependencies["dsh-paper-workbench"]` entry, `.bak` backup file path, `node_modules` mount status, data directory, Node/SQLite status, and Python/PyMuPDF status.
-2. **Remaining User Options & Required Final Action**:
-   1. **PaddleOCR Token** *(optional)* — only needed for scanned-PDF OCR and cloud `PP-StructureV3` layout parsing (configure in workbench `⚙ 设置 → 扫描件 OCR`).
-   2. **Optional Remote Database (PostgreSQL / MySQL)** *(optional)* — `dsh-paper-workbench` works out of the box using local SQLite (`workbench.db`) or JSON fallback (`workbench.json`); built-in zero-dependency PostgreSQL / MySQL protocol clients can be enabled in `config.json` (`database.driver` / connection fields) if team sharing or remote persistence is desired.
-   3. **Optional Obsidian Vault** *(optional)* — auto-detected when Obsidian is open, or configurable in `⚙ 设置` for paper cards and topic surveys.
-   4. **Enable / Restart `dsh-paper-workbench` in DSH Plugin Manager** *(required to activate UI/server)* — open DSH Desktop → **Settings → Plugins**, enable `dsh-paper-workbench` (or disable → re-enable if already running), and restart DSH Desktop if `checks.dsh.pluginEnableStatus` is not `enabled`.
+1. **Network Proxy** *(optional)* — for faster/reliable arXiv & OpenAlex access in restricted networks, configure HTTP / SOCKS5 proxy (e.g. `http://127.0.0.1:7897`) or enable system proxy auto-detection in workbench `⚙ 设置`.
+2. **PaddleOCR Token** *(optional)* — only needed for scanned-PDF OCR and cloud `PP-StructureV3` layout parsing (`⚙ 设置 → 扫描件 OCR`).
+3. **Optional Remote Database (PostgreSQL / MySQL)** *(optional)* — local SQLite (`workbench.db`) or JSON fallback works out of the box with zero setup; built-in zero-dependency PostgreSQL / MySQL clients can be enabled in `⚙ 设置` for team sharing or remote persistence.
+4. **Optional Obsidian Vault** *(optional)* — opt-in toggle in `⚙ 设置` (`obsidian.enabled`) for paper cards and topic surveys.
+5. **Enable / Reload `dsh-paper-workbench` in DSH** *(required to activate)* — reload/restart DSH Desktop (or `dsh web`), and ensure `dsh-paper-workbench` is enabled in **Settings → Plugins**.

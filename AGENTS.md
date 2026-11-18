@@ -48,8 +48,9 @@ lib/
   review.js          翻译质量自检：7 条静态规则 + 可选 LLM 批量审校（模型异常自动降级静态检查）
   jobs.js            任务事件日志记录器（纯依赖注入，异常绝不阻断主流程）
   obsidian.js        Obsidian Vault 自动探测、frontmatter 行级无损合并、写前备份、卡片读写与方向综述输出
-  arxiv.js           arXiv Atom + OpenAlex 在线检索与开放获取 PDF 安全流式入库
-  pdf.js             Python + PyMuPDF 解释器自动探测与子进程 JSON 通信桥
+  net.js             零依赖代理客户端（auto 系统注册表/环境变量 + custom HTTP CONNECT/SOCKS5 + direct + 连通性探测）
+  arxiv.js           arXiv 8 大学科/自定义方向订阅 + OpenAlex 在线检索与开放获取 PDF 安全流式入库
+  pdf.js             Python + PyMuPDF 解释器自动探测与子进程 JSON 通信桥（含 pageLines 与 cropRegion）
   sse.js             SSE 响应流封装（心跳保活、断连自动 abort）
   doctor.js          环境自检核心逻辑（CLI 与前端设置页共用同一份报告）
 
@@ -155,3 +156,7 @@ npm run dev:mock
   - **全篇上下文讲解 + 专属工作区 Skills**：新增 `lib/explain.js`（120k 大上下文优先级拼装 + 周围跨页图表/公式关联）、第 10 个工具 `paper_explain`、`lib/tools.js` `paper_doc` 提额与 `paper_notes` 研读笔记存取，及 `lib/workspace-skills.js` 将 `assets/workspace-skills/` 自动受控区块同步进「论文」工作区 `AGENTS.md` 与 `.dsh/skills/`。
   - **富原文标注 & Obsidian 边界与导入导出**：`lib/db.js`、`lib/db-backend.js` 与 `assets/app/app.js` 实现 `annotations` / `study_notes` 双表持久化、5 色高亮/下划线/加粗/折叠 `💬` 批注/行内 `‹+›` 插入标注与 `[data-tex]` 公式无损共处；新增 `obsidian.enabled` 独立模式开关、`library.importDir`、`paper.exportMarkdown` 与全库快照导入导出。
   - **零依赖多存储后端 & 主题订阅 Feed & CI/CD**：新增纯 Node Wire-Protocol `lib/db-pg.js`、`lib/db-mysql.js` 与统一 `lib/db-backend.js`（支持测试连接与跨库全量迁移）；`lib/arxiv.js` 导出 `PRESET_TOPICS` 与 `fetchTopicFeed` 倒序去重；落地 `.github/workflows/{ci,release}.yml`、`skills/install-dsh-paper-workbench/SKILL.md`、`scripts/install-agent.mjs` 与全库本地论文批量 `PP-StructureV3` 版面处理。
+- **v1.1.0（高并发精准翻译、全学科订阅与代理、交互式原文页、一键安装与插件市场接入 · 2026-11）**：
+  - **1–100 高并发自适应翻译与术语锚定**：`lib/ai.js` 与 `lib/translate-jobs.js` 支持 `1–100` 并发（默认 `10`），内置 AIMD 动态窗口遇到 `429/503` 自动指数退避降速、零丢段；新增零额外开销 `buildPaperGlossary`（标题 + 摘要 + 技术缩写/专名 + 已译标题锚点）与 `buildAdhocTranslatePrompt`（附所在段上下文消歧）；移除冲突的 `• 译` 开关，划词点击「翻译」统一打开锚定「划词精译卡片」（`.sel-trans`，含复制译文 / 存为批注 / 重译整段），每段支持独立收起/展开原文、译文或整段折叠。
+  - **统一自适应「讲解」与交互式原文页**：合并精简重复讲解按钮为划词菜单「讲解选中」+「引用追问」（`paper-draft` 填入右侧输入框）与顶栏「全文导读」+「讲解本节」，`lib/explain.js` 与 `paper-explainer` Skill 自动识别公式/伪代码/实验表/概念匹配拆解框架；修复数字版 PDF 原文页误报「扫描件」，叠加 `.pdf-text-layer` 透明可选文字层（`pdf.pageLines`）与 `⬚ 框选讲解` 高清区域裁剪（`pdf.cropRegion` + 原生图片附件上传）。
+  - **arXiv 8 大学科导航、自定义研究方向、网络代理与一键安装**：新增零依赖 `lib/net.js`（`auto` 环境变量/Windows 系统代理探测 + `custom` HTTP/HTTPS CONNECT & SOCKS5 + `direct` + `network.test` 连通探测）；`lib/arxiv.js` 完整覆盖 arXiv 官方 8 大学科及子分类并支持设置页自定义方向增删改；设置弹窗顶栏与底栏吸顶固定；新增零克隆一行安装脚本 `scripts/install.ps1` / `scripts/install.sh`、`icon.svg` 与 DSH 插件市场元数据。

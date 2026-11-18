@@ -15,6 +15,7 @@ import { existsSync, promises as fsp, readFileSync, realpathSync } from 'node:fs
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { redactProxyUrl, resolveEffectiveProxy } from '../lib/net.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const DEFAULT_REPO_ROOT = path.resolve(HERE, '..')
@@ -47,6 +48,11 @@ export function printHelp() {
     '  --json               输出严格合法的 JSON（供 Agent 解析）',
     '  --skip-py-install    缺失 PyMuPDF 时不尝试自动 pip 安装，只报告待办',
     '  -h, --help           显示帮助信息',
+    '',
+    '免 git clone 一行命令安装（自动适配 DSH 桌面端与 Web 端）：',
+    '  Windows (PS): irm https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.ps1 | iex',
+    '  macOS/Linux : curl -fsSL https://raw.githubusercontent.com/qianxi-00/dsh-paper-workbench/main/scripts/install.sh | bash',
+    '  DSH Web CLI : dsh plugin --profile web add github:qianxi-00/dsh-paper-workbench',
   ].join('\n')
 }
 
@@ -339,7 +345,9 @@ export function dshHomeCandidates() {
   if (IS_WIN) {
     raw.push(
       'F:\\ProGramApp\\DSH',
+      process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'DeepSeek Harness') : '',
       process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'DSH') : '',
+      process.env.APPDATA ? path.join(process.env.APPDATA, 'DeepSeek Harness') : '',
       process.env.APPDATA ? path.join(process.env.APPDATA, 'DSH') : '',
       path.join(home, 'DSH'),
       path.join(home, '.dsh'),
@@ -348,12 +356,14 @@ export function dshHomeCandidates() {
     raw.push(
       path.join(home, '.dsh'),
       path.join(home, 'DSH'),
+      path.join(home, 'Library', 'Application Support', 'DeepSeek Harness'),
       path.join(home, 'Library', 'Application Support', 'DSH'),
     )
   } else {
     raw.push(
       path.join(home, '.dsh'),
       path.join(home, 'DSH'),
+      process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, 'DeepSeek Harness') : path.join(home, '.local', 'share', 'DeepSeek Harness'),
       process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, 'DSH') : path.join(home, '.local', 'share', 'DSH'),
     )
   }
@@ -572,6 +582,16 @@ async function checkObsidianConfigured(config) {
   return { configured: false, path: '', source: 'none' }
 }
 
+function checkNetworkProxy(config) {
+  const legacyProxy = config && config.proxy
+  const network = config && config.network !== undefined
+    ? config.network
+    : { mode: 'auto', proxyUrl: typeof legacyProxy === 'string' ? legacyProxy : legacyProxy && legacyProxy.url }
+  const resolved = resolveEffectiveProxy('https://export.arxiv.org/', network)
+  const safe = redactProxyUrl(resolved.proxyUrl)
+  return { configured: Boolean(safe.url), url: safe.url, authConfigured: safe.authenticated, source: resolved.source }
+}
+
 export async function runInstall(options) {
   const repoRoot = path.resolve(options.repo || DEFAULT_REPO_ROOT)
   const repoPkgPath = path.join(repoRoot, 'package.json')
@@ -603,6 +623,7 @@ export async function runInstall(options) {
   })
   const dshDiscovery = discoverDshHome(options.dshHome)
   const obsidianInfo = await checkObsidianConfigured(existingConfig)
+  const proxyInfo = checkNetworkProxy(existingConfig)
 
   const actions = []
   const writtenFiles = []
@@ -859,8 +880,20 @@ export async function runInstall(options) {
 
   const optionalUserConfigs = [
     {
-      id: 'paddle_ocr_token',
+      id: 'network_proxy',
       index: 1,
+      title: '可选网络代理（arXiv 检索 / 开放获取 PDF 下载）',
+      configured: proxyInfo.configured,
+      optional: true,
+      how: proxyInfo.source === 'direct'
+        ? '当前明确设置为直连，安装器不会覆盖该模式。'
+        : proxyInfo.configured
+          ? `已检测到网络代理：${proxyInfo.url}（来源：${{ config: 'config.json', custom: 'config.json', env: '系统环境变量', system: '系统代理' }[proxyInfo.source] || proxyInfo.source}；亦可在「⚙ 设置」调整 HTTP / SOCKS5 或自动探测本机代理）。`
+          : '若直连 arXiv 较慢或超时，可在工作台「⚙ 设置」配置 HTTP / SOCKS5 代理（如 http://127.0.0.1:7897）或启用系统代理自动探测。',
+    },
+    {
+      id: 'paddle_ocr_token',
+      index: 2,
       title: 'PaddleOCR Token（扫描件 OCR / PP-StructureV3 版面解析）',
       configured: Boolean(existingConfig && existingConfig.ocr && existingConfig.ocr.token),
       optional: true,
@@ -868,7 +901,7 @@ export async function runInstall(options) {
     },
     {
       id: 'remote_database',
-      index: 2,
+      index: 3,
       title: '可选远程数据库（PostgreSQL / MySQL）',
       configured: remoteDbConfigured,
       optional: true,
@@ -878,7 +911,7 @@ export async function runInstall(options) {
     },
     {
       id: 'obsidian_vault',
-      index: 3,
+      index: 4,
       title: '可选 Obsidian Vault（论文卡片与方向综述）',
       configured: obsidianInfo.configured,
       optional: true,
@@ -888,7 +921,7 @@ export async function runInstall(options) {
     },
     {
       id: 'dsh_plugin_enable',
-      index: 4,
+      index: 5,
       title: '在 DSH 插件管理重启/启用 dsh-paper-workbench',
       configured: dshCheck.status === 'ok' && dshCheck.pluginEnableStatus === 'enabled',
       optional: false,
@@ -907,6 +940,7 @@ export async function runInstall(options) {
       node: nodeCheck,
       python: pyCheck,
       dsh: dshCheck,
+      proxy: proxyInfo,
       dataDir: dataDirCheck,
       workspace: workspaceCheck,
       workspaceSkills: workspaceSkillsCheck,
