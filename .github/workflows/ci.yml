@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - dev
+      - test
+      - prod
+      - main
+  pull_request:
+    branches:
+      - dev
+      - test
+      - prod
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node-version: ['20', '22']
+
+    env:
+      DSH_PAPER_WORKBENCH_DATA: ${{ runner.temp }}/pb-ci
+      PYTHONUTF8: '1'
+      PB_CI: '1'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies (PyMuPDF)
+        run: python -m pip install --upgrade pip pymupdf
+
+      - name: Syntax check (node --check)
+        run: |
+          node -e "
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { execFileSync } = require('node:child_process');
+          function walk(dir, ext, out = []) {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) walk(full, ext, out);
+              else if (full.endsWith(ext)) out.push(full);
+            }
+            return out;
+          }
+          const targets = [
+            ...walk('lib', '.js'),
+            ...walk('scripts', '.mjs'),
+            'assets/app/app.js'
+          ];
+          for (const file of targets) {
+            execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });
+          }
+          console.log('Syntax check passed for ' + targets.length + ' files.');
+          "
+
+      - name: Run full test suite
+        run: npm test
+
+      - name: Run agent installer regression tests
+        run: node scripts/test-install-agent.mjs
+
+      - name: Run JSON fallback DB engine regression
+        env:
+          PB_DB_ENGINE: json
+        run: node scripts/test-db.mjs
+
+      - name: Run environment doctor check
+        run: node scripts/doctor.mjs
+
+      - name: Verify npm package manifest
+        run: npm pack --dry-run
