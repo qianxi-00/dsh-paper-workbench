@@ -19,7 +19,6 @@ jobs:
     name: Release Gate (Ubuntu / Node 22)
     runs-on: ubuntu-latest
     env:
-      DSH_PAPER_WORKBENCH_DATA: ${{ runner.temp }}/pb-release-ci
       PYTHONUTF8: '1'
       PB_CI: '1'
 
@@ -31,6 +30,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      - name: Configure isolated test data directory
+        env:
+          RUNNER_TEMP_DIR: ${{ runner.temp }}
+        run: |
+          node -e "const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path'); const dir = path.join(process.env.RUNNER_TEMP_DIR || os.tmpdir(), 'pb-release-ci-' + Date.now()); fs.mkdirSync(dir, { recursive: true }); fs.appendFileSync(process.env.GITHUB_ENV, 'DSH_PAPER_WORKBENCH_DATA=' + dir + '\n');"
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
@@ -94,7 +99,7 @@ jobs:
       - name: Resolve release metadata
         id: meta
         env:
-          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
           EVENT_NAME: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
