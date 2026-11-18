@@ -33,7 +33,6 @@ jobs:
         node-version: ['20', '22']
 
     env:
-      DSH_PAPER_WORKBENCH_DATA: ${{ runner.temp }}/pb-ci
       PYTHONUTF8: '1'
       PB_CI: '1'
 
@@ -46,6 +45,12 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      - name: Configure isolated test data directory
+        env:
+          RUNNER_TEMP_DIR: ${{ runner.temp }}
+        run: |
+          node -e "const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path'); const dir = path.join(process.env.RUNNER_TEMP_DIR || os.tmpdir(), 'pb-ci-' + Date.now()); fs.mkdirSync(dir, { recursive: true }); fs.appendFileSync(process.env.GITHUB_ENV, 'DSH_PAPER_WORKBENCH_DATA=' + dir + '\n');"
+
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -55,6 +60,7 @@ jobs:
         run: python -m pip install --upgrade pip pymupdf
 
       - name: Syntax check (node --check)
+        shell: bash
         run: |
           node -e "
           const fs = require('node:fs');
