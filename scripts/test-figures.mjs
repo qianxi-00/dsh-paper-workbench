@@ -12,6 +12,7 @@
  *
  * 运行：node scripts/test-figures.mjs，结果打印 PASS n / FAIL m。
  */
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { promises as fsp } from 'node:fs'
 import os from 'node:os'
@@ -82,13 +83,45 @@ try {
       figuresLib.normalizeLabel(input) === expected, figuresLib.normalizeLabel(input))
   }
 
-  // ---------------------------------------------------------------- 真实 PDF 抽图
-  const pdfExists = await fsp.stat(PDF).then((stat) => stat.isFile() && stat.size > 0).catch(() => false)
-  check('样例 PDF 存在', pdfExists, PDF)
+  // ---------------------------------------------------------------- 真实 PDF 抽图（缺失或强制作合成模式时自动生成合成 PDF）
+  let samplePdf = PDF
+  let usingSynth = process.env.PB_FORCE_SYNTH_SAMPLE === '1'
+  if (!usingSynth) {
+    const localOk = await fsp.stat(PDF).then((stat) => stat.isFile() && stat.size > 0).catch(() => false)
+    if (!localOk) usingSynth = true
+  }
+  if (usingSynth) {
+    samplePdf = path.join(tmpRoot, 'synth-figures.pdf')
+    const { findPython } = await import('../lib/pdf.js')
+    const py = await findPython()
+    if (!py || !py.python) throw new Error('无法生成配图合成 PDF：缺少 Python + PyMuPDF')
+    const pyScript = [
+      'import fitz, sys, struct, zlib',
+      'w, h = 320, 200',
+      'raw = bytearray()',
+      'for y in range(h):',
+      '    raw.append(0)',
+      '    for x in range(w):',
+      '        raw.extend(((x * 73 ^ y * 151 + x * y) & 255, (x * 41 + y * 97) & 255, (x * 13 ^ y * 59 + 80) & 255))',
+      'def chunk(tag, data):',
+      '    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)',
+      'ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)',
+      'png = b"\\x89PNG\\r\\n\\x1a\\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw))) + chunk(b"IEND", b"")',
+      'doc = fitz.open()',
+      'page = doc.new_page(width=595, height=842)',
+      'page.insert_textbox(fitz.Rect(72, 72, 520, 120), "As shown in Figure 1, attention tiling reduces memory traffic cleanly across blocks.", fontsize=11)',
+      'page.insert_image(fitz.Rect(100, 140, 480, 380), stream=png)',
+      'page.insert_textbox(fitz.Rect(90, 395, 505, 430), "Figure 1: Overview of the FlashAttention tiling architecture.", fontsize=10.5)',
+      'doc.save(sys.argv[1])',
+    ].join('\n')
+    execFileSync(py.python, ['-c', pyScript, samplePdf], { stdio: 'pipe' })
+  }
+  const pdfExists = await fsp.stat(samplePdf).then((stat) => stat.isFile() && stat.size > 0).catch(() => false)
+  check('样例 PDF 存在', pdfExists, samplePdf)
   if (!pdfExists) throw new Error('缺少测试 PDF，后续断言跳过')
 
-  const beforeSha1 = await sha1(PDF)
-  const { meta } = await store.addPaper({ title: 'FlashAttention（配图测试）', srcPath: PDF })
+  const beforeSha1 = await sha1(samplePdf)
+  const { meta } = await store.addPaper({ title: 'FlashAttention（配图测试）', srcPath: samplePdf })
   const id = meta.id
 
   const figures = await figuresLib.listFigures(id)
@@ -190,7 +223,7 @@ try {
   check('不存在的论文 id 返回 []', Array.isArray(ghost) && ghost.length === 0)
 
   // ---------------------------------------------------------------- 输入只读
-  const afterSha1 = await sha1(PDF)
+  const afterSha1 = await sha1(samplePdf)
   check('样例 PDF 未被修改（sha1 不变）', afterSha1 === beforeSha1)
 } catch (error) {
   check('测试脚本未异常终止', false, error && error.message ? error.message : String(error))
