@@ -1,0 +1,203 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.8.1); leave empty to use v<package.json version>'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Release Gate (Ubuntu / Node 22)
+    runs-on: ubuntu-latest
+    env:
+      DSH_PAPER_WORKBENCH_DATA: ${{ runner.temp }}/pb-release-ci
+      PYTHONUTF8: '1'
+      PB_CI: '1'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies (PyMuPDF)
+        run: python -m pip install --upgrade pip pymupdf
+
+      - name: Syntax check (node --check)
+        run: |
+          node -e "
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { execFileSync } = require('node:child_process');
+          function walk(dir, ext, out = []) {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) walk(full, ext, out);
+              else if (full.endsWith(ext)) out.push(full);
+            }
+            return out;
+          }
+          const targets = [
+            ...walk('lib', '.js'),
+            ...walk('scripts', '.mjs'),
+            'assets/app/app.js'
+          ];
+          for (const file of targets) {
+            execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });
+          }
+          "
+
+      - name: Run full test suite
+        run: npm test
+
+      - name: Run agent installer regression tests
+        run: node scripts/test-install-agent.mjs
+
+      - name: Run JSON fallback DB engine regression
+        env:
+          PB_DB_ENGINE: json
+        run: node scripts/test-db.mjs
+
+  release:
+    name: Build Tarball & Publish GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Resolve release metadata
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "${EVENT_NAME}" = "push" ] && [ "${REF_TYPE}" = "tag" ]; then
+            TAG="${REF_NAME}"
+          elif [ -n "${INPUT_TAG}" ]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="v${VERSION}"
+          fi
+          case "$TAG" in
+            *-*) PRERELEASE="true" ;;
+            *) PRERELEASE="false" ;;
+          esac
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+
+      - name: Pack release tarball & generate SHA256SUMS.txt
+        id: pack
+        run: |
+          mkdir -p dist
+          TARBALL=$(npm pack --pack-destination dist | tail -n 1 | tr -d '\r')
+          echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
+          (cd dist && sha256sum "${TARBALL}" > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Generate bilingual release notes
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          node -e '
+          const fs = require("node:fs");
+          const tag = process.env.RELEASE_TAG;
+          const tarball = process.env.RELEASE_TARBALL;
+          const lines = [
+            `## dsh-paper-workbench ${tag}`,
+            "",
+            "### Artifacts / 发布产物",
+            `- Package tarball: \`${tarball}\``,
+            "- Integrity checksum: `SHA256SUMS.txt` (`sha256sum -c SHA256SUMS.txt`)",
+            "",
+            "---",
+            "",
+            "### Agent 一键安装（中文）",
+            "适用支持 Skill / CLI 的 Coding Agent（Claude Code / Codex / Antigravity / DSH 等）：",
+            "",
+            "1. 克隆仓库（或解压发布包）：",
+            "   ```bash",
+            "   git clone https://github.com/qianxi-00/dsh-paper-workbench.git",
+            "   cd dsh-paper-workbench",
+            "   ```",
+            "2. 预览与执行自动安装器（零 npm 依赖，自动探测 DSH Home、校验 Node/PyMuPDF、备份 `.bak` 后写入 `profiles/desktop/package.json`）：",
+            "   ```bash",
+            "   node scripts/install-agent.mjs --dry-run --json",
+            "   node scripts/install-agent.mjs --json",
+            "   ```",
+            "3. 环境自检：",
+            "   ```bash",
+            "   npm run doctor",
+            "   ```",
+            "4. 把仓库中的 `skills/install-dsh-paper-workbench/SKILL.md` 复制给任意 AI Agent，即可引导完成全流程安装，并清晰汇报以下可选项：",
+            "   - PaddleOCR Token（仅扫描件 OCR / PP-StructureV3 云端版面解析需要）",
+            "   - 可选远程数据库 PostgreSQL / MySQL（默认使用本地 SQLite / JSON 退化引擎，无需外置库）",
+            "   - 可选 Obsidian Vault（自动探测或手动设置知识库路径）",
+            "   - 在 DSH 桌面端「插件管理」启用并重启/重载 `dsh-paper-workbench`",
+            "",
+            "---",
+            "",
+            "### One-Click Agent Install (English)",
+            "Works with any CLI-capable AI Coding Agent (Claude Code, Codex, Antigravity, DSH):",
+            "",
+            "1. Clone the repository (or extract the release `.tgz` tarball):",
+            "   ```bash",
+            "   git clone https://github.com/qianxi-00/dsh-paper-workbench.git",
+            "   cd dsh-paper-workbench",
+            "   ```",
+            "2. Preview and execute the zero-dependency cross-platform installer (backs up `profiles/desktop/package.json` to `.bak` before writing):",
+            "   ```bash",
+            "   node scripts/install-agent.mjs --dry-run --json",
+            "   node scripts/install-agent.mjs --json",
+            "   ```",
+            "3. Verify the runtime environment:",
+            "   ```bash",
+            "   npm run doctor",
+            "   ```",
+            "4. Or provide `skills/install-dsh-paper-workbench/SKILL.md` to your AI Agent to automate cloning, verifying PyMuPDF, updating DSH desktop dependencies, and reporting optional post-install steps (PaddleOCR token, optional PostgreSQL/MySQL external DB, optional Obsidian Vault, and enabling/restarting `dsh-paper-workbench` in DSH Plugin Manager).",
+          ];
+          fs.writeFileSync("dist/RELEASE_NOTES.md", lines.join("\n") + "\n", "utf8");
+          '
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: dsh-paper-workbench ${{ steps.meta.outputs.tag }}
+          body_path: dist/RELEASE_NOTES.md
+          draft: false
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: |
+            dist/${{ steps.pack.outputs.tarball }}
+            dist/SHA256SUMS.txt

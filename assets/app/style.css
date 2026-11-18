@@ -1440,3 +1440,245 @@ table.lit-table tbody tr:nth-child(even) td { background: rgba(127, 127, 127, 0.
 .layout-report .modal-body { max-height: 60vh; overflow: auto; }
 .layout-report-pages { margin: 8px 0 0; padding-left: 18px; line-height: 1.9; }
 .layout-report-pages .link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+
+/* ---------------- v1.0 富原文标注（高亮/下划线/加粗/批注气泡/插入提示） ---------------- */
+.floating-menu.floating-two-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 5px 6px;
+}
+.floating-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+}
+.floating-row-ann {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 4px;
+}
+.floating-dot {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  padding: 0 !important;
+  border-radius: 999px !important;
+  border: 1.5px solid rgba(0, 0, 0, 0.18) !important;
+  margin: 0 2px;
+}
+.floating-dot.c-yellow { background: #fde047 !important; }
+.floating-dot.c-green { background: #86efac !important; }
+.floating-dot.c-blue { background: #93c5fd !important; }
+.floating-dot.c-pink { background: #f9a8d4 !important; }
+.floating-dot.c-purple { background: #d8b4fe !important; }
+.floating-dot:hover { transform: scale(1.12); }
+
+.ann-mark {
+  cursor: pointer;
+  border-radius: 2px;
+  padding: 0 1px;
+  transition: filter 0.12s ease;
+}
+.ann-mark:hover { filter: brightness(0.95); }
+.ann-hl-yellow { background: rgba(250, 204, 21, 0.38); }
+.ann-hl-green { background: rgba(74, 222, 128, 0.34); }
+.ann-hl-blue { background: rgba(96, 165, 250, 0.30); }
+.ann-hl-pink { background: rgba(244, 114, 182, 0.30); }
+.ann-hl-purple { background: rgba(192, 132, 252, 0.32); }
+.ann-hl-note { background: rgba(250, 204, 21, 0.32); }
+.ann-underline {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-decoration-color: var(--accent, #2563eb);
+  text-underline-offset: 3px;
+}
+.ann-bold { font-weight: 700; }
+.ann-has-comment { border-bottom: 1.5px dashed #d97706; }
+
+.ann-bubble, .ann-insert-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0 3px;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 1.45;
+  border-radius: 999px;
+  vertical-align: baseline;
+  cursor: pointer;
+  user-select: none;
+}
+.ann-bubble {
+  border: 1px solid rgba(217, 119, 6, 0.45);
+  background: rgba(254, 243, 199, 0.9);
+  color: #92400e;
+}
+.ann-insert-chip {
+  border: 1px solid rgba(124, 58, 237, 0.38);
+  background: rgba(237, 233, 254, 0.85);
+  color: #5b21b6;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.pdf-dark .ann-bubble { background: rgba(146, 64, 14, 0.35); color: #fde68a; }
+body.pdf-dark .ann-insert-chip { background: rgba(91, 33, 182, 0.32); color: #ddd6fe; }
+
+.ann-popover {
+  position: fixed;
+  z-index: 35;
+  width: min(360px, calc(100vw - 24px));
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ann-popover-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.ann-popover-quote {
+  font-size: 12px;
+  color: var(--muted);
+  border-left: 2px solid var(--accent);
+  padding-left: 6px;
+  max-height: 60px;
+  overflow: auto;
+}
+.ann-popover textarea {
+  width: 100%;
+  min-height: 70px;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+}
+.ann-popover-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+/* ---------------- v1.0 笔记页与研读笔记 ---------------- */
+.notes-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.study-note-card, .ann-note-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--bg-raised);
+  margin-bottom: 10px;
+}
+.study-note-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.study-note-title { font-weight: 600; font-size: 14px; }
+.study-note-body { font-size: 13px; line-height: 1.65; }
+.ann-kind-tag {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+
+/* ---------------- v1.0 在线最新 Feed 与主题筛选 ---------------- */
+.feed-panel {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.feed-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.topic-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.topic-pill {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.topic-pill.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---------------- v1.0 设置页主题多选与多数据库表单 ---------------- */
+.topic-check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 6px;
+  margin: 6px 0;
+}
+.topic-check-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.db-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+.db-status-banner {
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  margin: 6px 0;
+}
+.db-status-banner.ok { border-color: #16a34a; color: #15803d; }
+.db-status-banner.err { border-color: #dc2626; color: #b91c1c; }
+
+.paper-trans-badge {
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.paper-trans-badge.paused {
+  background: rgba(245, 158, 11, 0.16);
+  color: #b45309;
+}
+.btn-pause-trans {
+  border-color: #d97706 !important;
+  color: #b45309 !important;
+}
+.btn-resume-trans {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}
