@@ -1,6 +1,6 @@
 {
   "name": "dsh-paper-workbench",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "DSH 科研论文工作台：双语对照精读 + 原生 Agent 会话 + 自由并发持久翻译 + 全学科订阅/代理 + 原文页透明交互层",
   "type": "module",
   "icon": "./icon.svg",
