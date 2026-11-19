@@ -243,7 +243,14 @@ try {
       get: name => name === 'webServer' ? { register: () => () => {} } : undefined,
       tools: { register: () => () => {} },
       effect: runtime.effect,
-      inject: (names, run) => { if (names.every(name => name in runtime)) run(runtime) },
+      inject: (names, run) => {
+        if (!names.every(name => name in runtime)) return
+        run(new Proxy(runtime, { get(target, key) {
+          if (key === 'agentPresets' && !names.includes(key)) throw new Error('cannot get property "agentPresets" without inject')
+          if (key === 'get') return name => target[name]
+          return target[key]
+        } }))
+      },
     }
     try {
       host.apply(ctx)
