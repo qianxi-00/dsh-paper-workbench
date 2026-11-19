@@ -170,6 +170,12 @@ export function sseError(res, status, message)
 
 ## 7. HTTP 契约（lead 在 `lib/server.js` 实现）
 
+### 7.0 宿主 HTTP 准入（v1.1.1）
+
+`lib/index.js` 的 `apply(ctx)` 显式依赖 `connection`。缺少必需服务时，宿主不会启动插件或会卸载已运行插件及其路由；此时由宿主回退处理请求。已挂载的唯一 `/paper-workbench` 前缀处理器在读取请求体或调用业务处理器之前执行 `connection.requestRejection(req)`。仅同步返回 `undefined` 才继续；`401/403` 原样拒绝，handler 内查询不到服务、方法缺失、抛错及其他返回值一律返回 `503`，响应不包含内部异常。不因 loopback Host、同源 Origin 或宿主版本而绕过此检查。静态页和脚本、PDF/页图/配图、上传、所有 RPC、翻译与会话 SSE、取消路由均在此边界内。
+
+该同步契约已对照 DSH 官方 `dsh-v0.2.2-rc.3` 与 `dsh-v0.2.2-rc.5` 的 `packages/client/connection/src/rpc.ts` / `rpc-host.ts`；原始 `webServer` 前缀注册不能视为自动认证。浏览器应先通过 DSH 登录取得宿主认证 cookie，再访问同源工作台。`scripts/dev-server.mjs` 不走宿主挂载入口，仅用于本地隔离开发，不能用作宿主认证验证。
+
 ### 7.1 非流式 RPC（`POST /paper-workbench/api/<method>`，沿用 `{ ok, value }` 包装；失败为 `{ ok:false, error }`）
 
 | method | 入参 | 出参 `value` |
