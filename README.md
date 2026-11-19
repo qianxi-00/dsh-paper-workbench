@@ -13,7 +13,7 @@
 右栏复用宿主原生 `conversation.content` 组件：消息流、思考过程、工具调用、模型与思考程度、权限、附件、语音输入和排队均由 DSH 原生管理；插件只负责精确的会话绑定、论文范围关联、阅读定位与快捷提问（`导读` / `总结全文` / `讲解本节` / `讲解选中` / 原文页框选图表截图讲解 / 双击段落）。点右栏顶部的 `↗ 完整页` 可跳到主界面同一条完整会话，历史、运行状态与附件完全一致。
 翻译继续作为独立工具，通过 SSE 逐段生成并存入本地 SQLite（`workbench.db`），不进入聊天历史或污染对话上下文。
 
-> **状态：v1.1.0** · 零 npm 依赖、零构建步骤。支持一行命令免克隆安装、1–100 自由高并发持久翻译（含 429 自适应退避与全文术语锚定）、arXiv 八大学科导航与 HTTP/SOCKS5/系统网络代理、划词精译卡片与逐段独立折叠、原文页透明可交互文本层与框选图表/公式截图讲解、智能自适应深度讲解与零依赖 SQLite / PostgreSQL / MySQL 多存储后端。
+> **状态：v1.1.1** · 零 npm 依赖、零构建步骤。支持一行命令免克隆安装、1–100 自由高并发持久翻译（含 429 自适应退避与全文术语锚定）、arXiv 八大学科导航与 HTTP/SOCKS5/系统网络代理、划词精译卡片与逐段独立折叠、原文页透明可交互文本层与框选图表/公式截图讲解、智能自适应深度讲解与零依赖 SQLite / PostgreSQL / MySQL 多存储后端。
 
 ## 🚀 快速安装
 
@@ -91,7 +91,7 @@ npm run doctor                          # 命令行环境自检（与工作台�
 
 | 需要 | 版本 | 没有会怎样 |
 | --- | --- | --- |
-| DeepSeek Harness | Desktop 或 Web（带 `webServer` / `tools` / `sessionController`） | 装不上 |
+| DeepSeek Harness | Desktop 或 Web，需 `webServer`、`tools` 和 `connection.requestRejection(req)`；原生会话另需 `sessionController` 等能力 | 缺少宿主认证时工作台 HTTP 路由不会放行 |
 | Node.js | ≥ 20（宿主自带） | 低于 22.5 时 `node:sqlite` 不可用，译文自动退化成 JSON 存储，功能不受影响 |
 | Python 3.10+ 与 `PyMuPDF`（`import fitz`） | 推荐 | 页图、段落模型、对照、翻译都用不了，只能走浏览器原生 PDF 查看器 |
 | Obsidian（桌面端） | 可选 | 「卡片」页签与写入不可用，其余照常 |
@@ -102,7 +102,7 @@ PaddleOCR 识别，它不向第三方发请求。
 
 ### 多版本 DSH 兼容保障
 
-插件对宿主公开接口做了分层探测与优雅降级，兼容至少三代稳定 DSH 版本：
+插件对阅读与会话相关公开接口分层探测，按以下三类能力降级；这些降级均以宿主 HTTP 认证可用为前提。缺少 `connection` 服务时，宿主不会挂载插件或会卸载插件；服务存在但没有 `requestRejection(req)` 方法时，已挂载的 HTTP 入口返回 `503`。对 rc.5 仅做过公开源码契约核对，尚未在本机升级后的 DSH 上完成真机复核：
 
 1. **现代桌面版 DSH（推荐）**：完整启用 `conversation.content`（`embedded`）、`SessionProvider`、`sessions.retain`、`fileUpload.upload`、`uiWorkspace.openSession` 以及 `agentPresets.serviceFor` / `agent.ctx.get('systemPrompt')` 双通道论文作用域注入。
 2. **较早桌面版 DSH（无 `agentPresets` 或旧版路由）**：自动回退 `agent.ctx.get('systemPrompt')` 注册上下文、`layout.selectPanel('main.conversation')` 打开会话、`workspaceController` 解析跟随模型。

@@ -53,9 +53,11 @@
 
 ---
 
-## 4. 跨版本 DSH 兼容矩阵（≥ 3 个稳定版本世代）
+## 4. 跨版本 DSH 兼容矩阵（按能力分层）
 
-| 能力面 | 新版 DSH Desktop（世代 1） | 中期 DSH 版本（世代 2） | 旧版 / 精简宿主 / 独立页（世代 3） |
+v1.1.1 起，宿主工作台 HTTP 入口必须经过 `connection.requestRejection(req)`；下表中的会话和阅读降级不放宽认证要求。缺少必需服务时插件不挂载或被宿主卸载；已挂载 handler 内的认证服务查询、方法调用或结果异常默认拒绝。已核对官方 `dsh-v0.2.2-rc.3` 与 `dsh-v0.2.2-rc.5` 的同步准入契约，返回 `undefined` 才放行。独立调试服务器属于另一种启动方式，不能据此断言真实宿主认证通过。
+
+| 能力面 | 新版 DSH Desktop（世代 1） | 中期 DSH 版本（世代 2） | 已认证但缺会话组件的宿主 / 独立调试页 |
 | --- | --- | --- | --- |
 | 原生会话挂载 | `SessionProvider` + `renderFactorySlot('conversation.content', { variant: 'embedded', ... })` | 兼容无 `useSessions` / 简化 Factory 参数回退调用 | 缺 `sessions` / `SessionProvider` 时显示明确缺失接口诊断，阅读与翻译不受影响；独立直开 `/app` 保留内置会话页 |
 | Agent 上下文服务 | `agent.ctx.get('systemPrompt')` | `agentPresets.serviceFor(agent, 'systemPrompt')` | 服务缺席时 `scope.available=false` 并如实提示原因，阻止过期范围静默发送，普通聊天仍可用 |
