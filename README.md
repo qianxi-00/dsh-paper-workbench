@@ -102,7 +102,7 @@ PaddleOCR 识别，它不向第三方发请求。
 
 ### 多版本 DSH 兼容保障
 
-插件对阅读与会话相关公开接口分层探测，按以下三类能力降级；这些降级均以宿主 HTTP 认证可用为前提。若宿主没有提供 `connection.requestRejection(req)`，插件无法满足必需依赖并拒绝加载；对 rc.5 仅做过公开源码契约核对，尚未在本机升级后的 DSH 上完成真机复核：
+插件对阅读与会话相关公开接口分层探测，按以下三类能力降级；这些降级均以宿主 HTTP 认证可用为前提。缺少 `connection` 服务时，宿主不会挂载插件或会卸载插件；服务存在但没有 `requestRejection(req)` 方法时，已挂载的 HTTP 入口返回 `503`。对 rc.5 仅做过公开源码契约核对，尚未在本机升级后的 DSH 上完成真机复核：
 
 1. **现代桌面版 DSH（推荐）**：完整启用 `conversation.content`（`embedded`）、`SessionProvider`、`sessions.retain`、`fileUpload.upload`、`uiWorkspace.openSession` 以及 `agentPresets.serviceFor` / `agent.ctx.get('systemPrompt')` 双通道论文作用域注入。
 2. **较早桌面版 DSH（无 `agentPresets` 或旧版路由）**：自动回退 `agent.ctx.get('systemPrompt')` 注册上下文、`layout.selectPanel('main.conversation')` 打开会话、`workspaceController` 解析跟随模型。
