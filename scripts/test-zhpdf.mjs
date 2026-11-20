@@ -56,10 +56,12 @@ const paperDir = path.join(root, 'paper-z')
 fs.mkdirSync(paperDir, { recursive: true })
 fs.writeFileSync(path.join(paperDir, 'paper.pdf'), 'fake')
 const calls = []
+let savedTrans = trans
+let written = { ok: true, blocks: 4, skipped: 0, pages: 3 }
 const fakeStore = {
   paperFile: (id, name) => path.join(root, id, name),
   resolvePdf: async () => ({ path: path.join(root, 'paper-z', 'paper.pdf') }),
-  readTrans: async () => trans,
+  readTrans: async () => savedTrans,
 }
 const runner = createZhPdf({
   store: fakeStore,
@@ -67,16 +69,22 @@ const runner = createZhPdf({
     callTool: async (command, payload) => {
       calls.push([command, payload])
       fs.writeFileSync(payload.out, 'zh-pdf-bytes')
-      return { ok: true, blocks: 3, skipped: 1, pages: 3 }
+      return written
     },
   },
 })
 
 check('status：还没生成', (await runner.status('paper-z')).exists === false)
 
+let missing = ''
+try { await runner.build('paper-z', { doc }) } catch (error) { missing = error.message }
+check('缺少任何可写回译文都不调用渲染器', /缺少.*译文/.test(missing) && calls.length === 0, missing)
+calls.length = 0
+savedTrans = { entries: { ...trans.entries, h6: { zh: '最后一段。' } } }
+
 const built = await runner.build('paper-z', { doc })
 equal('build：走 zhpdf 命令', calls.map(item => item[0]), ['zhpdf'])
-equal('build：返回统计', [built.blocks, built.skipped, built.pages], [3, 1, 3])
+equal('build：返回统计', [built.blocks, built.skipped, built.pages], [4, 0, 3])
 equal('build：输出文件是 paper-zh.pdf', path.basename(built.path), ZH_FILE)
 check('build：payload 带 lineheight 与 pages', calls[0][1].lineheight > 0 && calls[0][1].pages.length === 3)
 equal('build：payload 每段都有原文和译文',
@@ -84,10 +92,32 @@ equal('build：payload 每段都有原文和译文',
 
 const status = await runner.status('paper-z')
 check('status：存在且有大小', status.exists === true && status.size > 0)
-equal('status：没有 generating 记录时报出块数/页数', [status.blocks, status.pages], [3, 3])
+equal('status：没有 generating 记录时报出块数/页数', [status.blocks, status.pages], [4, 3])
 check('status：生成记录里存的是当前译文指纹',
-  JSON.parse(fs.readFileSync(path.join(paperDir, ZH_META), 'utf8')).transHash === transFingerprint(trans))
+  JSON.parse(fs.readFileSync(path.join(paperDir, ZH_META), 'utf8')).transHash === transFingerprint(savedTrans))
 check('status：刚生成完不算过期', status.stale === false)
+
+const published = fs.readFileSync(built.path)
+const publishedMeta = fs.readFileSync(path.join(paperDir, ZH_META))
+written = { ok: true, blocks: 3, skipped: 1, pages: 3 }
+let skippedFailure = ''
+try { await runner.build('paper-z', { doc }) } catch (error) { skippedFailure = error.message }
+check('渲染漏段时拒绝发布并保留原文件与元数据', Boolean(skippedFailure) &&
+  fs.readFileSync(built.path).equals(published) && fs.readFileSync(path.join(paperDir, ZH_META)).equals(publishedMeta), skippedFailure)
+written = { ok: true, blocks: 4, skipped: 0, pages: 3 }
+
+const blockedMeta = path.join(paperDir, ZH_META + '.tmp')
+fs.mkdirSync(blockedMeta)
+let metaFailure = ''
+try {
+  await createZhPdf({ store: fakeStore, pdf: { callTool: async (_command, payload) => {
+    fs.writeFileSync(payload.out, 'different-pdf-bytes')
+    return written
+  } } }).build('paper-z', { doc })
+} catch (error) { metaFailure = error.message }
+fs.rmSync(blockedMeta, { recursive: true })
+check('元数据发布失败时回滚PDF并保留旧元数据', Boolean(metaFailure) &&
+  fs.readFileSync(built.path).equals(published) && fs.readFileSync(path.join(paperDir, ZH_META)).equals(publishedMeta), metaFailure)
 
 check('status：doc.json 更新后判定为过期',
   await (async () => {

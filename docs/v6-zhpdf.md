@@ -41,8 +41,9 @@ doc.json（段落 hash + bbox + kind + 原文）
 
 | 方法 | 说明 |
 | --- | --- |
-| `zhpdf.status` | `{exists, at, size, stale}`；`stale` 按文件 mtime 与 `doc.json` 比对 |
-| `zhpdf.build` | 生成；无译文 / 无文档 / pdf 工具报错都给中文原因；写任务日志 |
+| `zhpdf.status` | `{exists, at, size, stale}`；按完成标记、译文指纹及 `doc.json` 的 mtime 校验 |
+| `zhpdf.inspect` | `{missingKeys, readyBlocks, crossPage, unlocated}`；界面用独立翻译任务持久化缺译块 |
+| `zhpdf.build` | 所有可写回块均具备译文后才渲染；漏段不发布，保存生成记录失败时恢复旧文件 |
 | `zhpdf.clear` | 删掉 `paper-zh.pdf` |
 
 `/api/page?id=&page=&scale=&source=zh` 渲染中文版；缓存文件 `PAGES_DIR/<id>/zh-p<n>@<scale>.png`。
@@ -51,13 +52,13 @@ doc.json（段落 hash + bbox + kind + 原文）
 
 - 译文比原文长很多 → 字号被压小，仍放不下会压到下面的空白里（可能盖住下一行）。
 - 矢量路径画的标题/艺术字，`redact` 擦不掉，只能靠白底盖住；个别字体会露一点边。
-- 只替换有译文的段落；没翻译的图注、脚注、参考文献仍是英文。
+- 跨页、无法安全定位及不参与替换的块保留原样；可定位文字块不能因缺译或漏写静默留在生成结果中。
 - 不支持公式重排：公式块原样保留（KaTeX 排版只在对照视图里）。
 - 生成是整篇一次（100 页约 1–2 秒的纯本地计算）；译文更新后需重新 build。
 
 ## 5. 测试
 
-- `scripts/test-zhpdf.mjs`（20 项）：认领规则、payload 形状、status/stale、三种错误文案、clear。
+- `scripts/test-zhpdf.mjs`：认领规则、payload 形状、status/stale、三种错误文案、clear。
 - `assets/pdf_tool.py --self-test` 的 `zhpdf` 检查：替换 `Figure 1: sample image` → `图 1：示例图片`，
   断言英文消失、能渲染、文件大小合理（子集化生效）。
 

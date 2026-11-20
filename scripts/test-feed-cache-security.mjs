@@ -117,20 +117,16 @@ test('订阅缓存安全', async (t) => {
     }
   })
 
-  await t.test('非空 Feed 的缓存不保存网络配置明文', async () => {
-    const api = createApi({ fetchTopicFeed: async () => feed('代理 A') })
+  await t.test('非空 Feed 的结果也不落盘，每次查询都调用来源', async () => {
+    let calls = 0
+    const api = createApi({ fetchTopicFeed: async () => feed('来源查询 ' + ++calls) })
     await setNetwork(api, networkA)
+    await seedLegacyCache()
 
-    const result = await api['search.latest'](feedArgs)
-    assert.equal(result.cached, false)
-    assert.deepEqual(result.items, feed('代理 A').items)
-    const text = await fsp.readFile(cacheFile, 'utf8')
-    for (const credential of [username, passwordA, new URL(networkA.proxyUrl).host]) {
-      assert.equal(text.includes(credential), false, '缓存文件泄漏代理地址或凭据')
-    }
-    const hit = await api['search.latest'](feedArgs)
-    assert.equal(hit.cached, true)
-    assert.deepEqual(hit.items, result.items)
+    assert.deepEqual((await api['search.latest'](feedArgs)).items, feed('来源查询 1').items)
+    await assertCacheRemoved()
+    assert.deepEqual((await api['search.latest'](feedArgs)).items, feed('来源查询 2').items)
+    await assertCacheRemoved()
   })
 
   await t.test('切换代理密码后不命中旧请求晚写的缓存', async () => {
@@ -154,7 +150,7 @@ test('订阅缓存安全', async (t) => {
     })
     await setNetwork(api, networkA)
     await api['search.latest'](feedArgs)
-    assert.ok((await fsp.stat(cacheFile)).isFile())
+    await assertCacheRemoved()
 
     holdA = true
     const inFlight = api['search.latest']({ ...feedArgs, force: true })
@@ -167,10 +163,8 @@ test('订阅缓存安全', async (t) => {
       await inFlight
     }
 
-    const lateCache = JSON.parse(await fsp.readFile(cacheFile, 'utf8'))
-    assert.deepEqual(lateCache.value.items, feed('代理 A 的晚到结果').items)
-    const result = await api['search.latest'](feedArgs)
-    assert.deepEqual(result, { ...feed('代理 B'), cached: false })
-    assert.deepEqual(await api['search.latest'](feedArgs), { ...feed('代理 B'), cached: true })
+    await assertCacheRemoved()
+    assert.deepEqual(await api['search.latest'](feedArgs), { ...feed('代理 B'), cached: false })
+    await assertCacheRemoved()
   })
 })

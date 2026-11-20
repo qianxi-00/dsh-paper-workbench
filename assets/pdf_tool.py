@@ -1057,7 +1057,8 @@ def _heuristic_outline(doc):
                 size = max(line_sizes)
                 for span_size in line_sizes:
                     size_chars[span_size] = size_chars.get(span_size, 0) + 1
-                rows.append((index + 1, round(size, 1), text))
+                box = fitz.Rect(line.get("bbox") or (0, 0, 0, 0))
+                rows.append((index + 1, round(size, 1), text, box))
     if not size_chars:
         return [], True  # 扫描件没有文字层，大纲只能为空
     threshold = _clustered_body_size(size_chars) * HEURISTIC_RATIO
@@ -1065,12 +1066,30 @@ def _heuristic_outline(doc):
                   and not (NUMERIC_PAGE_RE.match(row[2]) or CHINESE_PAGE_RE.match(row[2])
                            or ROMAN_PAGE_RE.match(row[2])
                            or re.match(r"^(?:arxiv|doi|https?://|www\.)", row[2], re.IGNORECASE))]
+    # 自动目录以前逐行造节：仅合并同页、同字号、同列且紧邻的标题续行。
+    # 下一行已有独立编号时保持为新节，不能把相邻小节或双栏标题吞掉。
+    joined = []
+    for row in candidates:
+        page, size, title, box = row
+        prev = joined[-1] if joined else None
+        if prev:
+            ppage, psize, ptitle, pbox = prev
+            overlap = min(pbox.x1, box.x1) - max(pbox.x0, box.x0)
+            numbered = re.match(r"^(?:\d+(?:\.\d+)*\.?|Appendix\s+[A-Z][.:]?)\s+\S", title, re.I)
+            if (page == ppage and abs(size - psize) <= 0.6 and not numbered
+                    and -2 <= box.y0 - pbox.y1 <= max(size, psize) * 0.9
+                    and overlap >= min(pbox.width, box.width) * 0.5
+                    and len(ptitle + " " + title) <= MAX_TITLE_LEN):
+                joined[-1] = (page, max(size, psize), ptitle + " " + title, pbox | box)
+                continue
+        joined.append(row)
+    candidates = joined
     reps = []
     for size in sorted({row[1] for row in candidates}, reverse=True):
         if not reps or size < reps[-1] * SIZE_TOLERANCE:
             reps.append(size)
     items, seen = [], set()
-    for page, size, text in sorted(candidates, key=lambda row: row[0]):
+    for page, size, text, _box in sorted(candidates, key=lambda row: row[0]):
         if (page, text) in seen:            # 同页同标题只留一个
             continue
         seen.add((page, text))
