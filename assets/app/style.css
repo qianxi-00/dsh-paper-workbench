@@ -199,7 +199,7 @@ body.dragging * { cursor: col-resize !important; }
 
 .paper-row {
   display: grid;
-  grid-template-columns: 14px 8px minmax(0, 1fr) auto;
+  grid-template-columns: 14px 8px minmax(0, 1fr) auto auto;
   gap: 6px;
   align-items: center;
   padding: 5px 6px;
@@ -1009,7 +1009,7 @@ button.switch.on::before { content: '●'; }
 .floating-menu button { border: none; background: transparent; padding: 4px 8px; border-radius: 6px; }
 .floating-menu button:hover { background: var(--accent-soft); color: var(--accent); }
 
-.online { display: flex; flex-direction: column; gap: 10px; max-width: 860px; margin: 0 auto; width: 100%; }
+.online { display: flex; flex-direction: column; min-height: 0; gap: 10px; max-width: 860px; margin: 0 auto; width: 100%; }
 .online-bar { display: flex; gap: 6px; flex-wrap: wrap; }
 .online-bar input { flex: 1; min-width: 220px; }
 .result {
@@ -1627,14 +1627,17 @@ body.pdf-dark .ann-insert-chip { background: rgba(91, 33, 182, 0.32); color: #dd
 }
 
 /* ---------------- v1.0 在线最新 Feed 与主题筛选 ---------------- */
-.feed-panel {
-  border-top: 1px solid var(--line);
-  padding-top: 10px;
-  margin-top: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+.library-state-legend { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }
+.legend-item { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.library-state-legend .dot { display: inline-block; width: 8px; height: 8px; }
+.online-result-panel { min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.online-results { min-height: 0; max-height: min(62vh, 720px); overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+.online-pagination { display: flex; align-items: center; justify-content: space-between; gap: 8px; position: sticky; bottom: 0; padding: 7px 0; background: var(--bg); }
+.browse-history { min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.browse-history > .online-results { max-height: min(68vh, 760px); }
+.history-item { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); padding: 7px 0; }
+.history-title { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.domain-nav { min-height: 0; }
 .feed-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .topic-pills { display: flex; gap: 6px; flex-wrap: wrap; }
 .topic-pill {
@@ -1933,3 +1936,11 @@ body.pdf-dark .ann-insert-chip { background: rgba(91, 33, 182, 0.32); color: #dd
   color: var(--accent);
   border-bottom: 1px solid var(--line);
 }
+
+/* 结果在可用视口内滚动，工具栏和分页仍可到达。 */
+.online-content { min-height: 0; overflow-y: auto; }
+.feed-panel { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-raised); }
+.toc-entry { padding-block: 6px; }
+.toc-entry[data-toc-level="2"] { margin-left: 16px; }
+.toc-entry[data-toc-level="3"] { margin-left: 32px; }
+.paper-category { font-size: 11px; padding: 2px 4px; }
