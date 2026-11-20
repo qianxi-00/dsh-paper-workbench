@@ -416,19 +416,17 @@ async function main() {
       if (String(url).includes('/api/translate.pause') || String(url).includes('/ai/cancel')) pausedByClient = true
       if (zhTest && String(url).includes('/api/zhpdf.')) {
         let value
-        if (String(url).endsWith('/zhpdf.status')) value = { exists: zhTest.built, stale: false }
+        if (String(url).endsWith('/zhpdf.status')) value = { exists: zhTest.built, stale: false, blocks: 1, job: zhTest.built ? { status: 'done' } : null }
         if (String(url).endsWith('/zhpdf.inspect')) {
           if (zhTest.hold) await zhTest.hold
           const entries = (await store.readTrans(paperId)).entries
           const missingKeys = zhTest.keys.filter(key => !entries[key]?.zh)
           value = { readyBlocks: zhTest.keys.length - missingKeys.length, missingKeys, crossPage: 0, unlocated: 0 }
         }
-        if (String(url).endsWith('/zhpdf.build')) {
-          const entries = (await store.readTrans(paperId)).entries
-          assert.ok(zhTest.keys.every(key => entries[key]?.zh), '必须先持久化补译结果再调用PDF渲染')
+        if (String(url).endsWith('/zhpdf.prepare')) {
           zhTest.built = true
           zhTest.calls++
-          value = { ok: true, blocks: zhTest.keys.length }
+          value = { job: { status: 'running' } }
         }
         return { ok: true, json: async () => ({ ok: true, value }) }
       }
@@ -680,7 +678,7 @@ async function main() {
       assert.match(document.querySelector('.paper-row .dot')?.getAttribute('title') || '', /阅读中|未读|已读/)
     })
 
-    await check('UI：中文PDF先持久补译再生成，取消与旧代次不会误切换', async () => {
+    await check('UI：中文 PDF 通过 prepare 启动，完成后切换，取消与旧代次保留原视图', async () => {
       await pb.openPaper(paperId)
       pb.state.tab = 'page'
       pb.render()
@@ -696,7 +694,6 @@ async function main() {
       await settle()
       assert.equal(zhTest.calls, 1)
       assert.equal(pb.state.zhMode, true)
-      assert.ok((await store.readTrans(paperId)).entries[key]?.zh)
       assert.equal(pb.state.zhBusy, false)
       // 相同论文重开也属于新代次，旧的确认/检查结果不得切换新界面。
       let release

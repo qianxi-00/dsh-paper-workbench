@@ -200,3 +200,12 @@ KaTeX：公式块在渲染期用打包的 `assets/app/vendor/katex/`（js + css 
 | `scripts/test-layout.mjs` | 没有版面的文本层路线不回归（段落/图表/双栏），`tables` 在真实大表上切出 ≥2×2 |
 | `scripts/test-layout-model.mjs` | 表格 HTML → 结构、可信度门槛、跑版面时补表格、`refreshTables` 不重传 |
 | `assets/pdf_tool.py --self-test` | `page_lines` / `clip_text` / `split` / 旋转页坐标 |
+
+## 全库云端批次恢复
+
+`node scripts/batch-layout.mjs` 默认同时处理 2 篇。用 `--id=<论文ID>` 限定范围，`--dry-run` 查看待处理项。每个数据目录使用一份 `.batch-layout/manifest.json`（`version: 1`），按论文记录 PDF SHA256、实测页数、处理阶段、已覆盖页、远端 jobId、云端尝试次数和失败原因。同一库一次运行一个批次进程。
+
+- `Ctrl+C`（SIGINT）或 SIGTERM 停止领取新论文并中断云端请求。`--resume` 继续清单中的论文。扫描件 OCR 复用已保存的 jobId，版面解析复用与 PDF 指纹匹配的 `layout.partial.json`，已完成分片免上传。远端接受任务到本地写下 jobId 之间若强制终止，该次提交可能需要重传。没有 SHA256 的旧断点会重新提交。
+- 每篇云端失败最多自动重试一次。网络中断时续拉原 job，服务端明确失败或返回缺页时可重新提交该分片。耗尽后保留 `failed`，用 `--retry-failed` 单独重试失败论文。
+- 标记完成或跳过前，按实际 PDF 核对发布指针、revision、版面页号和数量、质量状态、raw 的 SHA256、文档版本和配图缓存。仅派生产物损坏时离线重建。`needs_review` 允许完成，仍保留质量提示。
+- 修复前的 `current.json`、旧版面、断点、论文元数据、文档、配图清单和 OCR 文本备份在 `.batch-layout/backups/`。raw 与 revision 沿用不可变归档。此流程只写文件，无数据库变更。
