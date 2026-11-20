@@ -25,7 +25,7 @@ PDF
 
 ## IR 契约（schemaVersion 2）
 
-- `version: 1`、`schemaVersion: 2`、`build: 'ir-1'`、`revision`（输入语义 hash，不含时间戳）。
+- `version: 1`、`schemaVersion: 2`、`build: 'ir-4'`、`revision`（输入语义 hash，不含时间戳）。
 - `source: {sha256, path, size, mtimeMs}`：发行版本必须绑定 PDF 内容 hash。
 - `pages[]`：`{n, pageId, width, height, status: ready|needs_review|failed, quality, blockIds, lineAssignments, fallback?}`。
   每页都有记录，缺页不压缩页号。`failed` 页保留 `fallback: {kind:'original-page', page:n}`。
@@ -45,6 +45,8 @@ PDF
 - `layout-data/current.json`：原子切换的当前版本指针；`layout.json` 只是兼容投影。
 - `layout-data/legacy/<sha>.json`：第一次发布前备份旧版 layout.json。
 - `clear` 只清指针与投影，不删除 raw/历史；原始证据可用于离线重放。
+
+`getDoc` 重建时通过 `writeRebuiltDoc(id, previous, doc)` 保存新模型。拆段导致旧段落键失效时，只有原文摘录在全文逐字出现一次、且目标是可标注的唯一段落时才迁移定位。重复、缺失及译文标注保留原摘录和旧键，可按 `doc.annotationReview` 中的 `{id, revision, reason}` 提示复核。旧模型没有可核对的 revision 时记 `null`。历次重建保留待复核项的最早已知 revision，旧译文继续按原键保存。
 
 ### 离线重建（不重新上传）
 

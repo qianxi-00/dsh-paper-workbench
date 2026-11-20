@@ -200,6 +200,7 @@ async function main() {
       ...(baseDocRes && baseDocRes.doc ? baseDocRes.doc : {}),
       version: 1,
       source: 'pdf-text',
+      parserBuild: 'ir-4',
       builtAt: new Date().toISOString(),
       revision: 'rev-1',
       sections: [
@@ -405,11 +406,39 @@ async function main() {
     document.append(html)
 
     let pausedByClient = false
+    let onlineCalls = 0
+    let zhTest = null
+    const openedUrls = []
     const rpcUrls = []
     const uiFetch = async (url, init = {}) => {
       const target = String(url).startsWith('http') ? url : baseUrl + url
       rpcUrls.push({ url: String(url), body: init.body ? JSON.parse(init.body) : null })
       if (String(url).includes('/api/translate.pause') || String(url).includes('/ai/cancel')) pausedByClient = true
+      if (zhTest && String(url).includes('/api/zhpdf.')) {
+        let value
+        if (String(url).endsWith('/zhpdf.status')) value = { exists: zhTest.built, stale: false, blocks: 1, job: zhTest.built ? { status: 'done' } : null }
+        if (String(url).endsWith('/zhpdf.inspect')) {
+          if (zhTest.hold) await zhTest.hold
+          const entries = (await store.readTrans(paperId)).entries
+          const missingKeys = zhTest.keys.filter(key => !entries[key]?.zh)
+          value = { readyBlocks: zhTest.keys.length - missingKeys.length, missingKeys, crossPage: 0, unlocated: 0 }
+        }
+        if (String(url).endsWith('/zhpdf.prepare')) {
+          zhTest.built = true
+          zhTest.calls++
+          value = { job: { status: 'running' } }
+        }
+        return { ok: true, json: async () => ({ ok: true, value }) }
+      }
+      if (String(url).includes('/api/search.online')) {
+        onlineCalls++
+        const args = JSON.parse(init.body || '{}')
+        const offset = args.cursor ? 100 : 0
+        return { ok: true, json: async () => ({ ok: true, value: {
+          items: Array.from({ length: 100 }, (_, i) => ({ title: 'Search Paper ' + (offset + i + 1), arxivId: '2611.' + String(offset + i + 1).padStart(5, '0'), url: 'https://arxiv.org/abs/2611.' + String(offset + i + 1).padStart(5, '0'), source: 'arxiv' })),
+          nextCursor: offset ? null : 'batch-2', hasMore: !offset, warnings: [],
+        } }) }
+      }
       if (String(url).includes('/api/search.latest')) {
         return {
           ok: true,
@@ -436,6 +465,7 @@ async function main() {
       getSelection: () => null,
       confirm: () => true,
       prompt: () => '',
+      open: (url) => { openedUrls.push(url); return {} },
     })
     const ls = new Map()
     const uiErrors = []
@@ -580,6 +610,105 @@ async function main() {
       assert.match(pageText, /物理学/)
       assert.match(pageText, /定量金融/)
       assert.match(pageText, /问文献库/)
+    })
+
+    await check('UI：学科可折叠，检索100条按10篇翻页，跨批才请求并能从历史找回', async () => {
+      const navToggle = document.getElementById('domain-nav-toggle')
+      assert.ok(navToggle, '应提供可访问的学科折叠入口')
+      await navToggle.emit('click')
+      assert.equal(document.querySelector('.domain-row'), null)
+      assert.equal(document.getElementById('domain-nav-toggle').getAttribute('aria-expanded'), 'false')
+      await document.getElementById('domain-nav-toggle').emit('click')
+      assert.ok(document.querySelector('.domain-row'))
+      const input = document.querySelector('.online-bar input')
+      input.value = 'attention'
+      await input.emit('input')
+      onlineCalls = 0
+      await document.querySelectorAll('button').find(button => button.textContent === '检索').emit('click')
+      await settle()
+      assert.equal(onlineCalls, 1)
+      assert.equal(rpcUrls.filter(row => row.url.includes('/api/search.online')).at(-1).body.limit, 100)
+      assert.equal(document.querySelectorAll('.online-results .result').length, 10)
+      assert.match(document.querySelector('.online-results').textContent, /Search Paper 1/)
+      for (let i = 0; i < 9; i++) await document.querySelector('[data-page-next="online"]').emit('click')
+      assert.equal(onlineCalls, 1, '批次内翻页不发远端请求')
+      assert.match(document.querySelector('.online-results').textContent, /Search Paper 100/)
+      await document.querySelector('[data-page-next="online"]').emit('click')
+      await settle()
+      assert.equal(onlineCalls, 2)
+      assert.match(document.querySelector('.online-results').textContent, /Search Paper 101/)
+      await document.querySelector('[data-page-prev="online"]').emit('click')
+      assert.equal(onlineCalls, 2)
+      const openOriginal = document.querySelector('.online-results').querySelectorAll('button').find(button => button.textContent === '打开原文页')
+      await openOriginal.emit('click')
+      await settle()
+      assert.ok(openedUrls.at(-1).startsWith('https://arxiv.org/abs/'))
+      await document.getElementById('browse-history-toggle').emit('click')
+      await settle()
+      assert.match(document.querySelector('.browse-history').textContent, /Search Paper 91/)
+      assert.ok(document.querySelector('.library-state-legend'), '文库应说明阅读圆点含义')
+    })
+
+    await check('UI：目录批译常驻、合成正文无小操作、目录条目逐行且支持手动分类', async () => {
+      await pb.openPaper(paperId)
+      pb.state.expanded.add(pb.state.current.meta.topics?.[0] || '未分类')
+      pb.state.doc.sections.push({ id: 'synthetic-body', title: '正文', synthetic: true, page: 1 })
+      pb.state.doc.paragraphs.push({ id: 'toc-test', kind: 'list', role: 'toc-entry', tocLevel: 2, tocTargetPage: 2, page: 1, text: '2 Method ........ 2', hash: 'abcdefabcdefabcd' })
+      pb.render()
+      const titleButton = document.getElementById('translate-titles')
+      assert.ok(titleButton && !titleButton.closest('details'), '一键翻译全部目录必须常驻可见')
+      assert.equal(document.querySelector('[data-section="synthetic-body"] .outline-actions'), null)
+      assert.ok(document.getElementById('para-toc-test').classList.contains('toc-entry'))
+      const classify = document.querySelector('[data-classify-paper="' + paperId + '"]')
+      assert.ok(classify, '每篇论文应提供分类入口')
+      await classify.emit('click', { stopPropagation() {} })
+      let input = document.getElementById('paper-category-input')
+      input.value = 'New Research'
+      await input.emit('input')
+      await document.getElementById('paper-category-save').emit('click')
+      await settle()
+      assert.deepEqual((await rpcCall(baseUrl, 'library.get', { id: paperId })).meta.topics, ['New Research'])
+      assert.ok(document.querySelector('.topic-title')?.textContent.includes('New Research'))
+      await document.querySelector('[data-classify-paper="' + paperId + '"]').emit('click', { stopPropagation() {} })
+      assert.ok(document.getElementById('paper-category-existing').textContent.includes('New Research'), '应能选择已有分类')
+      await document.getElementById('paper-category-clear').emit('click')
+      await settle()
+      assert.deepEqual((await rpcCall(baseUrl, 'library.get', { id: paperId })).meta.topics, [])
+      assert.ok(document.querySelector('.topic-title')?.textContent.includes('未分类'))
+      assert.match(document.querySelector('.paper-row .dot')?.getAttribute('title') || '', /阅读中|未读|已读/)
+    })
+
+    await check('UI：中文 PDF 通过 prepare 启动，完成后切换，取消与旧代次保留原视图', async () => {
+      await pb.openPaper(paperId)
+      pb.state.tab = 'page'
+      pb.render()
+      const key = paragraphs[0].hash
+      await store.deleteTransKeys(paperId, [key])
+      zhTest = { keys: [key], built: false, calls: 0 }
+      windowObj.confirm = () => false
+      await document.getElementById('page-zhpdf').emit('click')
+      assert.equal(zhTest.calls, 0)
+      assert.equal(pb.state.zhMode, false)
+      windowObj.confirm = () => true
+      await document.getElementById('page-zhpdf').emit('click')
+      await settle()
+      assert.equal(zhTest.calls, 1)
+      assert.equal(pb.state.zhMode, true)
+      assert.equal(pb.state.zhBusy, false)
+      // 相同论文重开也属于新代次，旧的确认/检查结果不得切换新界面。
+      let release
+      zhTest = { keys: [key], built: false, calls: 0, hold: new Promise(resolve => { release = resolve }) }
+      pb.state.zhMode = false
+      pb.render()
+      const old = document.getElementById('page-zhpdf').emit('click')
+      await settle()
+      await pb.openPaper(paperId)
+      assert.equal(pb.state.zhBusy, false)
+      release()
+      await old
+      assert.equal(zhTest.calls, 0)
+      assert.equal(pb.state.zhMode, false)
+      zhTest = null
     })
 
     console.log('\nPASS ' + passed + ' / FAIL 0')
