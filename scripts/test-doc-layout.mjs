@@ -113,6 +113,54 @@ try {
     assert.equal(second.built, true)
     assert.deepEqual(first.doc.paragraphs.map(p => p.hash), second.doc.paragraphs.map(p => p.hash))
   })
+  await check('rebuild reanchors only unique source quotations and preserves unresolved notes', async () => {
+    const oldText = 'First topic 2 Second topic 5 Third topic 8'
+    const oldBlock = block('body', oldText, { blockId: 'old-toc' })
+    layout = { ...layout, revision: 'revision-old', blocks: [oldBlock] }
+    await saveLayout()
+    const before = (await docModule.getDoc(id, { rebuild: true })).doc
+    const oldKey = before.paragraphs[0].hash
+    await store.saveAnnotations(id, [
+      { id: 'unique', paragraphKey: oldKey, quote: 'Second topic', startOffset: 14, endOffset: 26, page: 1, note: 'keep this note' },
+      { id: 'ambiguous', paragraphKey: oldKey, quote: 'topic', startOffset: 6, endOffset: 11, page: 1 },
+      { id: 'missing', paragraphKey: oldKey, quote: 'missing phrase', page: 1 },
+      { id: 'translated', paragraphKey: oldKey, target: 'zh', quote: '译文', page: 1 },
+    ])
+    await store.mergeTrans(id, { entries: { [oldKey]: { zh: '旧译文' } } })
+    layout = { ...layout, revision: 'revision-new-toc', blocks: [
+      block('list', 'First topic 2', { blockId: 'toc-1' }),
+      block('list', 'Second topic 5', { blockId: 'toc-2' }),
+      block('list', 'Third topic 8', { blockId: 'toc-3' }),
+    ] }
+    await saveLayout()
+    const result = await docModule.getDoc(id)
+    const byId = Object.fromEntries((await store.readAnnotations(id)).map(item => [item.id, item]))
+    assert.equal(byId.unique.paragraphKey, result.doc.paragraphs[1].hash)
+    assert.equal(byId.unique.startOffset, 0)
+    assert.equal(byId.unique.endOffset, 12)
+    assert.equal(byId.unique.note, 'keep this note')
+    assert.equal(byId.unique.blockId, 'toc-2')
+    assert.equal(byId.ambiguous.paragraphKey, oldKey)
+    assert.equal(byId.missing.paragraphKey, oldKey)
+    assert.equal(byId.translated.paragraphKey, oldKey)
+    assert.equal((await store.readTrans(id)).entries[oldKey].zh, '旧译文')
+    assert.deepEqual(result.doc.annotationReview.map(item => [item.id, item.revision, item.reason]).sort(), [
+      ['ambiguous', 'revision-old', 'ambiguous'], ['missing', 'revision-old', 'missing'], ['translated', 'revision-old', 'translated'],
+    ])
+    const cached = await docModule.getDoc(id)
+    assert.deepEqual(cached.doc.annotationReview, result.doc.annotationReview)
+    const rebuilt = await docModule.getDoc(id, { rebuild: true })
+    assert.deepEqual(rebuilt.doc.annotationReview, result.doc.annotationReview)
+  })
+  await check('opening an already split ir-4 cache repairs a legacy annotation', async () => {
+    const cached = await store.readDoc(id)
+    delete cached.annotationAnchorVersion
+    await store.writeDoc(id, cached)
+    await store.saveAnnotations(id, { id: 'legacy', paragraphKey: 'orphan', quote: 'Third topic' })
+    const { doc } = await docModule.getDoc(id)
+    assert.equal((await store.readAnnotations(id)).find(item => item.id === 'legacy').paragraphKey, doc.paragraphs[2].hash)
+    assert.equal((await docModule.getDoc(id)).built, false)
+  })
   await check('figures use published layout instead of a prior PDF cache', async () => {
     await store.writeJsonAtomic(store.paperFile(id, 'figures.json'), { version: 1, source, figures: [{ index: 9, page: 1 }] })
     const figures = await figuresModule.listFigures(id)

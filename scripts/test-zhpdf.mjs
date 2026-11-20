@@ -106,6 +106,19 @@ check('渲染漏段时拒绝发布并保留原文件与元数据', Boolean(skipp
   fs.readFileSync(built.path).equals(published) && fs.readFileSync(path.join(paperDir, ZH_META)).equals(publishedMeta), skippedFailure)
 written = { ok: true, blocks: 4, skipped: 0, pages: 3 }
 
+const sourcePath = path.join(paperDir, 'paper.pdf')
+const sourceChange = createZhPdf({ store: fakeStore, pdf: { callTool: async (_command, payload) => {
+  fs.writeFileSync(payload.out, 'different-pdf-bytes')
+  fs.writeFileSync(sourcePath, 'swap')
+  return written
+} } })
+let staleSource = ''
+try { await sourceChange.build('paper-z', { doc }) } catch (error) { staleSource = error.message }
+check('生成期间源 PDF 被等长替换时保留旧文件', /源 PDF/.test(staleSource) &&
+  fs.readFileSync(built.path).equals(published) && fs.readFileSync(path.join(paperDir, ZH_META)).equals(publishedMeta), staleSource)
+check('源 PDF 改变后旧中文版过期', (await runner.status('paper-z')).stale)
+fs.writeFileSync(sourcePath, 'fake')
+
 const blockedMeta = path.join(paperDir, ZH_META + '.tmp')
 fs.mkdirSync(blockedMeta)
 let metaFailure = ''
@@ -169,6 +182,31 @@ try {
   failure = error.message
 }
 check('工具报错时带上原因', failure.includes('磁盘满了'), failure)
+
+const splitDoc = { paragraphs: [{
+  hash: 'split', kind: 'body', page: 1, crossPage: true,
+  text: 'The first part continues onto the next page.',
+  pageFragments: [{ page: 1, text: 'The first part', bbox: [10, 70, 90, 85] }, { page: 2, text: 'continues onto the next page.', bbox: [10, 5, 185, 20] }],
+}, { hash: 'bare', kind: 'body', page: 3, text: 'A unique line without a box.' }] }
+const splitTrans = { entries: { split: { zh: '第一部分接到下一页。' }, bare: { zh: '一行没有坐标的文字。' } } }
+let recoveryCalls = 0
+const recovery = createZhPdf({ store: { ...fakeStore, readTrans: async () => splitTrans }, pdf: { pageLines: async () => ({ ok: true, lines: [
+  { text: 'A unique line without a box.', x: 10, y: 30, x2: 200, y2: 44 },
+] }), callTool: async (_command, payload) => {
+  recoveryCalls += 1
+  equal('跨页段按页写回，译文不丢字', payload.pages.slice(0, 2).flatMap(item => item.blocks.map(block => block.text)).join(''), '第一部分接到下一页。')
+  equal('无框段从唯一匹配的本地文本行恢复', payload.pages[2]?.blocks[0].rect, [10, 30, 200, 44])
+  fs.writeFileSync(payload.out, 'zh-pdf-bytes')
+  return { ok: true, blocks: 3, skipped: 0, pages: 3 }
+} } })
+let geometryFailure = ''
+try { await recovery.build('paper-z', { doc: splitDoc }) } catch (error) { geometryFailure = error.message }
+check('跨页及缺失坐标可恢复后才渲染', recoveryCalls === 1 && !geometryFailure, geometryFailure)
+
+let cannotLocate = ''
+try { await recovery.build('paper-z', { doc: { paragraphs: [...splitDoc.paragraphs, { hash: 'wrong', kind: 'body', page: 3, text: 'Not on this page.' }] } }) }
+catch (error) { cannotLocate = error.message }
+check('无法恢复的段落带页码阻止发布', /第 3 页/.test(cannotLocate) && recoveryCalls === 1, cannotLocate)
 
 await runner.clear('paper-z')
 check('clear 删掉文件与生成记录',
