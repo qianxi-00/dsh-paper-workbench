@@ -1,0 +1,115 @@
+{
+  "targetVersion": "1.2.0",
+  "artifacts": [
+    {
+      "url": "https://registry.npmjs.org/dsh-paper-workbench/-/dsh-paper-workbench-1.2.0.tgz",
+      "checkedAt": "2026-11-20T11:47:34.275Z",
+      "httpStatus": 200,
+      "bytes": 939030,
+      "sha256": "3eab6f1a789e39a87e87ce9e80bf6f232218db7e907b4dbdd8ee84e69f275b98"
+    },
+    {
+      "url": "https://github.com/qianxi-00/dsh-paper-workbench/releases/download/v1.2.0/dsh-paper-workbench-1.2.0.tgz",
+      "checkedAt": "2026-11-20T11:47:35.095Z",
+      "httpStatus": 200,
+      "bytes": 939030,
+      "sha256": "3eab6f1a789e39a87e87ce9e80bf6f232218db7e907b4dbdd8ee84e69f275b98"
+    }
+  ],
+  "awesomePlugins": {
+    "url": "https://awesome-dsh-plugin.com/plugins.json",
+    "checkedAt": "2026-11-20T11:47:26.658Z",
+    "httpStatus": 200,
+    "bytes": 17227527,
+    "sha256": "ea85b8c46c455feaa76493f801c9a17c2889a380d725623f96e5a99c7e53ea9a",
+    "keys": [
+      "name",
+      "url",
+      "source",
+      "updated",
+      "count",
+      "categories",
+      "plugins"
+    ],
+    "total": 12203,
+    "matches": [
+      {
+        "name": "dsh-paper-workbench",
+        "url": "https://github.com/qianxi-00/dsh-paper-workbench",
+        "version": "1.1.2",
+        "tarball": "https://github.com/qianxi-00/dsh-paper-workbench/releases/download/v1.1.2/dsh-paper-workbench-1.1.2.tgz",
+        "install": "dsh plugin --profile web add dsh-paper-workbench",
+        "npm": "dsh-paper-workbench"
+      }
+    ],
+    "priorAttempts": [
+      {
+        "id": "awesome-plugins",
+        "url": "https://awesome-dsh-plugin.com/plugins.json",
+        "checkedAt": "2026-11-20T11:42:12.369Z",
+        "error": "TimeoutError"
+      }
+    ]
+  },
+  "bruceAudit": {
+    "id": "bruce-audit",
+    "url": "https://bruc3van.com/markets/dsh/audit.json",
+    "checkedAt": "2026-11-20T11:42:12.400Z",
+    "httpStatus": 200,
+    "bytes": 1549543,
+    "sha256": "7280c1c520a10e0f5731a12163b02c7976f22012c76f501935437d617d590d61",
+    "keys": [
+      "reportVersion",
+      "title",
+      "scope",
+      "remediation",
+      "generator",
+      "presentationQuality",
+      "summary",
+      "selection",
+      "indexSha256",
+      "fetchFailures",
+      "generatedAt",
+      "candidateSelection"
+    ],
+    "matches": [],
+    "included": 2629,
+    "indexSha256": "09d7d8ab99cd20b3d1b4acca8213463fc028d4dadbfb50fca61b31f8463b4dbe",
+    "selection": {
+      "policy": "size-budget-verified-plugins-with-pinned-pick-v3",
+      "eligiblePlugins": 2784,
+      "included": 2629,
+      "droppedByLimit": 155,
+      "cutoffStars": 4
+    },
+    "diagnostics": []
+  },
+  "scoutProposal": {
+    "base": "956d0e944734649feda0bc299adeed68d913e8c2",
+    "commit": "58d92d2",
+    "branch": "https://github.com/qianxi-00/dsh-plugin-scout/tree/agent/qian-25-market-compatibility",
+    "prCreated": false,
+    "error": "GraphQL: Resource not accessible by personal access token (createPullRequest)",
+    "tests": {
+      "passed": 81,
+      "failed": 0,
+      "skipped": 1,
+      "skipReason": "SCOUT_CONNECTION_MODULE unset"
+    }
+  },
+  "bruceSource": {
+    "commit": "686ad0210c0ec8963be99ab3c723506fbf87255c",
+    "approved": true,
+    "mapped": false,
+    "stars": 1,
+    "minStars": 5,
+    "maxIdleDays": 90
+  },
+  "awesomePullRequest": {
+    "url": "https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/17123",
+    "state": "OPEN",
+    "mergedAt": null,
+    "headRef": "agent/update-paper-workbench-v1.2.0",
+    "checks": "2 SUCCESS"
+  }
+}

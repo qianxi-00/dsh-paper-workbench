@@ -149,7 +149,7 @@ npm test
 - 核心分支为 `dev`、`test`、`prod`、`main`，合并方向 `dev → test → prod → main`；`main` 展示稳定发布。日常从 dev 开临时 `agent/<topic>`，不直接向 test/prod/main 提交。提交前核对身份 `Qian Xi <1964055097@qq.com>`，使用语义化前缀说明目的或根因。
 - 本仓库 [CI](.github/workflows/ci.yml) 对四核心分支的 push、目标为这些分支的 PR 和手动运行执行三系统 × Node 20/22 验证。仅 push `agent/*` 不触发该 push CI；文档合入 dev 也会验证。
 - [Release](.github/workflows/release.yml) 由 `v*` tag push 或手动运行触发，测试门后打包；有 NPM_TOKEN 时按版本查询与完整性结果决定是否发布 npm 并附 provenance，随后创建或更新 GitHub Release。tag 必须匹配包版本，约定在 prod 发布点打 tag；当前工作流不强制标签来源分支。
-- **渠道快照（2026-11-20）**：GitHub/npm 已发布 1.2.0；作者向 Awesome DSH Plugin 的投稿与 1.1.2 更新已合并，1.2.0 更新 PR 当时 OPEN。dshmarket 使用同一目录，DSH「发现」可用社区索引仍列 1.1.2；其他聚合站的展示不等于作者逐站投稿。详细来源、版本和查询方法统一查 [发布运维](agent-docs/operations/release-and-distribution.md)，操作前刷新状态。
+- **分发检查**：涉及市场登记、版本同步或收录结论时，先读 [发布运维](agent-docs/operations/release-and-distribution.md#四源检查与后续版本维护)，再运行其中的只读检查。各源登记方式、当前证据及恢复条件集中维护在那里。
 - 包发布、市场索引刷新、用户机器安装与宿主重载分别验证。当前工作流没有自动更新第三方目录或部署用户 profile 的步骤；一行安装器和本地安装器的来源、版本锁定、link/copy 与校验范围见发布运维。
 - 临时分支合并后清理自身 worktree 和本地/远端临时分支，保留用户未合并工作。推送先确认 Git Forge 授权及任务范围；提交、同步文档、版本发布与本机安装分别按用户授权执行。
 
