@@ -1274,6 +1274,7 @@ async function runTranslate(body, job) {
   state.translateJob = {
     paperId: pid,
     status: 'running',
+    ...(body.purpose ? { purpose: body.purpose } : {}),
     concurrency,
     completed: Math.max(prevDone, job.done ? job.done.size : 0),
     total: job.totalParagraphs || 0,
@@ -1976,6 +1977,7 @@ async function openPaper(id, options = {}) {
     state.zhMode = false
     state.zhStatus = null
     state.zhBusy = false
+    if (hostReady()) void followZhPdf(id, seq, false)
     await Promise.all([loadPage(state.page, seq), loadDoc(id, seq), loadChat(id, seq), loadAi(), loadFigures(seq)])
     if (seq !== state.openSeq) return
     buildFiguresByKey()
@@ -4118,7 +4120,43 @@ function pageRatio(page) {
   return PAGE_DEFAULT_RATIO
 }
 
-/** 补齐可写回原版面的译文；仅在当前阅读代次切换视图。 */
+let zhWatch = 0
+
+async function followZhPdf(id, seq, requested) {
+  const watch = ++zhWatch
+  const current = () => watch === zhWatch && seq === state.openSeq && state.current?.meta?.id === id
+  try {
+    while (current()) {
+      const status = await rpc('zhpdf.status', { id })
+      if (!current()) return
+      state.zhStatus = status
+      const job = status.job
+      if (job?.status !== 'running') {
+        if (requested && state.tab === 'page' && status.exists && !status.stale && job?.status === 'done') {
+          state.zhMode = true
+          state.pendingPage = state.page
+          toast('中文版已生成，写入 ' + status.blocks + ' 块')
+        }
+        if (requested && job?.status === 'error') toast(job.error, 6000)
+        if (job) render()
+        return
+      }
+      requested = true
+      if (state.tab === 'page') render()
+      await new Promise(resolve => setTimeout(resolve, 1500))
+    }
+  } catch (error) {
+    if (requested && current()) toast(error.message, 6000)
+  }
+}
+
+function zhProgress(job) {
+  if (!job || job.status === 'done') return ''
+  if (job.error) return job.error
+  const phase = { checking: '检查覆盖', translating: '补译中', generating: '生成 PDF 中' }[job.phase] || ''
+  return [phase, job.missingCount != null && '待补译 ' + job.missingCount, job.total > 0 && job.completed + '/' + job.total, job.model].filter(Boolean).join(' · ')
+}
+
 async function toggleZhPdf() {
   const id = state.current?.meta?.id
   if (!id || state.zhBusy || state.busy === 'open') return
@@ -4134,50 +4172,25 @@ async function toggleZhPdf() {
   state.zhBusy = true
   render()
   try {
-    let status = await rpc('zhpdf.status', { id })
+    const status = await rpc('zhpdf.status', { id })
     if (!stillHere()) return
-    if (!status.exists || status.stale) {
-      let check = await rpc('zhpdf.inspect', { id })
-      if (!stillHere()) return
-      if (!check.readyBlocks && !check.missingKeys.length) throw new Error('没有能安全写回原版面的文字，请先检查版面解析。')
-      const excluded = check.crossPage + check.unlocated
-      const tip = excluded ? '\n另有 ' + excluded + ' 段跨页或无法安全定位，将保留原样。' : ''
-      const action = check.missingKeys.length
-        ? '先通过独立翻译任务补齐 ' + check.missingKeys.length + ' 段译文，再在本地生成中文版 PDF。'
-        : '用已有译文在本地生成中文版 PDF。'
-      if (!window.confirm(action + tip + '\n继续？')) return
-      if (check.missingKeys.length) {
-        const { job: active } = await rpc('translate.status', { id })
-        if (!stillHere()) return
-        if (active?.status === 'running') {
-          await attachTranslateFollow(id, active)
-          if (!stillHere()) return
-          const { job } = await rpc('translate.status', { id })
-          if (!stillHere()) return
-          if (job?.status !== 'done') throw new Error('本篇翻译尚未完成，请继续翻译后重试。')
-          check = await rpc('zhpdf.inspect', { id })
-          if (!stillHere()) return
-        }
-        const keys = check.missingKeys
-        if (keys.length) {
-          const job = { mode: 'keys', sections: [], keysBySection: new Map([['__keys', new Set(keys)]]), totalParagraphs: keys.length, totalSections: 0, done: new Set(), failed: new Set() }
-          await runTranslate({ id, keys, target: 'zh' }, job)
-          if (!stillHere()) return
-          check = await rpc('zhpdf.inspect', { id })
-          if (!stillHere()) return
-          if (check.missingKeys.length) throw new Error('还有 ' + check.missingKeys.length + ' 段译文未保存，未生成中文版。请继续翻译或重试。')
-        }
-      }
-      const result = await rpc('zhpdf.build', { id })
-      if (!stillHere()) return
-      status = await rpc('zhpdf.status', { id })
-      if (!stillHere()) return
-      if (!status.exists || status.stale) throw new Error('中文版尚未就绪，请重新生成。')
-      toast('中文版已生成，写入 ' + result.blocks + ' 段')
-    }
     state.zhStatus = status
-    state.zhMode = true
-    state.pendingPage = state.page
+    if (status.job?.status === 'running') {
+      await rpc('zhpdf.pause', { id })
+    } else if (status.job?.status === 'paused') {
+      await rpc('zhpdf.resume', { id })
+    } else if (status.exists && !status.stale) {
+      state.zhMode = true
+      state.pendingPage = state.page
+      return
+    } else {
+      const check = await rpc('zhpdf.inspect', { id })
+      if (!stillHere()) return
+      if (check.issues?.length) throw new Error(check.issues.slice(0, 5).map(issue => '第 ' + (issue.page || '?') + ' 页 ' + issue.reason).join('，'))
+      if (!window.confirm((check.missingKeys.length ? '将通过翻译模型补齐 ' + check.missingKeys.length + ' 项，可能产生模型费用。' : '译文已齐。') + '继续生成中文版 PDF？')) return
+      await rpc('zhpdf.prepare', { id })
+    }
+    if (stillHere()) void followZhPdf(id, seq, true)
   } catch (error) {
     if (stillHere()) toast(error.message, 6000)
   } finally {
@@ -4527,7 +4540,10 @@ function renderPagePane() {
         disabled: state.zhBusy,
         title: '先通过独立任务补齐缺失译文，再本地生成并切换中文版；跨页或无法安全定位的文字会明确提示',
         onclick: toggleZhPdf,
-      }, state.zhBusy ? '补译 / 生成中…' : state.zhMode ? '中文版 ✓' : '中文版'),
+      }, state.zhBusy ? '请稍候…' : state.zhMode ? '中文版 ✓' : state.zhStatus?.job?.status === 'running' ? '暂停生成中文版' : state.zhStatus?.job?.status === 'paused' ? '继续生成中文版' : '中文版'),
+      h('span', { role: 'status', class: 'translate-status' }, zhProgress(state.zhStatus?.job)),
+      h('button', { id: 'translate-stop', class: 'btn-pause-trans', hidden: !state.translateBusy, onclick: pauseTranslate }, '暂停翻译'),
+      h('span', { id: 'translate-status', class: 'translate-status', role: 'status' }, state.translateError || progressText()),
       h('span', { class: 'spacer' }),
       state.current.meta.hasText === false || (state.ocr && state.ocr.pages > 0)
         ? h('button', { class: 'ghost', onclick: runOcr, disabled: !!state.ocrBusy, title: '扫描件：调用 PaddleOCR 识别全文' }, state.ocrBusy ? 'OCR 中…' : state.ocr && state.ocr.pages > 0 ? '重新 OCR' : 'OCR 识别')
@@ -4853,6 +4869,9 @@ function renderNotesPane() {
           { class: 'row' },
           h('span', { class: 'ann-kind-tag' }, ANN_KIND_LABELS[ann.kind] || ann.kind),
           h('span', { class: 'muted' }, 'p.' + (ann.page || 1) + (ann.target === 'zh' ? ' · 译文' : ' · 原文')),
+          state.doc?.annotationReview?.some(item => item.id === ann.id)
+            ? h('span', { class: 'muted' }, '需复核 · 原文定位已变化 · 旧 revision ' + (state.doc.annotationReview.find(item => item.id === ann.id).revision || '未知'))
+            : null,
           ann.note ? h('span', {}, ann.note) : null,
         ),
         h(

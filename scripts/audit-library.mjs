@@ -14,7 +14,6 @@ import { spawnSync } from 'node:child_process'
 import { createLayoutArchive, fingerprintPdf } from '../lib/layout-archive.js'
 import { qualitySummary } from '../lib/layout-ir.js'
 import { LAYOUT_BUILD, LAYOUT_VERSION } from '../lib/layout.js'
-import { DOC_VERSION, buildDoc, buildLayoutDoc, outlineFingerprint } from '../lib/doc.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ID = /^[a-z0-9][a-z0-9._-]{0,79}$/
@@ -34,6 +33,9 @@ for (let i = 0; i < args.length; i++) {
   else { argumentError = '未知参数：' + arg; break }
 }
 const data = path.resolve(options.data || '')
+process.env.DSH_PAPER_WORKBENCH_DATA = data
+const { DOC_VERSION, buildDoc, buildLayoutDoc, outlineFingerprint, writeRebuiltDoc } = await import('../lib/doc.js')
+const store = await import('../lib/store.js')
 const paperFile = (id, name) => {
   if (!ID.test(id)) throw new Error('非法的论文 id：' + id)
   return path.join(data, 'papers', id, name)
@@ -186,7 +188,7 @@ async function backup(id) {
     files[name] = bytes === null ? { exists: false } : { exists: true, sha256: bytesHash(bytes) }
     if (bytes !== null) await atomic(path.join(WORK, dir, name), bytes)
   }
-  return { dir, files }
+  return { dir, files, annotations: await store.readAnnotations(id) }
 }
 async function restore(id, saved) {
   await assertPaperScope(id)
@@ -207,6 +209,7 @@ async function restore(id, saved) {
     if (bytes === null) await fs.rm(paperFile(id, name), { force: true })
     else await atomic(paperFile(id, name), bytes)
   }
+  if (Array.isArray(saved.annotations) && saved.annotations.length) await store.saveAnnotations(id, saved.annotations)
 }
 async function takeLock() {
   await assertContained(WORK)
@@ -249,7 +252,7 @@ async function rebuildPaper(paper, manifest) {
         const doc = buildDoc({ meta, text, outline: meta.outline || [], pdf: { path: paper.pdf.path, sha1: paper.pdf.sha1, bytes: paper.pdf.size, mtimeMs: paper.pdf.mtimeMs } })
         if (doc.source !== 'pdf-text' || doc.degraded || !doc.paragraphs.length) throw new Error('本地文本不足以建立文档；保留旧数据，未请求 OCR')
         if ((await fingerprintPdf(paper.pdf.path)).sha256 !== paper.pdf.sha256) throw new Error('补文档期间 PDF 已变化')
-        await atomic(paperFile(paper.id, 'doc.json'), JSON.stringify(doc, null, 2) + '\n')
+        await writeRebuiltDoc(paper.id, await store.readDoc(paper.id), doc)
         Object.assign(operation, { status: 'needs-cloud', docRebuilt: true, finishedAt: new Date().toISOString() })
         await saveManifest(manifest)
         return { ...await auditPaper(paper.id, meta), operation }
@@ -285,7 +288,7 @@ async function rebuildPaper(paper, manifest) {
     if (currentSource.sha256 !== paper.pdf.sha256) throw new Error('重建期间 PDF 已变化，已停止发布文档')
     const doc = buildLayoutDoc({ layout, meta, pdf: { path: paper.pdf.path, sha1: paper.pdf.sha1, bytes: currentSource.size, mtimeMs: currentSource.mtimeMs } })
     if (!doc.paragraphs.length) throw new Error('重建文档没有正文段落，保留旧文档')
-    await atomic(paperFile(paper.id, 'doc.json'), JSON.stringify(doc, null, 2) + '\n')
+    await writeRebuiltDoc(paper.id, await store.readDoc(paper.id), doc)
     const after = await auditPaper(paper.id, meta)
     if (after.issues.some(i => i.state === 'invalid' || i.state === 'stale' || i.code === 'missing-doc')) throw new Error('重建后检查未通过：' + after.issues.map(i => i.code).join(', '))
     Object.assign(operation, { status: 'succeeded', revision: layout.revision, finishedAt: new Date().toISOString() })
@@ -342,4 +345,4 @@ async function main() {
   }
   console.log(JSON.stringify({ mode: options.rebuild ? 'rebuild' : 'audit', network: 'disabled', data, ...(options.rebuild ? { manifest: MANIFEST } : {}), expected: { layoutBuild: LAYOUT_BUILD, layoutVersion: LAYOUT_VERSION, docVersion: DOC_VERSION }, papers, summary }, null, 2))
 }
-main().catch(error => { console.log(JSON.stringify({ error: error.message, network: 'disabled' })); process.exitCode = 1 })
+main().catch(error => { console.log(JSON.stringify({ error: error.message, network: 'disabled' })); process.exitCode = 1 }).finally(() => store.closeDb())
