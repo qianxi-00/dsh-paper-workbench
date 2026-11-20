@@ -1,162 +1,158 @@
-# AGENTS.md — dsh-paper-workbench 项目指南与持久化记忆
+# AGENTS.md — dsh-paper-workbench 工程指南
 
-本文件是 `dsh-paper-workbench`（DeepSeek Harness 论文工作台插件）的权威工程指南与持久化维护记忆。任何接手本仓库的 Agent 或开发者在修改代码前，请先阅读本文件与 `docs/` 下对应的契约文档。
+本文件约束本仓库的开发、验证与交接。先按任务定位源码，再读取对应契约；当前行为以源码和可复现的验证结果为依据。版本、依赖和脚本入口以 [package.json](package.json) 为准，发布沿革查 [CHANGELOG.md](CHANGELOG.md)。旧契约中的机器路径、协作记录和验收快照属于历史材料。
 
----
+本文件管理插件仓库；[论文工作区 AGENTS 模板](assets/workspace-skills/AGENTS.md) 和 [配套技能模板](assets/workspace-skills/) 是插件部署给论文 Agent 的材料，两者职责不同。开发资料统一放在 [agent-docs](agent-docs/README.md)，随 Git 同步；若手中只有不含该目录的 npm 安装包，按对应分支或 tag 从 [源码仓库](https://github.com/qianxi-00/dsh-paper-workbench) 查阅。
 
-## 1. 项目定位与核心设计哲学
+## 1. 开工与交付
 
-`dsh-paper-workbench` 是一个**零 npm 依赖、零构建步骤**的 DeepSeek Harness（DSH）桌面端插件，提供「文献管理 + 中英对照阅读 + 独立逐段翻译 + 原生 DSH Agent 会话联动 + Obsidian 知识库沉淀」的一体化科研工作流。
+1. 确认实际工作目录、Git 分支和未提交修改；保留用户已有改动。机器路径、DSH 安装目录、profile 和论文库位置从当前环境确认。
+2. 根据下表读入口、共享函数及其调用方，明确本次涉及的数据、会话和后台任务。修改前能说明触发条件、当前行为与预期行为。
+3. 在最小共享路径上修改，匹配现有风格；复用已有能力，不附带重构。新增逻辑要有适当的可运行验证，文档改动核对事实、路径和命令。
+4. 交付前检查最终 diff、验证退出码及跳过项；说明改了什么、依据是什么、哪些场景尚未验证。磁盘改动、自动化通过和宿主真机生效分别报告。
 
-五大不可动摇的架构边界：
-1. **零新增 npm 依赖 & 零构建**：服务端仅用 Node.js 20+ 内置模块（`node:sqlite` 在 < 22.5 时自动降级为同契约 JSON 引擎）；PDF 渲染与版面行提取通过 `assets/pdf_tool.py`（PyMuPDF `fitz`）子进程完成；客户端宿主层（`lib/client.js`）使用 DSH 运行时注入的 `react`，阅读器 SPA（`assets/app/`）为原生 ES/DOM（无打包器）。
-2. **原生会话优先，绝不自绘冒充**：右侧对话栏通过 DSH 公开客户端契约（`slots.register` + `SessionProvider` + `renderFactorySlot('conversation.content', { variant: 'embedded', ... })` + `sessions.retain()`）直接挂载宿主原生会话组件。模型选择、思考程度、工具卡片、权限审批、原生文件/图片上传、排队、停止均由 DSH 原生管理；宿主缺失对应公开接口时如实报告原因，不以自绘聊天框冒充原生会话。
-3. **翻译与对话严格物理隔离**：段落翻译、节翻译、整篇翻译、目录翻译和划词翻译一律走独立的 `/paper-workbench/ai/translate` SSE 通道，结果按段落/标题 hash 存入插件自有 SQLite（`workbench.db` 的 `translations` 表），**绝不写入聊天消息历史，也绝不污染 Agent 对话上下文**。
-4. **精确会话归属与作用域隔离**：
-   - 每个工作台对话（`c-*`）对应唯一宿主 `sessionId`（`pb-conv-*` 或已有历史 ID），切换阅读论文**不会**自动切换或新建会话。
-   - 收起右侧会话栏或离开工作台仅 `release()` 界面引用，**绝不取消**后台正在运行的 Agent 任务。
-   - 论文范围与当前阅读定位通过目标 Agent 的 `systemPrompt.context()` 动态注入（兼容 `agentPresets.serviceFor(agent, 'systemPrompt')` 与 `agent.ctx.get('systemPrompt')` 双路径），并严格校验 `assembly?.scope === agent`，确保普通手输提问也能感知关联论文，同时绝不泄漏到无关会话。
-   - 论文标题、正文与附件内容一律标记为用户引用材料，`interpolate: false`，防止提示词注入提升为系统指令。
-5. **跨版本 DSH 稳健兼容（≥ 3 个稳定世代）**：
-   - **世代 A（当前 DSH Desktop）**：完整支持 `children` session scope、`SessionProvider`、`conversation.content` Factory、`sessions.retain`、`uiWorkspace.openSession`、`fileUpload.upload`、`agent.ctx.get('systemPrompt')`。
-   - **世代 B（早期 Preset / Workspace 契约）**：兼容 `agentPresets.serviceFor(agent, 'systemPrompt')`、`workspaceRegistry` 缺席时回退 `workspaceController.create({ path })`、`llm.listModels` 缺席时回退手填模型、`rctx.effect` 缺席容错、以及 Node 20–22.4 无 `node:sqlite` 时自动回退 JSON 存储引擎。
-   - **世代 C（精简宿主 / Headless / 独立调试页）**：宿主缺少客户端 `sessions` 或 `SessionProvider` 时在右栏展示清晰可操作的降级说明与重连入口，阅读器、PDF 页图、版面解析、中文版 PDF 与独立翻译仍 100% 可用；浏览器直开 `/paper-workbench/app`（无 `native=1`）保留独立调试能力。
+## 2. 项目边界
 
----
+- **零 npm 依赖、零构建**：服务端使用 Node 内置模块；宿主客户端使用 DSH 注入的 React；阅读器使用原生 ES/DOM 和本地 KaTeX。PDF 操作由 Python + PyMuPDF 子进程完成。新增能力优先沿用这些边界。
+- **原生会话**：右栏由 `sessions.retain()`、精确的 `SessionProvider` 引用和 `conversation.content` Factory 组成。模型、工具卡片、权限、上传、排队与停止交给宿主。接口缺失时展示能力诊断，不用自绘聊天冒充原生组件。
+- **翻译隔离**：段落、章节、全文、标题和划词翻译使用独立 AI 通道，不写入 Agent 聊天历史。持久译文进入插件数据层；划词翻译不写段落译文缓存。保留独立调试模式的兼容聊天路径，不将它接到原生会话界面。
+- **作用域隔离**：工作台对话和宿主会话一一关联。论文范围只注入目标 Agent，论文标题、正文和附件作为用户引用材料处理，使用 `interpolate: false`。
+- **能力降级**：SQLite 不可用时使用同契约 JSON 引擎；模型、原生会话和云端服务分别按实际可用性工作。没有模型或 OCR 配置时应明确缺失能力，不承诺所有功能可用。
 
-## 2. 目录与模块地图
+## 3. 按任务阅读
 
-```text
-lib/
-  index.js           宿主插件主入口：路由挂载、JSON RPC（createApi）、SSE 流（createStreams）、生命周期与服务注入
-  client.js          DSH 客户端动态模块：左栏入口 + 主区分栏（左侧阅读 iframe + 右侧原生 conversation.content）
-  paper-context.js   原生会话论文作用域：目标 Agent SystemPrompt.context 注册/隔离/释放、定位降级、UI 状态 v2 合并
-  conv.js            对话纯逻辑：c-* / pb-conv-* ID 规则、论文关联列表、旧版路径附件兼容、论文范围提示词拼装
-  session.js         宿主 sessionController / workspaceController 桥接（create/ensure/ask/follow + 帧宽容归一化）
-  server.js          HTTP 路由与安全边界（仅放行本机 Host、静态资源防穿越、RPC 包装、SSE 转发与取消）
-  store.js           本地持久化：config/index/chats/ui/meta/doc/text 原子写（.tmp -> rename + 写锁队列）、回收站
-  db.js              SQLite 存储层（node:sqlite WAL 优先 + 同名 API 的 JSON 退化引擎）：译文、任务日志、自检结果
-  doc.js             结构化文档模型：PDF 文本块/版面块合并、目录分节、段落/标题稳定 16 位 sha1 hash
-  layout.js          PP-StructureV3 云端版面解析后台任务、分批断点续跑（layout.partial.json）、远端 jobId 续拉
-  layout-ir.js       schemaVersion 2 统一版面 IR 纯构建器：坐标投影、行归属守恒、行救回、多源候选择优、质量分级
-  layout-table.js    表格结构化：PyMuPDF 格线提取优先 + 服务端 HTML 安全转网格（rowspan/colspan）+ 可信度门槛
-  layout-archive.js  原始响应 sha256 永久归档与不可变 revision 发布指针（支持免重传离线重建）
-  figures.js         正文配图清单提取、图注绑定与按内容指纹缓存裁剪 PNG
-  zhpdf.js           中文版 PDF 生成协调层：把已译段落匹配回原 PDF 行框擦除重写为 paper-zh.pdf
-  ocr.js             扫描件 PaddleOCR 云端异步识别（全链路 AbortSignal 贯通）与按页 Markdown 解析
-  ai.js              独立翻译引擎与独立模式对话：同节分批、JSON 深度括号提取、截断翻倍重试、逐段兜底、公式卫生 tidyMath
-  review.js          翻译质量自检：7 条静态规则 + 可选 LLM 批量审校（模型异常自动降级静态检查）
-  jobs.js            任务事件日志记录器（纯依赖注入，异常绝不阻断主流程）
-  obsidian.js        Obsidian Vault 自动探测、frontmatter 行级无损合并、写前备份、卡片读写与方向综述输出
-  net.js             零依赖代理客户端（auto 系统注册表/环境变量 + custom HTTP CONNECT/SOCKS5 + direct + 连通性探测）
-  arxiv.js           arXiv 8 大学科/自定义方向订阅 + OpenAlex 在线检索与开放获取 PDF 安全流式入库
-  pdf.js             Python + PyMuPDF 解释器自动探测与子进程 JSON 通信桥（含 pageLines 与 cropRegion）
-  sse.js             SSE 响应流封装（心跳保活、断连自动 abort）
-  doctor.js          环境自检核心逻辑（CLI 与前端设置页共用同一份报告）
+按任务范围选读下表；修改接口、模型或共享路径时，连同对应调用方和测试一起读。
 
-assets/
-  pdf_tool.py        PyMuPDF 协处理器（info / text / page_lines / clip_text / tables / outline / render / figures / split / zhpdf）
-  app/
-    index.html       阅读器 SPA 壳页面（本地打包 KaTeX，零外网 CDN 依赖）
-    style.css        阅读器样式表（深浅色主题自适应、双语对照排版、图表公式卡片、紧凑工具栏）
-    app.js           阅读器前端逻辑（含 native=1 原生阅读桥、对照/原文页/笔记/卡片/在线检索视图）
+| 修改范围 | 主要源码 | 契约与验证入口 |
+| --- | --- | --- |
+| 宿主加载、服务注入、RPC、SSE、认证 | [index.js](lib/index.js)、[server.js](lib/server.js)、[sse.js](lib/sse.js) | [v3](docs/v3-contracts.md)、[原生契约](docs/v8-native-session.md)；[认证测试](scripts/test-host-auth.mjs)、[安全测试](scripts/test-safety.mjs) |
+| 原生会话、工作区、论文作用域 | [client.js](lib/client.js)、[conv.js](lib/conv.js)、[session.js](lib/session.js)、[paper-context.js](lib/paper-context.js) | [原生契约](docs/v8-native-session.md)；[作用域测试](scripts/test-paper-context.mjs)、[原生集成夹具](scripts/test-native-workbench.mjs) |
+| 阅读器、选区、标注、PDF 交互 | [app.js](assets/app/app.js)、[样式](assets/app/style.css)、[页面壳](assets/app/index.html) | [使用指南](docs/guide.md)；[阅读桥测试](scripts/test-reader-bridge.mjs)、[标注与 UI 测试](scripts/test-annotations-and-ui.mjs) |
+| 文献入库、配置、文件、数据库与迁移 | [store.js](lib/store.js)、[db.js](lib/db.js)、[db-backend.js](lib/db-backend.js)、[PG](lib/db-pg.js)、[MySQL](lib/db-mysql.js) | [v3](docs/v3-contracts.md)；[存储测试](scripts/test-store.mjs)、[数据库测试](scripts/test-db.mjs)、[协议与迁移测试](scripts/test-db-drivers.mjs) |
+| PDF 提取、文档、目录、配图 | [pdf.js](lib/pdf.js)、[pdf_tool.py](assets/pdf_tool.py)、[doc.js](lib/doc.js)、[figures.js](lib/figures.js) | [v2](docs/v2-contracts.md)；[文档测试](scripts/test-doc.mjs)、[目录测试](scripts/test-toc-structure.mjs)、[PDF 质量测试](scripts/test-pdf-quality.py) |
+| 云端 OCR、版面、坐标、归档、离线重建 | [ocr.js](lib/ocr.js)、[layout.js](lib/layout.js)、[layout-ir.js](lib/layout-ir.js)、[表格](lib/layout-table.js)、[归档](lib/layout-archive.js) | [v4](docs/v4-layout.md)、[v7](docs/v7-quality.md)、[质量评测说明](docs/quality/README.md)；[IR 测试](scripts/test-layout-ir.mjs)、[批次与恢复测试](scripts/test-layout.mjs) |
+| 翻译、并发、恢复、自检与日志 | [ai.js](lib/ai.js)、[translate-jobs.js](lib/translate-jobs.js)、[review.js](lib/review.js)、[jobs.js](lib/jobs.js) | [v2](docs/v2-contracts.md)、[v3](docs/v3-contracts.md)；[AI 测试](scripts/test-ai.mjs)、[翻译任务测试](scripts/test-translate-jobs.mjs) |
+| 中文版 PDF 与补译任务 | [zhpdf.js](lib/zhpdf.js)、[zhpdf-jobs.js](lib/zhpdf-jobs.js)、[pdf_tool.py](assets/pdf_tool.py) | [v6](docs/v6-zhpdf.md)；[生成测试](scripts/test-zhpdf.mjs)、[持久任务测试](scripts/test-zhpdf-jobs.mjs) |
+| 讲解、Agent 工具、工作区技能、Obsidian | [explain.js](lib/explain.js)、[tools.js](lib/tools.js)、[workspace-skills.js](lib/workspace-skills.js)、[obsidian.js](lib/obsidian.js) | [工作区模板](assets/workspace-skills/)；[讲解与技能测试](scripts/test-explain-skills.mjs)、[Obsidian 测试](scripts/test-obsidian.mjs) |
+| 检索、订阅、代理与浏览历史 | [arxiv.js](lib/arxiv.js)、[net.js](lib/net.js)、[history.js](lib/history.js) | [检索分页测试](scripts/test-search-pagination.mjs)、[代理测试](scripts/test-net-proxy.mjs)、[历史测试](scripts/test-browse-history.mjs)、[缓存安全测试](scripts/test-feed-cache-security.mjs) |
+| 安装、自检、维护与发布 | [安装器](scripts/install-agent.mjs)、[自检核心](lib/doctor.js)、[文库审计](scripts/audit-library.mjs)、[批量版面](scripts/batch-layout.mjs) | [CI](.github/workflows/ci.yml)、[发布流水线](.github/workflows/release.yml)；[安装测试](scripts/test-install-agent.mjs)、[发布安全测试](scripts/test-release-safety.mjs) |
 
-scripts/
-  dev-server.mjs     独立本地开发服务器（复用 lib/server.js + lib/index.js；--mock-llm 使用隔离临时目录与假模型）
-  doctor.mjs         CLI 环境自检入口（npm run doctor）
-  smoke.mjs          HTTP 与 SSE 接口端到端冒烟脚本
-  layout.mjs         命令行版面解析工具
-  quality/           版面质量评测语料清单、评分与离线重建脚本（score-layout.mjs / rebuild-layout.mjs）
-  test-*.mjs         29+ 个无宿主依赖的隔离自动化测试套件（全部使用 %TEMP% 临时目录，严禁触碰真实库）
+## 4. 状态、身份与持久化
 
-docs/
-  v2-contracts.md    v2 文档模型、翻译流与基础 HTTP 契约
-  v3-contracts.md    v3 SQLite、配图、自检、任务日志与会话桥契约
-  v4-layout.md       v4 PP-StructureV3 版面模型、表格结构与断点续跑契约
-  v6-zhpdf.md        v6 中文版 PDF 原位擦除重写契约
-  v7-quality.md      v7 schemaVersion 2 版面质量管线与不可变归档契约
-  v8-native-session.md v8 原生 DSH Agent 会话接入、跨版本兼容与项目维护记忆
-```
-
----
-
-## 3. 开发、验证与真机调试命令
-
-> **铁律**：运行任何测试时，必须确保 `DSH_PAPER_WORKBENCH_DATA` 指向临时目录（各 `scripts/test-*.mjs` 已内置 `mkdtemp`，外层也可显式传入），**绝不污染或清空用户真实的 `~/.dsh/paper-workbench` 数据目录**！
-
-### PowerShell（`pwsh`，Windows 默认终端）
-```powershell
-# 1. 环境自检（检查 Node / SQLite / Python+PyMuPDF / Obsidian / OCR）
-npm run doctor
-
-# 2. 运行全量自动化测试套件（Node 单元/集成测试 + Python PDF 质量与自检）
-$env:DSH_PAPER_WORKBENCH_DATA = Join-Path $env:TEMP "pb-test-$(Get-Random)"
-$env:PYTHONUTF8 = "1"
-npm test
-
-# 3. 单独运行原生会话与阅读桥核心测试
-node scripts/test-conv.mjs
-node scripts/test-paper-context.mjs
-node scripts/test-native-client.mjs
-node scripts/test-reader-bridge.mjs
-node scripts/test-native-workbench.mjs
-
-# 4. 启动零污染独立调试服务器（假模型 + 临时数据目录）
-npm run dev:mock
-```
-
-### DSH 桌面端真机加载注意事项
-- 本机 DSH 主目录 `$DSH_HOME = F:\ProGramApp\DSH`（注意：`~/.dsh` 即 `C:\Users\QianXi\.dsh` 仅存放插件运行数据 `paper-workbench/` 与 `server-deck` 数据）。
-- 桌面端 profile（`F:\ProGramApp\DSH\profiles\desktop\package.json`）通过 `link:F:/ProGram/dsh-paper-workbench` 链接本仓库。
-- 修改 `assets/app/*` 静态文件后，刷新工作台视图即可生效；修改 `lib/*.js`（宿主服务端或 `lib/client.js` 客户端模块）后，需在 DSH「插件」管理页对 `dsh-paper-workbench` bundle 执行一次「停用 → 启用」或重启 DSH 桌面端以重新挂载模块，不可把「磁盘文件已改」等同于「运行中进程已生效」。
-
----
-
-## 4. 编码与工程纪律
-
-- **语言与文案**：注释、日志与抛给前端的 `Error` 消息一律使用自然、可操作的中文（说明「出了什么问题 + 下一步怎么处理」），禁止向用户暴露裸堆栈或敏感凭据；代码标识符使用清晰英文。
-- **最小改动与根因修复**：修改共享函数前先检索全仓调用点；不引入未使用的状态字段、死分支或重复样式规则；任何临时诊断探针必须在提交前彻底删除。
-- **安全红线**：
-  - 所有文件落盘路径必须经过 `store.js` 的 `ID_RE`（`/^[a-z0-9][a-z0-9._-]{0,79}$/`）或安全路径解析校验，严禁将未校验外部参数直接拼入 `path.join` 读写文件。
-  - `postMessage` 桥接必须同时校验 `event.origin === window.location.origin`、`event.source` 引用、`__pb === true`、`v === 2` 以及会话代次（generation / selectionVersion）。
-  - 外部 HTML（如版面识别表格 HTML）严禁直接赋给 `innerHTML`，必须解析为纯数据结构后由 DOM API 安全渲染。
-  - 严禁在代码、测试或文档中硬编码任何 API Key / Token。
-
----
-
-## 5. Git 分支模型与维护约定
-
-本仓库本地与远端（`origin`：`https://github.com/qianxi-00/dsh-paper-workbench.git`）**仅保留四个核心分支**：
-
-| 分支 | 职责 |
+| 身份或状态 | 归属与维护要求 |
 | --- | --- |
-| `dev` | 日常功能演进与开发验证分支 |
-| `test` | 集成测试与回归验证分支（仅由 `dev` 合并进入） |
-| `prod` | 生产稳定发布分支（仅由 `test` 合并进入，每次发布打版本 tag） |
-| `main` | 仓库首页展示与稳定发布同步分支（由 `prod` 合并更新） |
+| `paperId` | 文献库记录；本地默认 link，在线下载和上传使用 copy。入库按路径、内容 hash、arXiv ID、DOI 等查重；删除先进入回收站。 |
+| `c-*` / `sessionId` | 工作台对话保存论文关联和权威宿主会话 ID，新会话通常为 `pb-conv-*`，保留已有历史 ID。切换阅读论文不自动切换或新建对话。 |
+| 阅读定位 | 论文、页、节、`blockId`、revision；只允许指向对话已关联论文。块失效或 revision 不符时退回请求页，不猜相近块。 |
+| 段落 / 标题 hash | 16 位 SHA-1 内容键。段落按 kind 和归一化文本计算，保留正文大小写，不包含页码和顺序；标题折叠大小写，译文标题键加 `t:`。 |
+| `blockId` / revision | 前者定位版面块，后者标识版面版本；与译文内容键分开维护。文字修正可能改变译文键，重建不模糊搬迁旧译文。 |
+| 后台任务 | 每篇翻译或中文 PDF 有自己的持久记录、阶段和控制器；界面订阅不是任务所有权。 |
 
-- **分支卫生**：临时开发分支统一使用 `agent/<topic>`，任务完成并合入核心分支后，**必须及时清理本地 worktree 及本地/远端临时分支**，保持仓库整洁，只留 `dev`、`test`、`prod`、`main`。
-- **Git 提交身份**（GitHub 仓库）：`user.name = "Qian Xi"`，`user.email = "1964055097@qq.com"`。
-- **提交信息规范**：使用语义化前缀（`feat:` / `fix:` / `docs:` / `refactor:` / `chore:` / `test:`），聚焦说明改动目的与解决的根因，一次提交聚焦一件事。
+- 默认数据目录为用户主目录下的 `.dsh/paper-workbench`，可由 `DSH_PAPER_WORKBENCH_DATA` 覆盖。该变量必须在导入存储模块之前设置，模块求值后目录已固定。
+- 配置、索引、元信息、文档和 UI 状态等由文件层管理；译文、任务事件、自检、富标注和研读笔记由统一数据库后端管理。SQLite/JSON/PG/MySQL 保持业务契约一致，修改一层时核对全部适配器及迁移路径。
+- 保留原子写与串行读改写；索引、配置、会话和 UI 的共享队列需跨模块重载生效。译文并发落盘用 `mergeTrans` 增量合并，完整替换另走显式快照接口。
+- 文档缓存涉及 PDF 指纹、目录指纹、解析 build、layout revision 和标注锚点版本；版面正常读取仍有 size/mtime 判定，不能据“保存过 hash”推断所有缓存均做内容校验。旧模型降级返回时保留 `stale` 信息。
+- 标注只在原文摘录全篇唯一、目标身份也唯一时自动迁移；重复、失踪和译文标注进入 `annotationReview`。保留最早已知旧 revision，不猜测覆盖。
+- Obsidian 按整张卡片串行读改写，保留未知 frontmatter、注释、换行和未受管内容，写前备份。工作区技能只更新受管 marker 区和模板文件，保留用户在 marker 外的指令。
 
----
+## 5. 子系统契约
 
-## 6. 历史交接与持久化项目记忆（2026-11）
+### 原生会话与阅读桥
 
-- **v0.1 – v0.6（基础工作台 → 版面与中文 PDF）**：完成文献库、PyMuPDF 文本提取与连续滚页阅读、SQLite 译文/日志/自检库（`v3`）、PaddleOCR 扫描识别、`PP-StructureV3` 版面解析与断点续跑（`v4`）、原位覆盖式中文版 PDF（`v6`）、Obsidian 卡片行级合并联动。
-- **v0.7（schemaVersion 2 对照质量管线）**：落地 `lib/layout-ir.js` 逐页 IR、原始 JSONL 内容寻址永久归档（`lib/layout-archive.js`）、离线免重传重建（`scripts/quality/rebuild-layout.mjs`）、块上方漏行救回与图表短标签过滤、质量报告分级（`blocking` vs `informational`）。
-- **v0.8（原生 DSH Agent 会话全面接入 & 体验精修）**：
-  - 接续前任会话（`session-126a3e1c-f068-40ce-8c03-01d8894fe8e2`）完成最后真机门槛验证：实测确认部分预设（如 `ops-ptc`）下 `agentPresets.serviceFor(agent, 'systemPrompt')` 为空，而 `agent.ctx.get('systemPrompt')` 可稳定取得目标 Agent 专属系统提示词服务，且真实对话轮次组装时 `assembly.scope === agent` 严格成立、不污染全局或其他会话。
-  - 右栏彻底切换为宿主原生 `conversation.content`（`embedded` 模式），补齐打开完整会话、删除对话、空状态自动建会话、超长选段转原生文件附件、引用与旧版 `[p.N]` 跳回定位、真实能力检测入口，并全面升级学术翻译/精读提示词与阅读器视觉交互体验。
-- **v0.8.1（全栈漏洞修复 & 对照学术排版升级）**：
-  - **PDF 提取与版面重建根治**：`assets/pdf_tool.py` 修复 TeX `txexs` 控制字符（`0x00..0x09`/`0x0c`/`0x10..0x1b`）映射为标准数学括号、基于 span 字距 `_join_spans` 消除数学斜体接正文丢空格（保留紧贴下标）并避免同基线合并误吞双栏表格/参考文献页、以及限定脚注区位防伪脚注；`lib/layout-ir.js` 与 `lib/layout.js`（`LAYOUT_BUILD = 'ir-3'`）加入 `UVDoc` 纵轴线性畸变校准（`refineUnwarpedMatrix` / `calibrateV1PageY`）、默认关闭 `useDocUnwarping`、`algorithm` 缩进伪代码保存与 `formula_number` 行守恒绑定为 `formula.equationNumber`，并剔除相邻大小写重复块与段首重复小节标题；`scripts/quality/rebuild-layout.mjs` 与 `score-layout.mjs` 支持多批次 raw 归档与对象/字符串统一去重评分；`lib/doc.js` 修复 `sectionsFromOutline` 末段重复锚点导致的空节越界。
-  - **对照阅读排版与服务端健壮性升级**：`assets/app/app.js` 与 `assets/app/style.css` 落地学术公式三栏居中与右编号（`.formula-eqno`）、三线伪代码算法框（行号 `.algo-ln` / 关键字 `.algo-kw` / 缩进 / 注释）、图注前缀加粗、脚注标签、节内跨页 `.page-divider` 与边框外沿悬浮 `.para-tools` 快捷栏（`extractCleanSelection` 全数剥离辅助标签），并修复 `buildFiguresByKey` 下标错位与 `keepalive` 退场配置同步；`lib/server.js` 修复同 `reqId` 并发流中止竞争与静态/PDF/图接口 `HEAD` 零实体响应，`lib/store.js` 与 `lib/index.js` 将写锁队列共享到 `globalThis`，`lib/client.js` 将 `.pb-native-opener` 移至右下角悬浮胶囊避免遮挡顶栏。
-- **v1.0.0（首个正式稳定版本发布 · 2026-11）**：
-  - **有序并发 & 后台持久化翻译**：`lib/ai.js` 实现基于文档 FIFO 队列的 1–8 并发批量翻译池，`lib/translate-jobs.js` 将翻译生命周期从 HTTP SSE 连接解耦（切换界面/论文/会话仅 `unsubscribe` 不取消任务，`translate.job.json` 防抖落盘，支持冷重启恢复与显式 `⏸ 暂停翻译` / `▶ 继续翻译`）；`lib/server.js` 新增 `/paper-workbench/translate/follow`。
-  - **全篇上下文讲解 + 专属工作区 Skills**：新增 `lib/explain.js`（120k 大上下文优先级拼装 + 周围跨页图表/公式关联）、第 10 个工具 `paper_explain`、`lib/tools.js` `paper_doc` 提额与 `paper_notes` 研读笔记存取，及 `lib/workspace-skills.js` 将 `assets/workspace-skills/` 自动受控区块同步进「论文」工作区 `AGENTS.md` 与 `.dsh/skills/`。
-  - **富原文标注 & Obsidian 边界与导入导出**：`lib/db.js`、`lib/db-backend.js` 与 `assets/app/app.js` 实现 `annotations` / `study_notes` 双表持久化、5 色高亮/下划线/加粗/折叠 `💬` 批注/行内 `‹+›` 插入标注与 `[data-tex]` 公式无损共处；新增 `obsidian.enabled` 独立模式开关、`library.importDir`、`paper.exportMarkdown` 与全库快照导入导出。
-  - **零依赖多存储后端 & 主题订阅 Feed & CI/CD**：新增纯 Node Wire-Protocol `lib/db-pg.js`、`lib/db-mysql.js` 与统一 `lib/db-backend.js`（支持测试连接与跨库全量迁移）；`lib/arxiv.js` 导出 `PRESET_TOPICS` 与 `fetchTopicFeed` 倒序去重；落地 `.github/workflows/{ci,release}.yml`、`skills/install-dsh-paper-workbench/SKILL.md`、`scripts/install-agent.mjs` 与全库本地论文批量 `PP-StructureV3` 版面处理。
-- **v1.1.0（高并发精准翻译、全学科订阅与代理、交互式原文页、一键安装与插件市场接入 · 2026-11）**：
-  - **1–100 高并发自适应翻译与术语锚定**：`lib/ai.js` 与 `lib/translate-jobs.js` 支持 `1–100` 并发（默认 `10`），内置 AIMD 动态窗口遇到 `429/503` 自动指数退避降速、零丢段；新增零额外开销 `buildPaperGlossary`（标题 + 摘要 + 技术缩写/专名 + 已译标题锚点）与 `buildAdhocTranslatePrompt`（附所在段上下文消歧）；移除冲突的 `• 译` 开关，划词点击「翻译」统一打开锚定「划词精译卡片」（`.sel-trans`，含复制译文 / 存为批注 / 重译整段），每段支持独立收起/展开原文、译文或整段折叠。
-  - **统一自适应「讲解」与交互式原文页**：合并精简重复讲解按钮为划词菜单「讲解选中」+「引用追问」（`paper-draft` 填入右侧输入框）与顶栏「全文导读」+「讲解本节」，`lib/explain.js` 与 `paper-explainer` Skill 自动识别公式/伪代码/实验表/概念匹配拆解框架；修复数字版 PDF 原文页误报「扫描件」，叠加 `.pdf-text-layer` 透明可选文字层（`pdf.pageLines`）与 `⬚ 框选讲解` 高清区域裁剪（`pdf.cropRegion` + 原生图片附件上传）。
-  - **arXiv 8 大学科导航、自定义研究方向、网络代理与一键安装**：新增零依赖 `lib/net.js`（`auto` 环境变量/Windows 系统代理探测 + `custom` HTTP/HTTPS CONNECT & SOCKS5 + `direct` + `network.test` 连通探测）；`lib/arxiv.js` 完整覆盖 arXiv 官方 8 大学科及子分类并支持设置页自定义方向增删改；设置弹窗顶栏与底栏吸顶固定；新增零克隆一行安装脚本 `scripts/install.ps1` / `scripts/install.sh`、`icon.svg` 与 DSH 插件市场元数据。
+- `sessions.retain()` 返回的精确 reference 就绪后才能挂载 `SessionProvider`；切换、收起和卸载执行幂等 `release()`，不调用后台 Agent 取消。
+- 快捷提交经 `session.prepare`、作用域设置和 session 选择后才发送。`beginSubmission` 与原生 `prompt` 使用同一 requestId，失败清理乐观提交，不自动重发可能已接收的提问。
+- 系统提示词服务先尝试 `agentPresets.serviceFor(agent, 'systemPrompt')`，再尝试 `agent.ctx.get('systemPrompt')`；组装时严格检查 `assembly?.scope === agent`，并处理 Agent 创建、释放与宿主卸载。
+- `postMessage` 两侧校验来源窗口、同源、`__pb === true`、`v === 2` 和消息类型白名单。generation / selectionVersion 是宿主异步选择与提交保护，不是所有消息自带的协议字段；跨 await 后继续核对论文、对话和目标 session。
+- 原生文件上传 receipt 只交给对应 session；超长选段完整保留，由现有流程选择全文或附件。读图、裁剪、切论文等异步结果按 `openSeq` 和论文 ID 丢弃旧结果。
+
+### 翻译与讲解
+
+- 持久翻译按同节分批、文档 FIFO 派发；配置并发范围 1–100，默认 10。遇限流退避并缩小活动窗口，连续成功后逐步恢复；保留截断增额重试、JSON 提取和逐段兜底。
+- 一篇论文同一时刻只运行一个持久翻译。页面断连和 `/translate/follow` 取消只退订；显式暂停才 abort。普通翻译冷启动由 running 转 paused，继续时只补缺译并保留原 scope。
+- 划词翻译附所在段上下文消歧，不覆盖整段译文。翻译质量自检是静态规则加可选 LLM 审校；模型失败保留静态结果并报告降级。
+- `paper_explain` 先组织焦点、全文和周围图表公式，再解析命中图片；默认预算 120000 字符，按优先级裁剪并显式报告 truncated。选区清洗恢复 `data-tex`，去除工具、另一语言侧和批注标签，保持公式源码。
+
+### PDF、版面与中文版
+
+- Python 桥使用 JSON 协议、超时、输出上限和取消控制；解释器先取配置，再探测环境候选。双栏、旋转、cropbox、跨页和数学 span 改动必须验证，坐标统一到渲染后的 PDF pt，避免对 PDF 行再次旋转。
+- 版面 IR 是确定性纯构建器，汇合云端结构与本地 PDF 行证据。每行有唯一归属或带理由排除；保留 sourceBlocks、candidates、行账和图注关系。表格 HTML 转为数据网格，算法保留行与缩进。
+- 云端批次先检查实际页数、唯一页号和范围，再更新断点。partial 保留远端 jobId 与完成页，尽量续拉而非重传；远端提交成功但 jobId 未落盘仍有重复提交窗口，不能承诺 exactly-once。
+- raw 按 SHA-256 不可变归档并在读取时校验；输入与 revision 不原地覆盖，先写证据再原子切 current 指针。兼容投影失败不撤销权威版本，清除当前版面不删历史证据。
+- 发布接受 `passed` 和 `needs_review`，拒绝 `failed`；blocking / informational 是问题分类，blocking 计数本身不是发布硬门槛。行守恒只证明证据归属，不等于文字和排版正确。
+- 中文 PDF 按原文行框覆盖，不做自由重排；缺译、定位不唯一或无法完整写回就停止。body/heading/caption/list/footnote 需译文，作者行、公式、图片、表格和算法保留；目录标题另计覆盖。
+- 中文 PDF 先暂存，要求写入块数等于预期、skipped 为 0、产物有效，并在生成前后检查源、文档和译文。全部通过才替换，记录保存失败回滚，回滚失败保留备份。其 running 任务启动后可恢复，与普通翻译重启暂停不同；显式 paused 等继续。
+
+### 检索、历史与代理
+
+- 分页 cursor 绑定查询、来源和批量大小；两源独立推进，失败源保留重试位置并返回部分失败原因。检索限流、礼貌队列及重试策略按当前分支源码核对；本地未合入修复与远端已发布行为的差别见 [项目状态](agent-docs/memory/project-state.md)，不得将工作分支能力写成稳定版保证。
+- 未入库的检索与订阅结果不落盘；浏览历史仅保留有界的最小书目信息，拒绝凭据 URL，去掉 query/hash，并以 DOI/arXiv/url/paperId 别名去重。
+- 网络统一走代理适配层，支持 auto/custom/direct、环境变量与系统代理。保留 loopback 绕过、跨源重定向移除凭据、TLS 校验、超时与取消；错误中脱敏代理认证信息。
+
+## 6. 安全与用户数据
+
+- DSH 路由的第一道边界是 `connection.requestRejection(req)`：仅 `undefined` 放行；401/403 保留，服务缺失、异常或其他拒绝值返回 503，在读取 body 前拒绝。Host/Origin 检查是额外边界，不能替代宿主认证。
+- HTTP handler 保持 loopback Host、有 Origin 时为 HTTP loopback、Sec-Fetch-Site 约束、body 上限和静态路径防穿越。保留 GET/HEAD、PDF Range 和同 reqId 流取消的并发语义。
+- 论文 ID 经 `store.assertId` 校验，当前模式为 `/^[a-z0-9][a-z0-9._-]{0,79}$/`；其他路径按所属根目录及必要的真实路径边界检查。RPC 元信息更新维持白名单，禁止借元信息重定向源文件或知识库路径。
+- 外部 HTML 先解析为纯数据再安全渲染；凭据不进入源码、测试、日志、归档或前端配置。错误使用可操作的中文，代码标识符使用清晰英文，不向用户暴露裸堆栈。
+- 测试、假模型和样本生成只使用临时库。真实云端处理、文库修复、数据库导入迁移在用户任务授权范围执行；先检查备份与恢复路径。外部数据库的连接测试会创建并删除探针表，不能当作纯只读查询。
+
+## 7. 验证与本机调试
+
+**先隔离数据，再运行命令。** 以下环境变量在导入前设置；空 OCR token 避免常规回归触发真实上传，合成样本开关用于可重复的 PDF 验证。
+
+PowerShell：
+
+```powershell
+$env:DSH_PAPER_WORKBENCH_DATA = Join-Path $env:TEMP ("pb-test-" + [guid]::NewGuid().ToString("N"))
+$env:PYTHONUTF8 = "1"
+$env:PB_FORCE_SYNTH_SAMPLE = "1"
+$env:PADDLE_OCR_TOKEN = ""
+npm test
+```
+
+Bash（Windows 下由 Node 生成工具可识别的临时目录路径）：
+
+```bash
+export DSH_PAPER_WORKBENCH_DATA="$(node -e 'const o=require("node:os"),p=require("node:path"),c=require("node:crypto");process.stdout.write(p.join(o.tmpdir(),"pb-test-"+c.randomUUID()))')"
+export PYTHONUTF8=1 PB_FORCE_SYNTH_SAMPLE=1 PADDLE_OCR_TOKEN=
+npm test
+```
+
+- `npm test` 还会自动执行 `posttest`，包含中文 PDF 任务和批量版面回归；不维护易过期的测试套件总数。按改动先跑对应脚本，相关检查通过后再按范围跑全套。
+- 环境诊断用 `npm run doctor`；独立假模型调试用 `npm run dev:mock`。后者仅在未显式配置数据目录时默认使用临时库，启动前仍检查 `DSH_PAPER_WORKBENCH_DATA`。独立服务器不证明 DSH 认证与原生会话接入成功。
+- 全套中部分 arXiv/OpenAlex 用例会联网，失败可能记 SKIP；真实 OCR、真实 Vault 和本机论文样本也可能跳过。逐项阅读跳过原因，不将 exit 0 等同于所有外部能力已验收。
+- 原生会话测试使用假宿主/轻量 DOM，数据库协议测试使用模拟服务；Python 质量测试真实执行 PyMuPDF，但主要使用合成 PDF。当前宿主 Factory、真实上传回执、模型附件、实际数据库及云版面分别需要对应环境验证。
+- 真实论文质量评测按 [质量评测说明](docs/quality/README.md) 和 [gold schema](docs/quality/gold-schema.md) 区分 fixture 与人工 gold；未完成人工标注前，不报告真实字符召回率、表格质量等验收分数。
+- 文库维护先用 `npm run library:audit` 做默认离线只读审计；`--rebuild`、批量云版面及其他 `--apply` 会改变数据或产生云调用，执行前读对应脚本参数、备份和中断恢复逻辑。离线修复缺证据时报告 needs-cloud，不自动调用付费服务。
+
+## 8. Agent 资料、计划与交接
+
+协作资料统一维护在 [agent-docs](agent-docs/README.md)，纳入 Git 并随开发分支同步到远端。会话开始先读目录入口与 [项目状态](agent-docs/memory/project-state.md)，按任务选读详细资料。
+
+| 分类 | 入口与用途 |
+| --- | --- |
+| memory | [架构与源码索引](agent-docs/memory/architecture.md)、[项目状态与证据](agent-docs/memory/project-state.md)：稳定事实、决策依据、已知边界 |
+| plans | [计划规则](agent-docs/plans/README.md)：多步骤工作的范围、依赖、方案与验收；[本轮计划](agent-docs/plans/2026-11-20-agent-docs-and-release-audit.md) |
+| tasks | [任务规则](agent-docs/tasks/README.md)、[维护 backlog](agent-docs/tasks/2026-11-20-maintenance-backlog.md)：状态、阻塞、下一步、验证与交付证据 |
+| handoffs | [交接规则](agent-docs/handoffs/README.md)、[接手快照](agent-docs/handoffs/2026-11-20-project-onboarding.md)：跨会话所需的当前目标、分支、未完事项和引用 |
+| operations | [仓库、市场与发布运维](agent-docs/operations/release-and-distribution.md)：远端目录、收录渠道、CI/CD、打包和安装部署 |
+
+- 跨会话或多阶段工作记录计划和任务；简单修改可补现有条目。稳定文件用固定名称，阶段记录用 `YYYY-MM-DD-topic.md`。完成时补命令、退出码、跳过项和交付位置；修复后更新当前状态。
+- 事实、静态推断和待验证项分开，注明日期、分支/提交及来源。根指南保留约束与入口，详细事实只在对应文档维护，避免重复和历史堆积。
+- 旧 [docs/plans](docs/plans/) 保留历史入口，新计划放新目录；接口契约仍归 docs，用户指南和 CHANGELOG 保持各自职责。不得把本目录自动部署进论文工作区。
+- 只保存可公开资料，不存凭据、个人路径、聊天全文、论文正文、文库备份、日志转储或临时产物。当前 npm 白名单不含本目录，Git 同步与 npm 打包分别核对；源码安装仍可能带入这些公开文件。
+
+## 9. 宿主加载、Git、市场与发布
+
+- 查明插件通过 link 还是 copy 安装，确认运行进程实际加载的目录。静态阅读器文件通常刷新视图即可生效；服务端和客户端模块需重新加载 bundle 或重启宿主，再在现有 DSH 地址验证。
+- 兼容依据是当前公开服务接口与能力检测。可选服务缺席时走已有 fallback，宿主认证缺席时拒绝访问；涉及 DSH API 先核对当前版本文档，不从仓库路径推断宿主安装布局。
+- 核心分支为 `dev`、`test`、`prod`、`main`，合并方向 `dev → test → prod → main`；`main` 展示稳定发布。日常从 dev 开临时 `agent/<topic>`，不直接向 test/prod/main 提交。提交前核对身份 `Qian Xi <1964055097@qq.com>`，使用语义化前缀说明目的或根因。
+- 本仓库 [CI](.github/workflows/ci.yml) 对四核心分支的 push、目标为这些分支的 PR 和手动运行执行三系统 × Node 20/22 验证。仅 push `agent/*` 不触发该 push CI；文档合入 dev 也会验证。
+- [Release](.github/workflows/release.yml) 由 `v*` tag push 或手动运行触发，测试门后打包；有 NPM_TOKEN 时按版本查询与完整性结果决定是否发布 npm 并附 provenance，随后创建或更新 GitHub Release。tag 必须匹配包版本，约定在 prod 发布点打 tag；当前工作流不强制标签来源分支。
+- **渠道快照（2026-11-20）**：GitHub/npm 已发布 1.2.0；作者向 Awesome DSH Plugin 的投稿与 1.1.2 更新已合并，1.2.0 更新 PR 当时 OPEN。dshmarket 使用同一目录，DSH「发现」可用社区索引仍列 1.1.2；其他聚合站的展示不等于作者逐站投稿。详细来源、版本和查询方法统一查 [发布运维](agent-docs/operations/release-and-distribution.md)，操作前刷新状态。
+- 包发布、市场索引刷新、用户机器安装与宿主重载分别验证。当前工作流没有自动更新第三方目录或部署用户 profile 的步骤；一行安装器和本地安装器的来源、版本锁定、link/copy 与校验范围见发布运维。
+- 临时分支合并后清理自身 worktree 和本地/远端临时分支，保留用户未合并工作。推送先确认 Git Forge 授权及任务范围；提交、同步文档、版本发布与本机安装分别按用户授权执行。
+
+## 10. 当前状态与验证记录
+
+日期化基线、已知风险、真实验收边界和来源统一保存在 [项目状态](agent-docs/memory/project-state.md)，可执行后续项在 [维护任务](agent-docs/tasks/2026-11-20-maintenance-backlog.md)。涉及版面重建、取消/VL、原生 UI 或发行渠道时先核对相应条目及源码；历史通过记录不能替代本次变更的验证。
