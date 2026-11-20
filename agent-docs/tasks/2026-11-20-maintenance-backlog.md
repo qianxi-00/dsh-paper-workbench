@@ -4,12 +4,14 @@
 
 ## DOCS-001 · 分类协作资料与发布研究
 
-- 状态：in_progress。
+- 状态：done。
 - 目标：建立可 Git 同步的协作目录，补充根指南，记录远端目录、市场及 CI/CD 的真实证据。
 - 范围：根 [AGENTS.md](../../AGENTS.md) 和 [agent-docs](../README.md)；关联 [计划](../plans/2026-11-20-agent-docs-and-release-audit.md)。
-- 已完成：本地与远端目录/分支核查；市场及发行包调研；分类目录和规则起草。
-- 下一步：完成发布文档及根指南，校验本地链接、命令、Git 跟踪和 npm 白名单，再仅将文档同步 dev 并核对远端。
-- 验证：本轮文档检查结果在收尾时补记；此前业务回归不替代本轮检查。
+- 已完成：分类目录和十份配套文档、根指南接入、市场/发行物/工作流调研及交叉复核；首次文档提交 [4c86511d6b3f3cdd11bb048934a7326ab2f60634](https://github.com/qianxi-00/dsh-paper-workbench/commit/4c86511d6b3f3cdd11bb048934a7326ab2f60634) 已合入并推送 dev，GitHub 递归树核实根指南及全部十份资料，变更范围只有 Markdown。
+- 本地验证：11 份文档、249 个本地链接、108 个唯一目标均有效；2 个 Bash 块和 1 个 PowerShell 块通过语法检查；Git 忽略检查无命中，`git diff --cached --check` 退出 0。`npm pack --dry-run --json` 退出 0，仍为 93 个包条目、0 个 agent-docs 条目；临时验证脚本未加入仓库。本轮未在本机重跑业务全套，既有回归证据单独保留。
+- 远端验证：dev push 触发 [CI 44722475700](https://github.com/qianxi-00/dsh-paper-workbench/actions/runs/44722475700)，已完成且 6/6 矩阵成功，`gh run watch --exit-status` 退出 0；覆盖 Ubuntu/Windows/macOS × Node 20/22 的完整工作流。本条记录首次同步证据，随后收尾记录提交的 CI 按其 SHA 另查，不持续记录文档自己的新提交。
+- 环境处理：首次 push 的本机 Git Forge 凭据辅助程序出现含空格路径解析错误；确认远端未变化、目标仍获允许后，通过已登录 GitHub CLI 的一次性凭据接口重试成功。没有修改宿主或全局凭据配置，没有保存凭据值。
+- 后续：按下列独立任务按需继续；本次不发布版本、不修改市场 PR、不安装 profile。
 
 ## DIST-001 · 跟进社区目录 1.2.0 更新
 
