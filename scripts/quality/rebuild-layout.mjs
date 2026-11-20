@@ -12,7 +12,7 @@ import os from 'node:os'
 const args = process.argv.slice(2)
 const id = args.find(a => !a.startsWith('--'))
 const dataArg = args.find(a => a.startsWith('--data='))
-const dataRoot = dataArg ? dataArg.slice(7) : path.join(os.homedir(), '.dsh', 'paper-workbench')
+const dataRoot = dataArg ? dataArg.slice(7) : process.env.DSH_PAPER_WORKBENCH_DATA || path.join(os.homedir(), '.dsh', 'paper-workbench')
 const apply = args.includes('--apply')
 if (!id) {
   console.error('用法：node scripts/quality/rebuild-layout.mjs <paperId> [--data=<数据根>] [--apply]')
@@ -116,6 +116,11 @@ if (!apply) {
   process.exit(0)
 }
 const input = await archive.readInput(id, layout.revision)
+const previous = await store.readDoc(id)
+const meta = await store.getMeta(id)
+const { buildLayoutDoc, writeRebuiltDoc } = await import('../../lib/doc.js')
 const result = await archive.publishDerived(id, next, input || {})
-await store.clearDocCache(id).catch(() => {})
+const doc = buildLayoutDoc({ layout: await archive.readPublished(id), meta, outline: meta.outline || [], pdf: previous?.pdf || null })
+await writeRebuiltDoc(id, previous, doc)
+await store.closeDb()
 console.log('已发布新 revision：' + result.revision)
