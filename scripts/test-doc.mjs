@@ -777,12 +777,15 @@ async function runSampleIntegration(sample, root) {
   }
   await check('[' + id + '] 原生 TOC 的 section.page 与 outline.page 相差 ≤2', () => {
     const { sections } = changed.doc
-    const offset = sections[0] && sections[0].hash === titleHash('正文') ? 1 : 0
-    ok(sections.length >= offset + outline.length, '节数 ' + sections.length + ' 少于 outline ' + outline.length)
+    const actual = sections.filter(section => !section.synthetic)
     const bad = []
-    outline.forEach((item, index) => {
-      const section = sections[offset + index]
-      if (!section) return
+    let cursor = 0
+    outline.forEach(item => {
+      // 旧自动 outline 的多行标题可映射到同一完整视觉标题；不再把行数当节数。
+      const index = actual.findIndex((section, i) => i >= cursor && section.title.includes(item.title))
+      ok(index >= 0, '目录标题未映射：' + item.title)
+      const section = actual[index]
+      cursor = index
       const diff = Math.abs(section.page - item.page)
       if (diff > 2) bad.push(item.title + ' outline p.' + item.page + ' → section p.' + section.page)
     })
