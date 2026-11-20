@@ -39,6 +39,7 @@ const state = {
   topics: [],
   filter: '',
   picked: new Set(),
+  categoryEditor: null,
   expanded: loadTree(), // 已展开的专题（默认空 = 全部收起）
   tempCollapsed: new Set(), // 搜索期间的临时收起，不写 localStorage
   current: null, // library.get: { meta, outline, notes, zhChars, ocr }
@@ -85,8 +86,10 @@ const state = {
   // 环境自检（设置页）：旧宿主没有 doctor.run，静默降级成一行提示
   doctor: { loading: false, report: null, error: '', unsupported: false },
   busy: '',
-  online: { q: '', source: 'both', items: [], warnings: [], loading: false, error: '' },
-  latestFeed: { loading: false, loaded: false, mode: 'subs', topicFilter: 'all', domainId: '', category: '', items: [], topics: [], domains: [], error: '', partialErrors: [] },
+  online: { q: '', source: 'both', items: [], warnings: [], loading: false, error: '', page: 0, nextCursor: null, hasMore: false, seq: 0, queried: false, abort: null },
+  latestFeed: { loading: false, loaded: false, mode: 'subs', topicFilter: 'all', domainId: '', category: '', items: [], topics: [], domains: [], error: '', partialErrors: [], warnings: [], page: 0, nextCursor: null, hasMore: false, seq: 0, abort: null },
+  onlineNavCollapsed: false,
+  browseHistory: { open: false, items: [], q: '', loading: false, error: '' },
   dbTestResult: null,
   dbBusy: '',
   netTestResult: null,
@@ -316,11 +319,12 @@ function h(tag, props, ...children) {
   return node
 }
 
-async function rpc(method, args = {}) {
+async function rpc(method, args = {}, options = {}) {
   const response = await fetch(API + method, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(args),
+    ...(options.signal ? { signal: options.signal } : {}),
   })
   const data = await response.json().catch(() => ({ ok: false, error: 'HTTP ' + response.status }))
   if (!data.ok) throw new Error(data.error || '请求失败（HTTP ' + response.status + '）')
@@ -671,6 +675,7 @@ function saveSession(patch = {}, opts = {}) {
     expanded: [...state.expanded],
     readerAi: { ...state.ai },
     dark: state.dark,
+    onlineNavCollapsed: state.onlineNavCollapsed,
     ...patch,
   }
   try {
@@ -680,7 +685,7 @@ function saveSession(patch = {}, opts = {}) {
   }
   // 同时写一份到插件自己的数据目录：桌面端重启后端口会变，localStorage 按站点隔离会丢，
   // 服务端这份能让「退出再进」跨重启也回到原处。
-  const hasPrefPatch = ['paperId', 'layout', 'expanded', 'readerAi', 'dark'].some((k) => Object.hasOwn(patch, k))
+  const hasPrefPatch = ['paperId', 'layout', 'expanded', 'readerAi', 'dark', 'onlineNavCollapsed'].some((k) => Object.hasOwn(patch, k))
   if (state.current || hasPrefPatch) {
     const remoteState = {
       paperId: next.paperId,
@@ -692,6 +697,7 @@ function saveSession(patch = {}, opts = {}) {
       expanded: next.expanded,
       readerAi: next.readerAi,
       dark: next.dark,
+      onlineNavCollapsed: next.onlineNavCollapsed,
     }
     if (opts && opts.keepalive && typeof fetch === 'function') {
       fetch(API + 'ui.set', {
@@ -1268,6 +1274,7 @@ async function runTranslate(body, job) {
   state.translateJob = {
     paperId: pid,
     status: 'running',
+    ...(body.purpose ? { purpose: body.purpose } : {}),
     concurrency,
     completed: Math.max(prevDone, job.done ? job.done.size : 0),
     total: job.totalParagraphs || 0,
@@ -1455,7 +1462,7 @@ function confirmTranslateAll() {
 }
 
 function translateTitles() {
-  const sections = sectionsOf().filter((section) => section.hash)
+  const sections = sectionsOf().filter((section) => section.hash && !section.synthetic)
   if (!state.doc || sections.length === 0) {
     toast('没有可翻译的目录标题（需要文档模型）')
     return
@@ -1969,6 +1976,8 @@ async function openPaper(id, options = {}) {
     state.layoutBusy = false
     state.zhMode = false
     state.zhStatus = null
+    state.zhBusy = false
+    if (hostReady()) void followZhPdf(id, seq, false)
     await Promise.all([loadPage(state.page, seq), loadDoc(id, seq), loadChat(id, seq), loadAi(), loadFigures(seq)])
     if (seq !== state.openSeq) return
     buildFiguresByKey()
@@ -2007,6 +2016,7 @@ async function openPaper(id, options = {}) {
           if (scroller) scroller.scrollTop = Number(restore.scrollTop)
         }
         saveSession({ paperId: id, tab: state.tab, page: state.page, sectionId: state.sectionId })
+        if (!restore) void rememberPaper({ ...state.current.meta, paperId: id })
         if (state.session.available && state.layout.chatOpen) startSessionStream(true)
       }
     }
@@ -2374,6 +2384,10 @@ function renderSide() {
         'div',
         { class: 'tree-toolbar' },
         h('span', { class: 'hint' }, searching ? '搜索：命中分组临时展开' : '展开 ' + topicKeys.filter((topic) => state.expanded.has(topic)).length + ' / ' + topicKeys.length + ' 组'),
+        h('span', { class: 'library-state-legend', 'aria-label': '阅读状态图例：灰色未读，橙黄色阅读中，绿色已读' },
+          h('span', { class: 'legend-item' }, h('i', { class: 'dot unread', title: '未读' }), '未读'),
+          h('span', { class: 'legend-item' }, h('i', { class: 'dot reading', title: '阅读中' }), '阅读中'),
+          h('span', { class: 'legend-item' }, h('i', { class: 'dot read', title: '已读' }), '已读')),
         h('span', { class: 'spacer' }),
         h('button', { class: 'ghost', title: '展开所有分组', onclick: () => expandAllGroups(topicKeys, searching) }, '全部展开'),
         h('button', { class: 'ghost', title: '收起所有分组', onclick: () => collapseAllGroups(topicKeys, searching) }, '全部收起'),
@@ -2441,13 +2455,14 @@ function renderSide() {
                           },
                         }),
                       ),
-                      h('span', { class: ['dot', paper.status || '', paper.notesCount ? 'note' : ''].filter(Boolean).join(' ') }),
+                      h('span', { class: ['dot', paper.status || '', paper.notesCount ? 'note' : ''].filter(Boolean).join(' '), role: 'img', title: ({ unread: '未读', reading: '阅读中', read: '已读' }[paper.status] || '未读') + (paper.notesCount ? ' · 有笔记' : ''), 'aria-label': ({ unread: '未读', reading: '阅读中', read: '已读' }[paper.status] || '未读') }),
                       h(
                         'span',
                         {},
                         h('div', { class: 'paper-title' }, paper.title),
                         h('div', { class: 'paper-meta' }, [paper.year, fmtAuthors(paper.authors), paper.pageCount ? paper.pageCount + ' 页' : ''].filter(Boolean).join(' · ')),
                       ),
+                      h('button', { class: 'ghost paper-category', 'data-classify-paper': paper.id, title: '移入已有或新建分类', onclick: event => { event.stopPropagation(); state.categoryEditor = { id: paper.id, value: paper.topics?.[0] || '', error: '', busy: false }; render() } }, '分类'),
                       (() => {
                         const liveJob =
                           state.current && state.current.meta.id === paper.id && state.translateJob
@@ -2488,6 +2503,37 @@ function renderSide() {
       h('button', { class: 'ghost', onclick: openSettings, title: '设置' }, '⚙'),
     ),
   )
+}
+
+function renderCategoryEditor() {
+  const editor = state.categoryEditor
+  const names = [...new Set(state.papers.flatMap(paper => paper.topics || []))].sort()
+  const close = () => { if (!editor.busy) { state.categoryEditor = null; render() } }
+  const save = async value => {
+    const category = String(value || '').trim()
+    if (category.length > 100) { editor.error = '分类名称最多 100 个字符'; render(); return }
+    editor.busy = true
+    editor.error = ''
+    render()
+    try {
+      await rpc('library.update', { id: editor.id, patch: { topics: category ? [category] : [] } })
+      if (category) state.expanded.add(category)
+      else state.expanded.add('未分类')
+      saveTree()
+      await loadLibrary()
+      if (state.categoryEditor === editor) state.categoryEditor = null
+    } catch (error) { editor.error = error.message }
+    finally { editor.busy = false; render() }
+  }
+  return h('div', { class: 'overlay', onclick: event => { if (event.target === event.currentTarget) close() } },
+    h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': '论文分类' },
+      h('div', { class: 'modal-head' }, h('strong', {}, '移动论文分类'), h('span', { class: 'spacer' }), h('button', { onclick: close, disabled: editor.busy }, '关闭')),
+      h('div', { class: 'field' }, h('label', { for: 'paper-category-input' }, '选择已有分类或输入新分类；留空为未分类'),
+        h('input', { id: 'paper-category-input', list: 'paper-category-existing', value: editor.value, disabled: editor.busy, oninput: event => { editor.value = event.target.value } }),
+        h('datalist', { id: 'paper-category-existing' }, names.map(name => h('option', { value: name }, name)))),
+      editor.error ? h('div', { class: 'error', role: 'alert' }, editor.error) : null,
+      h('div', { class: 'row' }, h('button', { id: 'paper-category-save', class: 'primary', disabled: editor.busy, onclick: () => save(editor.value) }, editor.busy ? '保存中…' : '保存分类'),
+        h('button', { id: 'paper-category-clear', disabled: editor.busy, onclick: () => save('') }, '移至未分类'))))
 }
 
 function toggleGroup(topic, searching) {
@@ -2534,6 +2580,7 @@ function renderMain() {
   if (state.trash.open) overlays.push(renderTrashModal())
   if (state.convPicker.open) overlays.push(renderConvPicker())
   if (state.layoutReport) overlays.push(renderLayoutReport())
+  if (state.categoryEditor) overlays.push(renderCategoryEditor())
   if (state.showSettings) return h('section', { class: 'main' }, renderTopbar(), h('div', { class: 'content' }, renderSettings()), ...overlays)
   const isOnline = state.tab === 'online' || (!state.current && state.online.items.length > 0)
   const content = isOnline ? renderOnline() : !state.current ? renderEmpty() : renderReader()
@@ -2758,7 +2805,7 @@ function renderOutline(sections) {
           h('div', { class: 'outline-title' }, section.title),
           titleKey ? h('div', { class: 'outline-zh', 'data-zh': titleKey }) : null,
         ),
-        h(
+        section.synthetic ? null : h(
           'div',
           { class: 'outline-actions' },
           h('button', { class: 'link', title: '翻译本节', onclick: (event) => { event.stopPropagation(); translateSection(section.id) } }, '译'),
@@ -3853,8 +3900,9 @@ function renderParagraph(paragraph) {
   const para = h(
     'div',
     {
-      class: 'para kind-' + kind + (entry ? ' has-zh' : '') + (collapseClasses ? ' ' + collapseClasses : ''),
+      class: 'para kind-' + kind + (paragraph.role === 'toc-entry' ? ' toc-entry' : '') + (entry ? ' has-zh' : '') + (collapseClasses ? ' ' + collapseClasses : ''),
       id,
+      'data-toc-level': paragraph.role === 'toc-entry' ? paragraph.tocLevel || 1 : null,
       'data-key': key,
       'data-section': paragraph.section || '',
       'data-page': paragraph.page || 1,
@@ -3997,6 +4045,7 @@ function renderCompareToolbar() {
       'div',
       { class: 'toolbar-group trans-group', role: 'group', 'aria-label': '全文与章节翻译' },
       h('button', { id: 'translate-section', disabled: !docReady || running, title: '翻译当前阅读章节的全部未译段落（存入存储后端，不进对话历史）', onclick: () => translateSection(state.sectionId || (sectionsOf()[0] && sectionsOf()[0].id)) }, '译本节'),
+      h('button', { id: 'translate-titles', class: 'primary-soft', disabled: !docReady || running, title: '一键翻译全部真实目录标题，结果保存后显示中英对照', onclick: translateTitles }, '翻译全部目录'),
       h('button', { id: 'translate-all', class: 'primary-soft', disabled: !docReady || running, onclick: confirmTranslateAll }, '整篇翻译'),
       h('button', { id: 'translate-stop', class: 'btn-pause-trans', hidden: !running, disabled: !running, title: '显式暂停当前后台翻译（切走界面不会中断翻译）', onclick: pauseTranslate }, '⏸ 暂停翻译' + countSuffix),
       h('button', { id: 'translate-resume', class: 'btn-resume-trans', hidden: !paused, disabled: !docReady || running, title: '从上次暂停断点继续翻译剩余未译段落', onclick: resumeTranslate }, '▶ 继续翻译' + countSuffix),
@@ -4023,7 +4072,6 @@ function renderCompareToolbar() {
       h(
         'div',
         { class: 'more-tools-menu' },
-        h('button', { id: 'translate-titles', disabled: !docReady || state.translateBusy, title: '批量翻译节标题，目录显示英文/中文两行', onclick: translateTitles }, '目录翻译'),
         h('button', { id: 'review-run', disabled: !docReady || !hostReady() || state.reviewBusy, title: hostReady() ? '检查空译文、截断、残留英文、公式残留等可疑段落' : '重启桌面端后可用', onclick: () => runReview('static') }, state.reviewBusy ? '自检中…' : '译文自检'),
         h('button', {
           id: 'layout-run',
@@ -4072,53 +4120,84 @@ function pageRatio(page) {
   return PAGE_DEFAULT_RATIO
 }
 
-/** 中文版：只替换有译文的段落，其余保留原文（所以是「部分中文」的页面）。 */
+let zhWatch = 0
+
+async function followZhPdf(id, seq, requested) {
+  const watch = ++zhWatch
+  const current = () => watch === zhWatch && seq === state.openSeq && state.current?.meta?.id === id
+  try {
+    while (current()) {
+      const status = await rpc('zhpdf.status', { id })
+      if (!current()) return
+      state.zhStatus = status
+      const job = status.job
+      if (job?.status !== 'running') {
+        if (requested && state.tab === 'page' && status.exists && !status.stale && job?.status === 'done') {
+          state.zhMode = true
+          state.pendingPage = state.page
+          toast('中文版已生成，写入 ' + status.blocks + ' 块')
+        }
+        if (requested && job?.status === 'error') toast(job.error, 6000)
+        if (job) render()
+        return
+      }
+      requested = true
+      if (state.tab === 'page') render()
+      await new Promise(resolve => setTimeout(resolve, 1500))
+    }
+  } catch (error) {
+    if (requested && current()) toast(error.message, 6000)
+  }
+}
+
+function zhProgress(job) {
+  if (!job || job.status === 'done') return ''
+  if (job.error) return job.error
+  const phase = { checking: '检查覆盖', translating: '补译中', generating: '生成 PDF 中' }[job.phase] || ''
+  return [phase, job.missingCount != null && '待补译 ' + job.missingCount, job.total > 0 && job.completed + '/' + job.total, job.model].filter(Boolean).join(' · ')
+}
+
 async function toggleZhPdf() {
-  const meta = state.current && state.current.meta
-  if (!meta) return
-  if (state.zhBusy) return
+  const id = state.current?.meta?.id
+  if (!id || state.zhBusy || state.busy === 'open') return
   if (state.zhMode) {
     state.zhMode = false
     render()
     return
   }
-  if (!hostReady()) {
-    needRestart()
-    return
-  }
-  const id = meta.id
-  const stillHere = () => Boolean(state.current && state.current.meta.id === id)
+  if (!hostReady()) return needRestart()
+
+  const seq = state.openSeq
+  const stillHere = () => seq === state.openSeq && state.current?.meta?.id === id && state.tab === 'page'
   state.zhBusy = true
+  render()
   try {
-    let status = state.zhStatus
-    if (!status) status = await rpc('zhpdf.status', { id })
+    const status = await rpc('zhpdf.status', { id })
     if (!stillHere()) return
-    if (!status.exists) {
-      const ok = window.confirm('生成中文版 PDF：把已翻译的段落写回原来的版面，和原文逐页对齐。\n纯本地处理，不上传、不花钱；没翻译的段落保留原文。继续？')
-      if (!ok) return
-      const result = await rpc('zhpdf.build', { id })
-      if (!stillHere()) return
-      toast('中文版已生成：' + result.blocks + ' 段，' + (result.skipped ? result.skipped + ' 段没对上原文（保留英文）' : '全部替换'))
-      status = await rpc('zhpdf.status', { id })
-      if (!stillHere()) return
-    } else if (status.stale) {
-      const again = window.confirm('有新的译文，中文版还是上次的。要重新生成吗？（纯本地，很快）')
-      if (again) {
-        const result = await rpc('zhpdf.build', { id })
-        if (!stillHere()) return
-        toast('中文版已更新：' + result.blocks + ' 段')
-        status = await rpc('zhpdf.status', { id })
-        if (!stillHere()) return
-      }
-    }
     state.zhStatus = status
-    state.zhMode = true
-    render()
+    if (status.job?.status === 'running') {
+      await rpc('zhpdf.pause', { id })
+    } else if (status.job?.status === 'paused') {
+      await rpc('zhpdf.resume', { id })
+    } else if (status.exists && !status.stale) {
+      state.zhMode = true
+      state.pendingPage = state.page
+      return
+    } else {
+      const check = await rpc('zhpdf.inspect', { id })
+      if (!stillHere()) return
+      if (check.issues?.length) throw new Error(check.issues.slice(0, 5).map(issue => '第 ' + (issue.page || '?') + ' 页 ' + issue.reason).join('，'))
+      if (!window.confirm((check.missingKeys.length ? '将通过翻译模型补齐 ' + check.missingKeys.length + ' 项，可能产生模型费用。' : '译文已齐。') + '继续生成中文版 PDF？')) return
+      await rpc('zhpdf.prepare', { id })
+    }
+    if (stillHere()) void followZhPdf(id, seq, true)
   } catch (error) {
-    toast(error.message)
+    if (stillHere()) toast(error.message, 6000)
   } finally {
-    // 切走了就别动新论文的 busy 标记
-    if (stillHere()) state.zhBusy = false
+    if (seq === state.openSeq) {
+      state.zhBusy = false
+      render()
+    }
   }
 }
 
@@ -4456,12 +4535,15 @@ function renderPagePane() {
         state.cropMode ? '✕ 退出框选' : '⬚ 框选讲解',
       ),
       h('button', {
+        id: 'page-zhpdf',
         class: state.zhMode ? 'on' : 'ghost',
-        title: state.zhStatus && state.zhStatus.exists
-          ? '中文版 PDF（译文写回原版面，和原文逐页对齐）' + (state.zhStatus.stale ? ' —— 有新的译文，点右键菜单重新生成' : '')
-          : '把已有译文写回原版面，生成一份中文版 PDF（纯本地，不上传）',
+        disabled: state.zhBusy,
+        title: '先通过独立任务补齐缺失译文，再本地生成并切换中文版；跨页或无法安全定位的文字会明确提示',
         onclick: toggleZhPdf,
-      }, state.zhMode ? '中文版 ✓' : '中文版'),
+      }, state.zhBusy ? '请稍候…' : state.zhMode ? '中文版 ✓' : state.zhStatus?.job?.status === 'running' ? '暂停生成中文版' : state.zhStatus?.job?.status === 'paused' ? '继续生成中文版' : '中文版'),
+      h('span', { role: 'status', class: 'translate-status' }, zhProgress(state.zhStatus?.job)),
+      h('button', { id: 'translate-stop', class: 'btn-pause-trans', hidden: !state.translateBusy, onclick: pauseTranslate }, '暂停翻译'),
+      h('span', { id: 'translate-status', class: 'translate-status', role: 'status' }, state.translateError || progressText()),
       h('span', { class: 'spacer' }),
       state.current.meta.hasText === false || (state.ocr && state.ocr.pages > 0)
         ? h('button', { class: 'ghost', onclick: runOcr, disabled: !!state.ocrBusy, title: '扫描件：调用 PaddleOCR 识别全文' }, state.ocrBusy ? 'OCR 中…' : state.ocr && state.ocr.pages > 0 ? '重新 OCR' : 'OCR 识别')
@@ -4787,6 +4869,9 @@ function renderNotesPane() {
           { class: 'row' },
           h('span', { class: 'ann-kind-tag' }, ANN_KIND_LABELS[ann.kind] || ann.kind),
           h('span', { class: 'muted' }, 'p.' + (ann.page || 1) + (ann.target === 'zh' ? ' · 译文' : ' · 原文')),
+          state.doc?.annotationReview?.some(item => item.id === ann.id)
+            ? h('span', { class: 'muted' }, '需复核 · 原文定位已变化 · 旧 revision ' + (state.doc.annotationReview.find(item => item.id === ann.id).revision || '未知'))
+            : null,
           ann.note ? h('span', {}, ann.note) : null,
         ),
         h(
@@ -6083,32 +6168,132 @@ function renderSettings() {
 
 // ---------------------------------------------------------------- 在线检索
 
-async function loadLatestFeed(force = false) {
-  const lf = state.latestFeed
-  lf.loading = true
-  lf.error = ''
+function onlineResultKey(item) {
+  if (item.doi) return 'doi:' + String(item.doi).replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '').toLowerCase()
+  if (item.arxivId) return 'arxiv:' + String(item.arxivId).replace(/v\d+$/i, '').toLowerCase()
+  return String(item.url || item.absUrl || item.title || '').toLowerCase()
+}
+
+async function loadOnlineBatch(kind, append = false) {
+  const model = kind === 'online' ? state.online : state.latestFeed
+  if (append && (model.loading || !model.hasMore)) return
+  model.abort?.abort()
+  const controller = new AbortController()
+  model.abort = controller
+  const seq = ++model.seq
+  if (!append) {
+    model.items = []
+    model.page = 0
+    model.nextCursor = null
+    model.hasMore = false
+    model.requestArgs = kind === 'online'
+      ? { query: String(model.q || '').trim(), source: model.source }
+      : model.mode === 'domain'
+        ? model.category ? { category: model.category } : { domainId: model.domainId }
+        : model.topicFilter && model.topicFilter !== 'all' ? { topicId: model.topicFilter } : {}
+    if (kind === 'online') model.queried = true
+  }
+  model.loading = true
+  model.error = ''
   render()
   try {
-    const args = { force: Boolean(force) }
-    if (lf.mode === 'domain') {
-      if (lf.category) args.category = lf.category
-      else if (lf.domainId) args.domainId = lf.domainId
-    } else if (lf.topicFilter && lf.topicFilter !== 'all') {
-      args.topicId = lf.topicFilter
+    const result = await rpc(kind === 'online' ? 'search.online' : 'search.latest', {
+      ...model.requestArgs, limit: 100, ...(append ? { cursor: model.nextCursor } : {}),
+    }, { signal: controller.signal })
+    if (seq !== model.seq) return
+    const seen = new Set(model.items.map(onlineResultKey))
+    for (const item of Array.isArray(result.items) ? result.items : []) {
+      const key = onlineResultKey(item)
+      if (key && !seen.has(key)) { seen.add(key); model.items.push(item) }
     }
-    const res = await rpc('search.latest', args)
-    lf.items = Array.isArray(res && res.items) ? res.items : []
-    if (lf.mode !== 'domain' && (!lf.topicFilter || lf.topicFilter === 'all') && Array.isArray(res && res.topics) && res.topics.length) {
-      lf.topics = res.topics
-    }
-    lf.partialErrors = Array.isArray(res && res.partialErrors) ? res.partialErrors : []
-    lf.loaded = true
+    model.nextCursor = result.nextCursor || null
+    model.hasMore = Boolean(result.hasMore && model.nextCursor)
+    model.warnings = Array.isArray(result.warnings) ? result.warnings : []
+    model.partialErrors = Array.isArray(result.partialErrors) ? result.partialErrors : []
+    if (kind !== 'online' && Array.isArray(result.topics)) model.topics = result.topics
+    model.loaded = true
   } catch (error) {
-    lf.error = error.message
+    if (seq === model.seq && error.name !== 'AbortError') model.error = error.message
   } finally {
-    lf.loading = false
-    render()
+    if (seq === model.seq) { model.loading = false; render() }
   }
+}
+
+async function loadLatestFeed(force = false) {
+  return loadOnlineBatch('feed')
+}
+
+async function changeOnlinePage(kind, direction) {
+  const model = kind === 'online' ? state.online : state.latestFeed
+  const target = model.page + direction
+  if (target < 0 || model.loading) return
+  const seq = model.seq
+  if (target * 10 >= model.items.length) {
+    if (!model.hasMore) return
+    await loadOnlineBatch(kind, true)
+    if (model.seq !== seq + 1) return
+  } else if (model.seq !== seq) return
+  if (target * 10 < model.items.length) model.page = target
+  render()
+  const results = document.querySelector('.online-results')
+  if (results) results.scrollTop = 0
+}
+
+function renderOnlinePagination(kind, model) {
+  const pages = Math.max(1, Math.ceil(model.items.length / 10))
+  return h('div', { class: 'online-pagination', 'aria-label': '论文结果分页' },
+    h('button', { 'data-page-prev': kind, disabled: model.loading || model.page === 0, onclick: () => changeOnlinePage(kind, -1) }, '上一页'),
+    h('span', { class: 'hint', 'aria-live': 'polite' }, '第 ' + (model.page + 1) + ' / ' + pages + ' 页 · 已加载 ' + model.items.length + ' 篇 · 每页 10 篇'),
+    h('button', { 'data-page-next': kind, disabled: model.loading || ((model.page + 1) * 10 >= model.items.length && !model.hasMore), onclick: () => changeOnlinePage(kind, 1) }, model.loading ? '加载中…' : (model.page + 1) * 10 >= model.items.length && model.hasMore ? '下一批 / 下一页' : '下一页'))
+}
+
+async function openOriginalPaper(item) {
+  let url
+  try { url = new URL(item.url || item.absUrl) } catch { return toast('原文链接无效') }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return toast('原文链接不受支持')
+  window.open(url.href, '_blank', 'noopener')
+  await rememberPaper(item)
+  if (state.browseHistory.open) render()
+}
+
+async function rememberPaper(item) {
+  const { title, source, doi, arxivId, url, absUrl, paperId } = item
+  try {
+    const result = await rpc('history.record', { item: { title, source, doi, arxivId, url: url || absUrl, paperId } })
+    state.browseHistory.items = result.items || state.browseHistory.items
+  } catch (error) { toast('浏览历史保存失败：' + error.message) }
+}
+
+async function toggleBrowseHistory() {
+  const history = state.browseHistory
+  history.open = !history.open
+  if (!history.open) { render(); return }
+  history.loading = true
+  history.error = ''
+  render()
+  try { history.items = (await rpc('history.list')).items || [] }
+  catch (error) { history.error = error.message }
+  finally { history.loading = false; render() }
+}
+
+function renderBrowseHistory() {
+  const history = state.browseHistory
+  const items = history.items.filter(item => item.title.toLowerCase().includes(history.q.toLowerCase()))
+  return h('div', { class: 'browse-history' },
+    h('div', { class: 'row' }, h('strong', {}, '论文浏览历史'), h('span', { class: 'hint' }, '仅保存最近 200 篇的题名和原文链接'),
+      h('button', { onclick: async () => { try { await rpc('history.clear'); history.items = []; history.error = '' } catch (error) { history.error = error.message } render() } }, '清空历史')),
+    h('input', { type: 'search', placeholder: '筛选历史题名', value: history.q, oninput: event => { history.q = event.target.value; render(); document.querySelector('.browse-history input')?.focus() } }),
+    history.error ? h('div', { class: 'error' }, history.error) : null,
+    history.loading ? h('div', { class: 'hint' }, '正在加载…') : null,
+    h('div', { class: 'online-results' }, items.map(item => h('div', { class: 'history-item' },
+      h('button', { class: 'history-title', onclick: async () => {
+        if (item.paperId && state.papers.some(paper => paper.id === item.paperId)) { history.open = false; await openPaper(item.paperId) }
+        else if (item.url) await openOriginalPaper(item)
+        else toast('原论文已不在文库，记录中没有原文链接')
+      } }, item.title),
+      h('span', { class: 'hint' }, item.lastViewedAt.slice(0, 10)),
+      h('button', { 'aria-label': '删除浏览记录：' + item.title, onclick: async () => { history.items = (await rpc('history.remove', { id: item.id })).items || []; render() } }, '删除')))),
+    !history.loading && !items.length ? h('div', { class: 'hint' }, '暂无浏览记录。打开原文或进入论文阅读后会自动记录。') : null)
 }
 
 async function quickSubscribeArxivTarget(label, domainId, categoryCode) {
@@ -6166,30 +6351,26 @@ function renderOnlineResultCard(item) {
     h(
       'div',
       { class: 'row' },
-      h(
-        'button',
-        {
-          class: 'primary',
-          disabled: state.busy === 'import:' + item.title,
-          onclick: async () => {
-            state.busy = 'import:' + item.title
+      h('button', {
+        class: 'primary',
+        disabled: !item.pdfUrl || state.busy === 'import:' + item.title,
+        onclick: async () => {
+          state.busy = 'import:' + item.title
+          render()
+          try {
+            const value = await rpc('search.import', { item })
+            toast('已入库：' + value.meta.title)
+            await loadLibrary()
+            await openPaper(value.meta.id)
+          } catch (error) {
+            toast('入库失败：' + error.message)
+          } finally {
+            state.busy = ''
             render()
-            try {
-              const value = await rpc('search.import', { item })
-              toast('已入库：' + value.meta.title)
-              await loadLibrary()
-              if (value.meta) openPaper(value.meta.id)
-            } catch (error) {
-              toast('入库失败：' + error.message)
-            } finally {
-              state.busy = ''
-              render()
-            }
-          },
+          }
         },
-        item.pdfUrl ? '下载并入库' : '无开放 PDF',
-      ),
-      item.url || item.absUrl ? h('button', { onclick: () => window.open(item.url || item.absUrl, '_blank', 'noopener') }, '打开原文页') : null,
+      }, item.pdfUrl ? '下载并入库' : '无开放 PDF'),
+      item.url || item.absUrl ? h('button', { onclick: () => openOriginalPaper(item) }, '打开原文页') : null,
       h('button', { onclick: () => insertGeneralPrompt('帮我查找并研读这篇论文：' + item.title + (item.doi ? '（DOI ' + item.doi + '）' : '') + '，提炼研究动机、方法设计与核心结论。') }, '让 agent 读'),
     ),
   )
@@ -6224,23 +6405,20 @@ function renderOnline() {
         h('option', { value: 'openalex', selected: state.online.source === 'openalex' }, '仅 OpenAlex'),
       ),
       h('button', { class: 'primary', onclick: doSearch, disabled: state.online.loading }, state.online.loading ? '检索中…' : '检索'),
-      state.online.items.length > 0
-        ? h('button', { class: 'ghost', onclick: () => { state.online.items = []; state.online.error = ''; render() } }, '返回学科与订阅流')
+      h('button', { id: 'browse-history-toggle', 'aria-expanded': String(state.browseHistory.open), onclick: toggleBrowseHistory }, state.browseHistory.open ? '返回检索' : '浏览历史'),
+      state.online.queried
+        ? h('button', { class: 'ghost', onclick: () => { clearOnlineSearch(); render() } }, '返回学科与订阅流')
         : null,
       obsidianEnabled()
         ? h('button', { onclick: () => insertGeneralPrompt(P.vaultSearch(state.online.q || '论文')) }, '问笔记库')
         : h('button', { onclick: () => insertGeneralPrompt('请在当前工作台文献库中梳理与「' + (state.online.q || '论文') + '」相关的已有工作、方法差异与研究空白。') }, '问文献库'),
     ),
   )
-  if (state.online.error) box.append(h('div', { class: 'error' }, state.online.error))
-  if (Array.isArray(state.online.warnings) && state.online.warnings.length > 0) {
-    box.append(h('div', { class: 'hint' }, '提示：' + state.online.warnings.join('；')))
-  }
-  for (const item of state.online.items) {
-    box.append(renderOnlineResultCard(item))
-  }
-
-  if (state.online.items.length === 0) {
+  if (state.browseHistory.open) {
+    box.append(renderBrowseHistory())
+  } else if (state.online.queried) {
+    box.append(renderOnlineResults('online', state.online))
+  } else {
     const lf = state.latestFeed
     const domainsCatalog = lf.domains && lf.domains.length ? lf.domains : FALLBACK_ARXIV_DOMAINS
     const cfgItems = state.fullConfig && state.fullConfig.topics && Array.isArray(state.fullConfig.topics.items) ? state.fullConfig.topics.items : null
@@ -6260,9 +6438,18 @@ function renderOnline() {
         h('span', { class: 'hint' }, '按发布时间倒序'),
         h('span', { class: 'spacer' }),
         h('button', { class: 'ghost', disabled: lf.loading, onclick: () => loadLatestFeed(true) }, lf.loading ? '刷新中…' : '↻ 刷新最新'),
+        h('button', {
+          id: 'domain-nav-toggle', 'aria-expanded': String(!state.onlineNavCollapsed),
+          onclick: () => {
+            state.onlineNavCollapsed = !state.onlineNavCollapsed
+            saveSession({ onlineNavCollapsed: state.onlineNavCollapsed })
+            render()
+            document.getElementById('domain-nav-toggle')?.focus()
+          },
+        }, state.onlineNavCollapsed ? '展开学科导航' : '收起学科导航'),
         h('button', { class: 'ghost', onclick: openSettings }, '⚙ 订阅与代理设置'),
       ),
-      h(
+      state.onlineNavCollapsed ? null : h(
         'div',
         { class: 'domain-nav' },
         h(
@@ -6385,56 +6572,32 @@ function renderOnline() {
             ),
       ),
     )
-    if (lf.error) {
-      feedPanel.append(
-        h(
-          'div',
-          { class: 'error' },
-          '最新论文拉取失败：' + lf.error + '（若本机需走代理访问 arXiv，请点右上角「⚙ 订阅与代理设置」配置代理并测试连通性）',
-        ),
-      )
-    } else if (Array.isArray(lf.partialErrors) && lf.partialErrors.length > 0 && lf.items.length === 0) {
-      feedPanel.append(
-        h(
-          'div',
-          { class: 'error' },
-          '拉取受阻：' + lf.partialErrors[0].message + '（请点「⚙ 订阅与代理设置 → 网络与代理」检查代理端口并测试网络连通）',
-        ),
-      )
-    }
-    const feedItems = lf.items.filter((item) => {
-      if (lf.mode === 'domain' || !lf.topicFilter || lf.topicFilter === 'all') return true
-      if (Array.isArray(item.topics) && item.topics.includes(lf.topicFilter)) return true
-      if (Array.isArray(item.topicIds) && item.topicIds.includes(lf.topicFilter)) return true
-      if (Array.isArray(item.matchedTopics) && item.matchedTopics.includes(lf.topicFilter)) return true
-      return true
-    })
-    for (const item of feedItems) feedPanel.append(renderOnlineResultCard(item))
-    if (!lf.loading && feedItems.length === 0 && !lf.error && !(lf.partialErrors && lf.partialErrors.length > 0)) {
-      feedPanel.append(h('div', { class: 'hint' }, lf.loaded ? '当前筛选方向暂无最新论文，可切换上方 8 大学科标签或点「↻ 刷新最新」。' : '正在准备订阅流，也可直接点击上方 8 大学科浏览最新 arXiv 预印本。'))
-    }
+    feedPanel.append(renderOnlineResults('feed', lf))
     box.append(feedPanel)
   }
-  return h('div', { class: 'content' }, box)
+  return h('div', { class: 'content online-content' }, box)
+}
+
+function renderOnlineResults(kind, model) {
+  const messages = [model.error, ...(model.warnings || []), ...(model.partialErrors || []).map(error => error.message)].filter(Boolean)
+  return h('div', { class: 'online-result-panel' },
+    messages.length ? h('div', { class: model.error ? 'error' : 'hint', role: 'status' }, [...new Set(messages)].join('；')) : null,
+    h('div', { class: 'online-results', tabindex: '0', 'aria-label': '论文结果' },
+      model.items.slice(model.page * 10, (model.page + 1) * 10).map(renderOnlineResultCard),
+      !model.items.length && !messages.length ? h('div', { class: 'hint' }, model.loading ? '正在拉取论文…' : '当前没有论文结果。') : null),
+    renderOnlinePagination(kind, model))
+}
+
+function clearOnlineSearch() {
+  const model = state.online
+  model.abort?.abort()
+  model.seq += 1
+  Object.assign(model, { queried: false, loading: false, items: [], page: 0, error: '', hasMore: false, nextCursor: null })
 }
 
 async function doSearch() {
-  const query = String(state.online.q || '').trim()
-  if (!query) return
-  state.online.loading = true
-  state.online.error = ''
-  state.online.warnings = []
-  render()
-  try {
-    const value = await rpc('search.online', { query, source: state.online.source, limit: 10 })
-    state.online.items = value.items || []
-    state.online.warnings = Array.isArray(value.warnings) ? value.warnings : []
-  } catch (error) {
-    state.online.error = '检索失败：' + error.message
-  } finally {
-    state.online.loading = false
-    render()
-  }
+  if (!String(state.online.q || '').trim()) return
+  await loadOnlineBatch('online')
 }
 
 function comparePicked() {
@@ -8574,6 +8737,7 @@ async function bootInner() {
   // 本地一份（同端口刷新快）+ 服务端一份（桌面端重启换端口也不丢），取较新的。
   const session = pickSession(loadSession(), await loadSessionRemote())
   if (session && typeof session === 'object') {
+    state.onlineNavCollapsed = session.onlineNavCollapsed === true
     let localHasLayout = false
     let localHasTree = false
     let localHasAi = false

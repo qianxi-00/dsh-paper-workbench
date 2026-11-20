@@ -1057,7 +1057,8 @@ def _heuristic_outline(doc):
                 size = max(line_sizes)
                 for span_size in line_sizes:
                     size_chars[span_size] = size_chars.get(span_size, 0) + 1
-                rows.append((index + 1, round(size, 1), text))
+                box = fitz.Rect(line.get("bbox") or (0, 0, 0, 0))
+                rows.append((index + 1, round(size, 1), text, box))
     if not size_chars:
         return [], True  # 扫描件没有文字层，大纲只能为空
     threshold = _clustered_body_size(size_chars) * HEURISTIC_RATIO
@@ -1065,12 +1066,30 @@ def _heuristic_outline(doc):
                   and not (NUMERIC_PAGE_RE.match(row[2]) or CHINESE_PAGE_RE.match(row[2])
                            or ROMAN_PAGE_RE.match(row[2])
                            or re.match(r"^(?:arxiv|doi|https?://|www\.)", row[2], re.IGNORECASE))]
+    # 自动目录以前逐行造节：仅合并同页、同字号、同列且紧邻的标题续行。
+    # 下一行已有独立编号时保持为新节，不能把相邻小节或双栏标题吞掉。
+    joined = []
+    for row in candidates:
+        page, size, title, box = row
+        prev = joined[-1] if joined else None
+        if prev:
+            ppage, psize, ptitle, pbox = prev
+            overlap = min(pbox.x1, box.x1) - max(pbox.x0, box.x0)
+            numbered = re.match(r"^(?:\d+(?:\.\d+)*\.?|Appendix\s+[A-Z][.:]?)\s+\S", title, re.I)
+            if (page == ppage and abs(size - psize) <= 0.6 and not numbered
+                    and -2 <= box.y0 - pbox.y1 <= max(size, psize) * 0.9
+                    and overlap >= min(pbox.width, box.width) * 0.5
+                    and len(ptitle + " " + title) <= MAX_TITLE_LEN):
+                joined[-1] = (page, max(size, psize), ptitle + " " + title, pbox | box)
+                continue
+        joined.append(row)
+    candidates = joined
     reps = []
     for size in sorted({row[1] for row in candidates}, reverse=True):
         if not reps or size < reps[-1] * SIZE_TOLERANCE:
             reps.append(size)
     items, seen = [], set()
-    for page, size, text in sorted(candidates, key=lambda row: row[0]):
+    for page, size, text, _box in sorted(candidates, key=lambda row: row[0]):
         if (page, text) in seen:            # 同页同标题只留一个
             continue
         seen.add((page, text))
@@ -1830,6 +1849,13 @@ def cmd_zhpdf(args):
         lineheight = float(args.get("lineheight") or 1.3)
         font_file = _zh_font()
         font_name = "zhbody" if font_file else "china-s"
+        failures = []
+
+        def skip(page_number, reason, count=1):
+            if len(failures) < 12:
+                failures.append({"page": page_number, "reason": reason})
+            return count
+
         written = 0
         skipped = 0
         for item in pages:
@@ -1840,7 +1866,7 @@ def cmd_zhpdf(args):
             except (TypeError, ValueError):
                 continue
             if page_number < 1 or page_number > doc.page_count:
-                skipped += 1
+                skipped += skip(page_number, "原文页码超出范围")
                 continue
             page = doc[page_number - 1]
             blocks = item.get("blocks")
@@ -1877,11 +1903,11 @@ def cmd_zhpdf(args):
                 box = fitz.Rect(*block["rect"]) * page.derotation_matrix
                 box = box & native          # 收口用原生页框（旋转页的 page.rect 是显示尺寸）
                 if box.is_empty or box.width <= 1 or box.height <= 1:
-                    skipped += 1
+                    skipped += skip(page_number, "文字框不在有效页内")
                     continue
                 cluster = _match_block_lines(block["source"], lines, claimed, box)
                 if not cluster:
-                    skipped += 1                       # 一行都对不上就别乱擦
+                    skipped += skip(page_number, "无法定位原文行")
                     continue
                 for index, line in enumerate(lines):
                     if any(line is picked for picked in cluster):
@@ -1916,7 +1942,7 @@ def cmd_zhpdf(args):
                         size, fits = _fit_text(page, target, block["text"], base, lineheight, font_name, font_file)
                 if not fits:
                     # 擦不了也放不下：整段跳过，保留英文，并在统计里体现出来
-                    skipped += 1
+                    skipped += skip(page_number, "译文放不进原版面")
                     for index in [i for i, line in enumerate(lines) if any(line is picked for picked in cluster)]:
                         claimed.discard(index)
                     continue
@@ -1945,7 +1971,7 @@ def cmd_zhpdf(args):
                                          lineheight=lineheight, align=0, color=(0, 0, 0))
                 if rc < 0:
                     # 试排和真页有细微差异时可能出现：别把它算成写成功
-                    skipped += 1
+                    skipped += skip(page_number, "实际写入时译文放不进原版面")
                     continue
                 written += 1
         # 中文字体会整份嵌进去（好几 MB），能子集化就子集化；PyMuPDF 版本差异大，失败就算了
@@ -1964,8 +1990,11 @@ def cmd_zhpdf(args):
             os.replace(tmp, target)
         except OSError as exc:
             raise ArgsError(f"写入中文版失败：{exc}") from exc
+        with fitz.open(str(target)) as verified:
+            if verified.page_count != doc.page_count:
+                raise ArgsError("中文版 PDF 页数与原文不一致")
         return {"ok": True, "path": str(target), "blocks": written, "skipped": skipped,
-                "pages": int(doc.page_count)}
+                "pages": int(doc.page_count), "failures": failures}
     finally:
         doc.close()
 
