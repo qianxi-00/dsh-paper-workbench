@@ -48,6 +48,14 @@ Agent 可直接读取[安装技能](skills/install-dsh-paper-workbench/SKILL.md)
 dsh plugin --profile web add github:qianxi-00/dsh-paper-workbench
 ```
 
+也可从 npm 安装固定正式版本（包名 `dsh-paper-workbench`，归属仓库 `qianxi-00/dsh-paper-workbench`）：
+
+```bash
+dsh plugin --profile web add dsh-paper-workbench@1.2.0
+```
+
+安装前确认下方环境要求；翻译和 Agent 需要已配置模型，PDF 处理需要 Python/PyMuPDF，云端 OCR 按需配置。第三方索引的收录、版本刷新与用户机器安装分别生效；各源状态与维护方法见[分发检查](agent-docs/operations/release-and-distribution.md#四源检查与后续版本维护)。
+
 ### 方式三：终端一行安装，无需克隆
 
 Windows PowerShell 5.1+ / PowerShell 7：

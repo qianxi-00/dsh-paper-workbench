@@ -27,9 +27,9 @@ Git 同步以跟踪文件和目标分支为准，不追踪空目录。[npm 白�
 | --- | --- | --- |
 | GitHub Releases | 正式 `v1.2.0` 已发布 | 本仓库 Release workflow 生成 tarball 与 checksum；[正式版本](https://github.com/qianxi-00/dsh-paper-workbench/releases/tag/v1.2.0) |
 | npm | `latest = 1.2.0`，核查时无 `next` | 同一 Release workflow 在配置发布凭据时推送；[registry](https://registry.npmjs.org/dsh-paper-workbench) |
-| Awesome DSH Plugin | 作者首次投稿及 1.1.2 更新已合并；目录仍为 1.1.2 | [收录 PR #16657](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/16657)、[更新 #16763](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/16763)；[1.2.0 更新 #17123](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/17123) 核查时 OPEN |
+| Awesome DSH Plugin | 作者首次投稿及 1.1.2 更新已合并；1.2.0 更新仍待合并 | [收录 PR #16657](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/16657)、[更新 #16763](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/16763)；[1.2.0 更新 #17123](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/17123) 在 QIAN-25 核查时 OPEN，真实四源版本见下文 |
 | dshmarket | 展示同一社区目录数据，不是本仓库另一条发布 job | [数据源说明](https://github.com/dsh-market/dsh-market/blob/b21cf7f1c3e2da777d8e4ecf9460589ed3e1a2e9/README.zh.md#L156)、[实际目录接口](https://awesome-dsh-plugin.com/plugins.json) |
-| DSH「发现」可用索引 | 三个 Format 1 端点均有本项目，记录版本 1.1.2，`source.type=npm` | [jsDelivr](https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json)、[社区目录站](https://awesome-dsh-plugin.com/index.json)、[市场站](https://dshmarket.com/index.json)；读取公开索引不等于本机 profile 已添加索引源 |
+| DSH「发现」可用索引 | 早期快照中的三个社区端点均为 1.1.2/npm；不代表全部索引源 | [jsDelivr](https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json)、[社区目录站](https://awesome-dsh-plugin.com/index.json)、[市场站](https://dshmarket.com/index.json)；QIAN-25 指定四源的最新实测统一见下文，未操作本机 profile |
 | DSH Get | 有精确条目，标记 11 月 18 日收录、11 月 19 日同步，上游为 Awesome DSH Plugin | [公开条目](https://dshget.com/plugins/qianxi-00/dsh-paper-workbench)；未找到作者逐站投稿证据 |
 | DSH Hub | 有精确条目，快照 1.0.0，兼容性待验证 | [公开条目](https://dshhub.org/zh-CN/plugins/qianxi-00/dsh-paper-workbench/)、[自动采集流程](https://github.com/coderPerseus/dsh-hub/blob/61c6e5c70df02efff181808e0f76d93c1a76cf13/docs/catalog-pipeline.md#L28-L50)；不能当作 1.2.0 已同步 |
 | FindHarness | 有精确条目，镜像 README 为 v1.1.2，安装入口指向 GitHub | [公开条目](https://findharness.com/plugins/qianxi-00-dsh-paper-workbench)；未给出快照提交，未证实作者单独投稿 |
@@ -41,6 +41,55 @@ Git 同步以跟踪文件和目标分支为准，不追踪空目录。[npm 白�
 DSH 官方公开 [插件索引契约](https://github.com/deepseek-ai/deepseek-harness/blob/2e39e70496aa02986ca6a820c5d497e816b69d7e/docs/user/guide/plugin-market.zh.md#L21-L34) 将此能力描述为实验性组合包，索引源按 profile 配置，无内置索引源。本轮依据公开契约与实际索引响应，未操作本机「发现」界面，也不能据此声称存在已验收的官方独立市场上架流程。
 
 安装技能存在于 [本仓库](../../skills/install-dsh-paper-workbench/SKILL.md) 和 npm 实物。[Skills.sh 精确搜索](https://www.skills.sh/api/search?q=install-dsh-paper-workbench) 未命中；SkillsMP 探测 403、LobeHub 探测 404，不能证实这两个目录的收录情况。[DPharness 搜索](https://dpharness.com/api/plugins?q=dsh-paper-workbench&take=100) 未找到本仓库的精确 owner/name。以上是本轮查询边界，不是对整个互联网的排除结论。
+
+## 四源检查与后续版本维护
+
+QIAN-25 在 2026-11-20T11:44:52Z 启动四源实测，目标版仍为 1.2.0。小型 [JSON 证据](../tasks/2026-11-20-distribution-evidence.json) 保存响应时间、HTTP/解析状态、字节数、完整 SHA-256 和精确匹配条目；不保存完整索引。执行与交付证据见 [任务记录](../tasks/2026-11-20-distribution-indexes.md)，额外发行物及上游证据见 [补充 JSON](../tasks/2026-11-20-distribution-upstream-evidence.json)。
+
+| 指定源与既有记录 | 线上观测 | 当前准入或同步依赖 |
+| --- | --- | --- |
+| [Scout](https://fegnze.github.io/dsh-plugin-scout/index.json) · [#1](https://github.com/fegnze/dsh-plugin-scout/issues/1) | not-listed；466 项，包名和仓库均零匹配 | 既有申请 OPEN 无回复；生成链路提案已在作者 fork，创建上游 PR 被当前 token 拒绝。无范围 bundle 的纳入政策及默认 target 0.2.1-rc.2 兼容证据仍待维护者处理 |
+| [开放市场](https://dshopen.org/index.json) · [#552](https://github.com/polang233/dsh-plugin-index/issues/552) | verified-live；1.2.0/npm，knowledge，包含 verified 标签 | 已审核并关闭原申请；不重复投稿。未声明 DSH 范围，不能由 verified 标签反推宿主版本兼容 |
+| [Bruce](https://bruc3van.com/dsh-plugins/index.json) · [#174](https://github.com/bruc3van/awesome-dsh-plugin-pro/issues/174) | not-listed；2629 项，包名和仓库均零匹配 | approved 已通过、packages 映射缺失；当前 1 star 未满足新增映射 ≥5 stars，且需快照前 90 天有 push。普通目录核准不构成豁免 |
+| [Awesome / dshmarket](https://dshmarket.com/index.json) · [#17123](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/17123) | outdated；1.1.2/npm，docs | 现有 PR 的固定 tarball 已改 1.2.0，但 PR 未合并。源 YAML、plugins.json、主站 Format 1 和镜像仍需分别刷新 |
+
+命令在源码检出中运行，Node ≥20，无需安装 npm 依赖：
+
+```bash
+npm run distribution:check
+node scripts/check-distribution.mjs --target-version 1.2.0 --output distribution-report.json
+node scripts/test-distribution.mjs
+```
+
+默认目标取当前源码 `package.json.version`；后续发版先核对 GitHub 正式 release 与 npm latest，再显式指定已发布目标。`--output` 写 UTF-8 且拒绝覆盖已有文件，每次选新文件名。默认只向 stdout 输出 JSON；命令不导入插件运行时、不安装、不发包、不投稿。离线夹具已接入 `npm test` 的 posttest，实网检查不进 CI 门禁。
+
+退出码：0 表示所有所查源均找到唯一的精确包名/仓库与目标版 npm 来源；1 表示读取完整但有缺项、旧版本、身份/来源不符或歧义；2 表示网络、HTTP、JSON/结构或体积上限导致观测不完整。报告保留所有成功源，错误源匹配数为 null；HTTP 失败与 `not-listed` 分开。`outdated` 表示目标版不在条目版本列表中，应查看报告的实际版本，不据此猜测任意新旧版本的兼容性。
+
+`versions[].engines` 只记录索引声明，缺失就保留缺失，不填 `*`。`verified-live` 只确认索引条目和预期 npm registry，不验证包下载、签名或真实宿主兼容。`followUp.status=waiting-review/policy` 是附有 basisDate 的既有申请背景，不由脚本读取当前 GitHub 审核决定；执行外部操作前仍需刷新原线程。请求仅 GET、拒绝重定向、60 秒超时、每源解压后 12 MiB 上限；使用 Node 原生 fetch，受限网络失败时按环境排查并保留错误结果。
+
+### Scout：兼容声明与生成规则
+
+在上游 `956d0e944734649feda0bc299adeed68d913e8c2`，`slimManifest` 未保留 engines，生成器的仓库和 npm 候选两次使用 peer-only 判定，最终 exporter 却已优先采用 `engines.dsh`。提案将既有最终规则复用于前筛，并保留 engines；夹具经过真实 normalizeNode、generateMarket 和官方 Format 1 parser，覆盖 engines-only、目标不兼容、无范围、workspace 不合成范围及 engines 优先级。
+
+提案位于 [作者 fork 分支](https://github.com/qianxi-00/dsh-plugin-scout/tree/agent/qian-25-market-compatibility)，提交 `58d92d2`。当前凭据创建上游 PR 返回 `GraphQL: Resource not accessible by personal access token (createPullRequest)`，在 #1 添加证据也被 `addComment` 权限拒绝；PR 与评论均未创建。可从 [已准备的比较页](https://github.com/fegnze/dsh-plugin-scout/compare/main...qianxi-00:agent/qian-25-market-compatibility?expand=1) 接续，正文与证据见任务记录。本项目仍无 DSH 范围，提案合并也不会直接使本项目被收录。
+
+本项目没有直接 DSH npm 导入，不能为索引虚构 peer、添加无用依赖或填写未经验证的 `*`。既有 rc.5 真机记录不能证明兼容 Scout 的 rc.2 target。恢复条件是维护者明确无范围 bundle 的可持续纳入策略，或在隔离宿主上验证真实范围并走项目发布审批；此任务不触发新版本。手改会被生成覆盖的 index.json 不能作为方案。
+
+### Bruce：审核、映射、门槛与实际入选
+
+上游 `686ad0210c0ec8963be99ab3c723506fbf87255c` 的 `data/approved.json` 有本仓库，`data/packages.json` 没有。新增映射统一受 `scripts/mapping-gate.mjs` 的 ≥5 stars 与 90 天 push 门槛约束；SHOWCASE 的 >10 stars 是另一条作者自荐路径。未满足门槛时保持原申请，不创建映射 PR。
+
+门槛满足后先查看每日 `fill-catalog-mappings.yml` 是否已补映射，再按 CONTRIBUTING 修改现有 `data/packages.json` 的 entries；不创建 data/plugins YAML。准备的 web npm 目标为 `dsh-paper-workbench@1.2.0`，安装命令与前提见 [README](../../README.md#安装)。提交时按当时已发布目标复核包与仓库归属。校验入口为 `node scripts/validate-packages.mjs`、`node scripts/validate-curated.mjs --from-snapshot`、`node scripts/host-market/validate-index.mjs`；host-market 依赖按自身锁文件用 `npm ci --ignore-scripts --prefix scripts/host-market` 安装。
+
+本轮三项校验通过，packages 有 7 项既有警告，curated 有 3 项归档警告。Windows 检出若自动转 CRLF，会导致 showcase 标题和索引哈希校验失败；使用提交中的原始 LF 字节后通过，未改上游内容。线上 [audit.json](https://bruc3van.com/markets/dsh/audit.json) 的 indexSha256 与真实索引一致：2784 个合格候选，容量选择 2629，155 个未入选；本项目无映射，尚未进入这层候选。映射后仍须核对 audit 与线上 index，不能把已审核或已映射写成上线。
+
+### Awesome 与开放市场：后续版本流程
+
+1. 验证目标正式发行物：包名、仓库、版本、GitHub/npm 实物摘要。此次两份 1.2.0 tgz 都为 939030 bytes，SHA-256 `3eab6f1a789e39a87e87ce9e80bf6f232218db7e907b4dbdd8ee84e69f275b98`。
+2. 重跑四源检查，读取既有申请/PR 的意见，确定各自缺少的是审核、映射、固定包还是镜像刷新。重跑检查不执行任何投稿。
+3. Awesome 复用 #17123，分别查 `mergedAt`、源 YAML、公开 `plugins.json` 的 tarball、主站 `/index.json`、dshmarket `/index.json`。此次 YAML 和 plugins.json 仍是固定 1.1.2，主站和镜像也为 1.1.2；现有 PR head 已改固定 1.2.0。nightly 的 npm latest 探测与固定 tarball 分别生效，构建缓存、定时计划或 CI 绿色都不能代替线上 JSON。
+4. 开放市场保留 #552 与现有 `data/sources.json` 登记。未 pin 的源跟随 npm latest；`data/maintainer-reviews.json` 的审核按精确版本/完整性绑定，新版本即使自动出现，也不能继承 1.2.0 的审核结论。
+5. 完成后分别记录每个端点的时间、hash、目标版本/source、剩余依赖。维护者未回复时交付可复现成果与恢复条件，避免无新证据反复评论。包发布、公开索引和本机安装仍需分别验收。
 
 ## CI：什么时候验证、验证什么
 

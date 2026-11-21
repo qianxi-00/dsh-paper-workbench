@@ -36,6 +36,6 @@
 - **取消与 VL 补页：待专项验证。** [OCR 客户端](../../lib/ocr.js) 支持 signal，普通版面 runner 未给所有 submit/poll/fetch 透传，批量 CLI 另有注入。正常 runner 又先要求服务页齐备，缺页 VL 路径的可达性尚未证明。
 - **文档漂移。** [v4](../../docs/v4-layout.md) 的坐标描述及 [v7](../../docs/v7-quality.md) 的兼容读取、单 raw 和 refill 部分描述已滞后。以当前发布模型及源码为准，修订时保留历史语境。
 - **质量证据边界。** 已有真实语料采集记录，但 [人工 gold](../../docs/quality/README.md) 未完成；行守恒、合成样本和算法 fixture 不能推导真实论文字符召回或表格质量达标。
-- **市场版本滞后。** npm/GitHub 1.2.0 已发布，Awesome DSH Plugin 与三个 DSH Format 1 索引核查时仍为 1.1.2；1.2.0 更新 PR 未合并。不要把包发布成功写成所有市场已更新。
+- **发行渠道各自推进。** QIAN-25 已增加四源只读检查及时间戳/响应摘要证据。当前各源的收录、固定 tarball、镜像版本与外部依赖统一见 [发布运维](../operations/release-and-distribution.md#四源检查与后续版本维护) 和 [任务记录](../tasks/2026-11-20-distribution-indexes.md)。检查器的 `verified-live` 仅表示目标条目在公开索引中存在且 npm 来源正确，不证明宿主安装、兼容范围或本机 UI 已验收。
 
 修复或重新验收后，用新的提交、命令或运行链接更新条目及任务状态；过期结论可以移入带日期的交接记录，当前入口只保留仍需关注的内容。
