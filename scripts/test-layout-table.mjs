@@ -102,12 +102,12 @@ async function run(attempt) {
     assert.equal(model.rows[0].cells[0].text, 'α ≤ 0.05')
   })
 
-  await check('HTML：数字引用只解码一层且非法 Unicode 标量保持原文', () => {
+  await check('HTML：数字引用只解码一层且畸形或非法引用保持原文', () => {
     const model = buildTableModelFromHtml(
-      '<tr><td>&amp;lt; &#38;lt;</td><td>&#xD800; &#1114112; &#xZZ; &#;</td></tr><tr><td>x</td><td>y</td></tr>',
+      '<tr><td>&amp;lt; &#38;lt;</td><td>&#xD800; &#1114112; &#xZZ; &#; &#x03B1Z; &#945Z; &#945</td></tr><tr><td>x</td><td>y</td></tr>',
     )
     assert.equal(model.rows[0].cells[0].text, '&lt; &lt;')
-    assert.equal(model.rows[0].cells[1].text, '&#xD800; &#1114112; &#xZZ; &#;')
+    assert.equal(model.rows[0].cells[1].text, '&#xD800; &#1114112; &#xZZ; &#; &#x03B1Z; &#945Z; &#945')
   })
 
   await check('HTML：<br> 转成换行', () => {
