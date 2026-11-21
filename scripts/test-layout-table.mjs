@@ -14,6 +14,7 @@ import {
 } from '../lib/layout-table.js'
 
 const stats = { pass: 0, fail: 0 }
+const RUNS = 10
 
 function messageOf(error) {
   return error && error.message ? error.message : String(error)
@@ -39,8 +40,8 @@ function assertRectangular(model) {
   }
 }
 
-async function run() {
-  console.log('== 结构化表格模型（纯函数）==')
+async function run(attempt) {
+  console.log('== 结构化表格模型（纯函数，第 ' + attempt + '/' + RUNS + ' 轮）==')
 
   await check('HTML：rowspan/colspan 展开成网格占位，每行列数一致', () => {
     const html = [
@@ -85,6 +86,28 @@ async function run() {
     )
     assert.equal(model.rows[0].cells[0].text, 'A B')
     assert.equal(model.rows[0].cells[1].text, '<x> "q" \'s\' \'t\' &')
+  })
+
+  await check('HTML：十进制数字字符引用与 Unicode 文本等价', () => {
+    const model = buildTableModelFromHtml(
+      '<tr><td>&#945; &#8804; 0.05</td><td>Value</td></tr><tr><td>x</td><td>y</td></tr>',
+    )
+    assert.equal(model.rows[0].cells[0].text, 'α ≤ 0.05')
+  })
+
+  await check('HTML：十六进制数字字符引用与 Unicode 文本等价', () => {
+    const model = buildTableModelFromHtml(
+      '<tr><td>&#x03B1; &#x2264; 0.05</td><td>Value</td></tr><tr><td>x</td><td>y</td></tr>',
+    )
+    assert.equal(model.rows[0].cells[0].text, 'α ≤ 0.05')
+  })
+
+  await check('HTML：数字引用只解码一层且畸形或非法引用保持原文', () => {
+    const model = buildTableModelFromHtml(
+      '<tr><td>&amp;lt; &#38;lt;</td><td>&#xD800; &#1114112; &#xZZ; &#; &#x03B1Z; &#945Z; &#945</td></tr><tr><td>x</td><td>y</td></tr>',
+    )
+    assert.equal(model.rows[0].cells[0].text, '&lt; &lt;')
+    assert.equal(model.rows[0].cells[1].text, '&#xD800; &#1114112; &#xZZ; &#; &#x03B1Z; &#945Z; &#945')
   })
 
   await check('HTML：<br> 转成换行', () => {
@@ -168,7 +191,7 @@ async function run() {
 }
 
 try {
-  await run()
+  for (let attempt = 1; attempt <= RUNS; attempt += 1) await run(attempt)
 } catch (error) {
   stats.fail += 1
   console.log('FAIL  测试脚本自身异常')
