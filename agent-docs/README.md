@@ -6,6 +6,7 @@
 
 1. 先读根 [AGENTS.md](../AGENTS.md)，确认本次任务的工程边界。
 2. 读 [项目状态与证据](memory/project-state.md)，核对记录日期、分支和未验事项；这些是快照，接手时重新检查 Git 与当前环境。
+   任务生命周期、失败运行及 Loop 调度边界另见 [2026-11-25 任务与运行盘点](memory/2026-11-25-task-run-audit.md)。
 3. 涉及实现时按 [架构索引](memory/architecture.md) 找源码、契约与测试；涉及远端、市场、安装或版本发布时读 [仓库与发布运维](operations/release-and-distribution.md)。
 4. 接续较大任务时，再读相应 [计划](plans/README.md)、[任务记录](tasks/README.md) 和 [交接](handoffs/README.md)。按需阅读，不把全部历史文档自动塞进每次上下文。
 
