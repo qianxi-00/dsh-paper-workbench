@@ -2,6 +2,8 @@
 
 核查日期：2026-11-20（Asia/Shanghai）。这里记录本轮调研基线、已验证结果和接续事项，不是远端状态的实时镜像。新任务先读根 [AGENTS.md](../../AGENTS.md)，再按 [资料维护规则](../README.md) 更新有变化的结论。
 
+后续的任务状态、失败/取消运行及 Loop 准入与调度快照见 [2026-11-25 项目任务盘点](2026-11-25-task-run-audit.md)。该报告使用当日 Multica/GitHub 与附件证据，保留本页 11-20 的历史验证范围，不把新任务交付或离线测试视为真实环境已验收。
+
 ## 本地与远端
 
 项目为公开仓库 [qianxi-00/dsh-paper-workbench](https://github.com/qianxi-00/dsh-paper-workbench)，默认分支 `main`。本轮开始时，GitHub 远端只有四个核心分支；本地另有未合并的 Agent 工作分支。不要因为远端分支较少就删除本地未合并工作。
