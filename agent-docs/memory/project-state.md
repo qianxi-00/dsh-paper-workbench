@@ -34,7 +34,7 @@
 
 以下为源码调研得出的待核实事项，未在本轮修复；对应可执行任务见 [维护 backlog](../tasks/2026-11-20-maintenance-backlog.md)。
 
-- **多 raw 页身份：静态风险。** [IR 构造器](../../lib/layout-ir.js) 的页对象未持久化 `rawRef`，而 [离线重建](../../scripts/quality/rebuild-layout.mjs) 和 [refill](../../lib/layout.js) 优先读取 `pages[].rawRef`；缺失时扫描 raw 目录并按批内局部页号 first-wins，可能跨批错配或混入旧 raw。尚未构造复现，不能定性为已发生故障，也不能承诺多批回放可靠。
+- **多 raw 页身份：已复现，修复候选待独立验收。** 2026-11-26 在 dev@310fe96 的原探针确认多批回填会发布缺正文版本（GitHub #7 / QIAN-69），不再仅是 11-20 的静态风险。本候选保存页级来源并共用严格的当前版本 raw 回放规则，覆盖旧版恢复及歧义拒绝；尚未合入或关单。实现、验证与未测边界见[候选任务记录](../tasks/2026-11-26-layout-raw-replay.md)，不要将候选能力视为已发布保证。
 - **取消与 VL 补页：待专项验证。** [OCR 客户端](../../lib/ocr.js) 支持 signal，普通版面 runner 未给所有 submit/poll/fetch 透传，批量 CLI 另有注入。正常 runner 又先要求服务页齐备，缺页 VL 路径的可达性尚未证明。
 - **文档漂移。** [v4](../../docs/v4-layout.md) 的坐标描述及 [v7](../../docs/v7-quality.md) 的兼容读取、单 raw 和 refill 部分描述已滞后。以当前发布模型及源码为准，修订时保留历史语境。
 - **质量证据边界。** 已有真实语料采集记录，但 [人工 gold](../../docs/quality/README.md) 未完成；行守恒、合成样本和算法 fixture 不能推导真实论文字符召回或表格质量达标。

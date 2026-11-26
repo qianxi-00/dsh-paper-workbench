@@ -58,7 +58,7 @@ node scripts/quality/rebuild-layout.mjs <paperId>            # dry-run
 node scripts/quality/rebuild-layout.mjs <paperId> --apply    # 发布新 revision
 ```
 
-当前版本要求该论文恰好有一个 raw JSONL（正常单次解析就是如此）；多批上传的论文需要重新解析或后续扩展。
+离线重建与 schemaVersion 2 回填共用当前 revision 的 raw 来源解析：页级 `rawRef` 保留上传批次范围，旧版可从块级或顶层引用恢复。支持多批及乱序结果，只读取当前版本引用的归档，不扫描目录中的旧 raw。局部页号必须完整且唯一；来源缺失、范围冲突或无法唯一恢复时在发布前拒绝，保留 current、兼容投影和历史。合法空白页及 `needs_review` 仍按原质量规则处理；其他模型的补充来源暂不支持安全回放时明确拒绝，不丢弃候选后发布。
 
 ## 质量语义
 
@@ -78,7 +78,7 @@ node scripts/quality/rebuild-layout.mjs <paperId> --apply    # 发布新 revisio
 - `layout.status`：`layout` 附加 `schemaVersion/revision/quality/pages[{n,status,issues,summary,fallback}]`；`summary` 区分 `blocking`（需要人工判断）和 `informational`（候选冲突、行救回等提示，不单独阻塞阅读）。
 - `layout.report`：只读质量报告（页状态、问题清单、`summary`、被排除块）。
 - `layout.start` / `layout.run`：**默认续跑**（同一 PDF + 同一模型才认断点，已完成的批次整批跳过、不重复上传）；只有显式传 `resume:false` 才丢弃断点。
-- `layout.cancel` / `layout.refill` / `layout.tables` / `layout.clear`：`refill` 对 schemaVersion 2 是无操作；`layout.clear` 同时清断点与任务状态。
+- `layout.cancel` / `layout.refill` / `layout.tables` / `layout.clear`：`refill` 对带 raw 的 schemaVersion 2 离线重建并发布新 revision，不重新上传；纯 PDF 模型无云端证据可回放时保持无操作。`layout.clear` 同时清断点与任务状态。
 
 ## 已知边界（不得冒称达标）
 
