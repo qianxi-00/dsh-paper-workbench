@@ -33,3 +33,16 @@
 - 失败用例逐字节比较 current、layout.json、doc.json、raw/input/revision/PDF；成功验证历史不变和重复回填。
 - 真实 UI、真实 OCR/VL、PG/MySQL、Vault、真实复杂论文以及并发 refill/clear 未测，不能把合成结果当成这些范围通过。
 - dev 的已知 macOS/Node 22 CI 失败保留；候选 head CI 单独读回，无轮询等待。
+
+## PR #10 R1/R2/S1 返修（2026-11-26）
+
+固定退回点 f96a9953d506cfdb8448f67d07392bf4d578d322；沿用原分支和 PR，负责人评论 01a215e8-aab6-77ee-8170-570598ab3788 已授权。
+
+- [x] 恢复工具并确认 clean 工作树、PR head/base；校验独立证据包。
+- [x] 用独立测试的未经 base 回填档案先断言 ir-4、主模型、raw 范围及 service 角色，再复现 R1 拒绝和 R2 云端误分流；环境 EPERM 单列。
+- [x] `scripts/test-layout-replay.mjs` 扩展主模型 runner 回归；`scripts/test-layout-legacy-replay.mjs` 用冻结真实旧档案测 runner/CLI/批量，纳入 npm test。未改产品时观察预期红灯。
+- [x] `lib/layout.js` 将模型校验绑定到 layout.model，保留 service 角色、hash、范围及完整唯一映射检查。
+- [x] `scripts/batch-layout.mjs` 仅显式离线回填接纳 ir-4，避免该分支先补跑收费 OCR；最终 published/derived 仍严格要求 ir-5。实际批量升级、零网络/零上传、未知 build 不放行及歧义保护回归默认十轮 80/0。
+- [x] 同步 `docs/v7-quality.md` 当前 build、rawRef 及历史兼容；未修改原探针、CI 判定或云端轮询。
+
+提交交付检查：在新精确 head 重跑原探针两种 batch 各十次、新旧回归和完整 npm/posttest；更新同一 PR 并读取 CI 当前状态，交回补验，不合入关单。精确 head、实际命令和结果记 QIAN-69 最终交付评论，不在文档中自引用本次提交 SHA。

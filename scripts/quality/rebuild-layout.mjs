@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 用已归档的 PP-StructureV3 raw 重建 schemaVersion 2 页面模型，不重新上传 PDF。
+ * 用已归档的主服务 raw 重建 schemaVersion 2 页面模型，不重新上传 PDF。
  * 默认 dry-run，只打印摘要；--apply 才发布为新 revision（旧 revision 永久保留）。
  *
  *   node scripts/quality/rebuild-layout.mjs <paperId> [--data=<数据根>] [--apply]

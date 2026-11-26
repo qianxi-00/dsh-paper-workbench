@@ -23,11 +23,11 @@ const numbers = pages => pages.map(page => page.n).sort((left, right) => left - 
 const complete = (pages, total) => pages.length === total && pages.every((page, index) => page === index + 1)
 const fresh = () => ({ status: 'queued', stage: 'inspect', pdf: null, coveredPages: [], jobIds: [], attempts: 0, error: null })
 
-async function published(id, source) {
+async function published(id, source, allowLegacy = false) {
   try {
     const layout = await archive.readPublished(id)
     const pointer = await read(id, 'layout-data/current.json')
-    if (layout?.schemaVersion !== 2 || layout.build !== LAYOUT_BUILD || !pointer?.revision || layout.revision !== pointer.revision ||
+    if (layout?.schemaVersion !== 2 || !(layout.build === LAYOUT_BUILD || (allowLegacy && layout.build === 'ir-4')) || !pointer?.revision || layout.revision !== pointer.revision ||
         pointer.sourceHash !== source.sha256 || layout.source?.sha256 !== source.sha256 || layout.pageCount !== source.pages ||
         !complete(numbers(layout.pages), source.pages) || layout.pages.some(page => page.status === 'failed') ||
         !['passed', 'needs_review'].includes(layout.quality?.status) || !layout.rawRefs?.length) return null
@@ -92,11 +92,11 @@ async function main() {
       const same = record.pdf?.sha256 === source.sha256 && record.pdf?.pages === source.pages
       if (!same) record = manifest.papers[id] = fresh()
       record.pdf = { sha256: source.sha256, pages: source.pages }
-      let layout = await published(id, source)
-      const ocrReady = () => store.readOcr(id).then(text => complete([...text.matchAll(/^## p\.(\d+)\s*$/gm)].map(match => Number(match[1])), source.pages))
-      const needsOcr = hasText === false && (!(record.ocrComplete || layout) || !(await ocrReady()))
       const force = has('--force') || record.forcePending === true
+      let layout = await published(id, source, has('--refill-existing') && !force)
       const refill = has('--refill-existing') && layout && !force
+      const ocrReady = () => store.readOcr(id).then(text => complete([...text.matchAll(/^## p\.(\d+)\s*$/gm)].map(match => Number(match[1])), source.pages))
+      const needsOcr = !refill && hasText === false && (!(record.ocrComplete || layout) || !(await ocrReady()))
       const finish = () => Object.assign(record, { status: 'done', stage: 'complete', error: null, forcePending: false,
         coveredPages: numbers(layout.pages), jobIds: [...new Set([...record.jobIds, ...layout.rawRefs.map(ref => ref.jobId).filter(Boolean)])] })
       if (!needsOcr && layout && !force && !refill && await derived(id, layout, source)) {

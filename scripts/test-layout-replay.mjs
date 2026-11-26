@@ -32,7 +32,7 @@ function row(text, index) {
     parsing_res_list: text ? [{ block_label: 'text', block_content: text, block_bbox: [20, 40, 580, 80] }] : [],
   } }] } })
 }
-async function fixture({ values = texts, batchPages = 2, reverse = false } = {}) {
+async function fixture({ values = texts, batchPages = 2, reverse = false, model } = {}) {
   const id = 'replay-' + (++sequence)
   const source = path.join(root, id + '.pdf')
   await fs.writeFile(source, 'Unique fixture PDF bytes: ' + id)
@@ -59,7 +59,7 @@ async function fixture({ values = texts, batchPages = 2, reverse = false } = {})
       return { text: (reverse ? rows.reverse() : rows).join('\n') }
     },
   } })
-  await runner.runLayout(id, { batchPages, resume: false })
+  await runner.runLayout(id, { batchPages, resume: false, model })
   return { id, runner, submits: () => submits,
     expected: values.flatMap((value, i) => value ? [[i + 1, value]] : []) }
 }
@@ -114,6 +114,11 @@ function cliRun(id, apply = true) {
 try {
   // Ten independent fixtures per case run locally and through the existing CI npm test step.
   for (let round = 1; round <= Number(process.env.PB_REPLAY_ROUNDS || 10); round++) {
+    await check(`${round}: configured non-default primary model retains service provenance offline`, async () => {
+      const f = await fixture({ model: 'PaddleOCR-VL-1.6' })
+      assert.equal((await archive.readPublished(f.id)).model, 'PaddleOCR-VL-1.6')
+      await refill(f, 2)
+    })
     await check(`${round}: three batches retain provenance, non-first offsets and repeated refill`, async () => {
       const f = await fixture({ reverse: true })
       const layout = await archive.readPublished(f.id)

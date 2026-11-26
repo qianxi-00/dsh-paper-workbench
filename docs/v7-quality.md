@@ -25,10 +25,11 @@ PDF
 
 ## IR 契约（schemaVersion 2）
 
-- `version: 1`、`schemaVersion: 2`、`build: 'ir-4'`、`revision`（输入语义 hash，不含时间戳）。
+- `version: 1`、`schemaVersion: 2`、`build: 'ir-5'`、`revision`（输入语义 hash，不含时间戳）。
 - `source: {sha256, path, size, mtimeMs}`：发行版本必须绑定 PDF 内容 hash。
-- `pages[]`：`{n, pageId, width, height, status: ready|needs_review|failed, quality, blockIds, lineAssignments, fallback?}`。
+- `pages[]`：`{n, pageId, width, height, rawRef, status: ready|needs_review|failed, quality, blockIds, lineAssignments, fallback?}`。
   每页都有记录，缺页不压缩页号。`failed` 页保留 `fallback: {kind:'original-page', page:n}`。
+  `rawRef` 是主服务 raw 的独立副本，含 `{hash, file?, page, model?, jobId?}`；`page` 为 1-based 全局批次闭区间（如 `3-4`），空白服务页也保留，纯 PDF 页为 `null`。
 - `blocks[]`：旧字段 `{page, order, kind, label, text, bbox:{x,y,width,height}, level?, latex?, html?, table?, figureIndex?}`
   + 证据字段 `{blockId, pageId, sourceHash, candidates[], selectedSource, selectionReason, fragments[], quality, sourceBlockIds[]}`。
   `blockId` 只由 PDF hash + 页 + 服务块身份决定，文字修正不改变它；`sourceHash` 随文字变化。
@@ -59,6 +60,10 @@ node scripts/quality/rebuild-layout.mjs <paperId> --apply    # 发布新 revisio
 ```
 
 离线重建与 schemaVersion 2 回填共用当前 revision 的 raw 来源解析：页级 `rawRef` 保留上传批次范围，旧版可从块级或顶层引用恢复。支持多批及乱序结果，只读取当前版本引用的归档，不扫描目录中的旧 raw。局部页号必须完整且唯一；来源缺失、范围冲突或无法唯一恢复时在发布前拒绝，保留 current、兼容投影和历史。合法空白页及 `needs_review` 仍按原质量规则处理；其他模型的补充来源暂不支持安全回放时明确拒绝，不丢弃候选后发布。
+
+历史 `ir-4` 没有页级 `rawRef`，仍可从当前归档的完整、唯一批次引用离线升级为 `ir-5`，不改旧 revision/input/raw。`source='service'` 的既有主模型（包括以主模型运行的 PaddleOCR-VL-1.6）按 `layout.model` 与引用模型一致性校验；它与 `source='vl'` 的补充候选是不同角色，后者仍明确拒绝安全回放。
+
+批量 `node scripts/batch-layout.mjs --refill-existing` 在未 force 时也接纳通过 PDF 指纹、页覆盖、质量及 raw hash 校验的 `ir-4`，走共享离线回填，不补跑收费 OCR、不重传；dry-run 显示“离线重建”。来源歧义由回放校验拒绝，不能失败后转云端。发布后的版面及派生文档仍严格要求当前 `ir-5`；未知 build、不带回填选项或显式 force 不通过这条旧版兼容分支。
 
 ## 质量语义
 
