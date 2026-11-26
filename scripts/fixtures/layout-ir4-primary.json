@@ -1,0 +1,396 @@
+{
+  "producer": "310fe96d6579a47e4b63c150ac37e658a0c4420d",
+  "baseRefillPerformed": false,
+  "pdfBase64": "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUiA0IDAgUl0gL0NvdW50IDIgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MDAgODAwXSA+PgplbmRvYmoKNCAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYwMCA4MDBdID4+CmVuZG9iagp4cmVmCjAgNQowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTIxIDAwMDAwIG4gCjAwMDAwMDAxOTIgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA1IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgoyNjMKJSVFT0YK",
+  "raw": "{\"result\":{\"layoutParsingResults\":[{\"prunedResult\":{\"page_index\":0,\"width\":600,\"height\":800,\"parsing_res_list\":[{\"block_label\":\"text\",\"block_content\":\"Existing primary Alpha.\",\"block_bbox\":[20,40,580,80]}]}}]}}\n{\"result\":{\"layoutParsingResults\":[{\"prunedResult\":{\"page_index\":1,\"width\":600,\"height\":800,\"parsing_res_list\":[{\"block_label\":\"text\",\"block_content\":\"Existing primary Beta.\",\"block_bbox\":[20,40,580,80]}]}}]}}",
+  "layout": {
+    "version": 1,
+    "schemaVersion": 2,
+    "build": "ir-4",
+    "revision": "4684c13212c7578dadd53139a8fd502cf92762926e8e451e09e24cc11bbbf88c",
+    "at": "2026-11-26T03:36:42.668Z",
+    "model": "PaddleOCR-VL-1.6",
+    "jobId": "synthetic-primary-job",
+    "source": {
+      "path": "fixtures/layout-ir4-primary.pdf",
+      "sha256": "792103923e7c20caa6ca40595e251416242f70d4aee0a881611ba69a1782f064",
+      "size": 426,
+      "mtimeMs": 1795664202649
+    },
+    "pageCount": 2,
+    "servicePages": 2,
+    "warnings": [],
+    "blocks": [
+      {
+        "page": 1,
+        "pageId": "p-d821666c92dbc8f14a11ba44",
+        "blockId": "b-5eda307abd0c0ffb9e25c1d2",
+        "order": 0,
+        "kind": "body",
+        "label": "text",
+        "bbox": {
+          "x": 20,
+          "y": 40,
+          "width": 560,
+          "height": 40
+        },
+        "rawBBox": {
+          "x": 20,
+          "y": 40,
+          "width": 560,
+          "height": 40
+        },
+        "geometryTrusted": true,
+        "sourceOrder": null,
+        "sourceBlocks": [
+          {
+            "source": "service",
+            "id": null,
+            "order": null,
+            "bbox": {
+              "x": 20,
+              "y": 40,
+              "width": 560,
+              "height": 40
+            },
+            "rawRef": {
+              "hash": "a269fae8420453707ce3b5bfb2afb02fa1604fc3bf396b1446694ff44c11ea4f",
+              "file": "raw/a269fae8420453707ce3b5bfb2afb02fa1604fc3bf396b1446694ff44c11ea4f.jsonl",
+              "page": "1-2",
+              "model": "PaddleOCR-VL-1.6",
+              "jobId": "synthetic-primary-job"
+            }
+          }
+        ],
+        "candidates": [
+          {
+            "source": "service",
+            "text": "Existing primary Alpha.",
+            "score": null,
+            "rawRef": {
+              "hash": "a269fae8420453707ce3b5bfb2afb02fa1604fc3bf396b1446694ff44c11ea4f",
+              "file": "raw/a269fae8420453707ce3b5bfb2afb02fa1604fc3bf396b1446694ff44c11ea4f.jsonl",
+              "page": "1-2",
+              "model": "PaddleOCR-VL-1.6",
+              "jobId": "synthetic-primary-job"
+            }
+          }
+        ],
+        "fragments": [
+          {
+            "page": 1,
+            "bbox": {
+              "x": 20,
+              "y": 40,
+              "width": 560,
+              "height": 40
+            },
+            "lineIds": []
+          }
+        ],
+        "sourceBlockIds": [],
+        "quality": {
+          "status": "needs_review",
+          "issues": [
+            {
+              "code": "unverified-model-text",
+              "page": 1,
+              "blockId": "b-5eda307abd0c0ffb9e25c1d2"
+            }
+          ],
+          "summary": {
+            "blocking": 1,
+            "informational": 0
+          }
+        },
+        "text": "Existing primary Alpha.",
+        "selectedSource": "service",
+        "selectionReason": "best-readable-model-candidate",
+        "sourceHash": "eb08dfb04a4d188d320465ef7291ce1bf22ec0f9205cc897357d7a9d7bdf7891"
+      },
+      {
+        "page": 2,
+        "pageId": "p-f1fd01fcc79ec7e5e590b094",
+        "blockId": "b-776b14b0609b8a61c2931d7b",
+        "order": 1,
+        "kind": "body",
+        "label": "text",
+        "bbox": {
+          "x": 20,
+          "y": 40,
+          "width": 560,
+          "height": 40
+        },
+        "rawBBox": {
+          "x": 20,
+          "y": 40,
+          "width": 560,
+          "height": 40
+        },
+        "geometryTrusted": true,
+        "sourceOrder": null,
+        "sourceBlocks": [
+          {
+            "source": "service",
+            "id": null,
+            "order": null,
+            "bbox": {
+              "x": 20,
+              "y": 40,
+              "width": 560,
+              "height": 40
+            },
+            "rawRef": {
+              "hash": "a269fae8420453707ce3b5bfb2afb02fa1604fc3bf396b1446694ff44c11ea4f",
+              "file": "raw/a269fae8420453707ce3b5bfb2afb02fa1604fc3bf396b1446694ff44c11ea4f.jsonl",
+              "page": "1-2",
+              "model": "PaddleOCR-VL-1.6",
+              "jobId": "synthetic-primary-job"
+            }
+          }
+        ],
+        "candidates": [
+          {
+            "source": "service",
+            "text": "Existing primary Beta.",
+            "score": null,
+            "rawRef": {
+              "hash": "a269fae8420453707ce3b5bfb2afb02fa1604fc3bf396b1446694ff44c11ea4f",
+              "file": "raw/a269fae8420453707ce3b5bfb2afb02fa1604fc3bf396b1446694ff44c11ea4f.jsonl",
+              "page": "1-2",
+              "model": "PaddleOCR-VL-1.6",
+              "jobId": "synthetic-primary-job"
+            }
+          }
+        ],
+        "fragments": [
+          {
+            "page": 2,
+            "bbox": {
+              "x": 20,
+              "y": 40,
+              "width": 560,
+              "height": 40
+            },
+            "lineIds": []
+          }
+        ],
+        "sourceBlockIds": [],
+        "quality": {
+          "status": "needs_review",
+          "issues": [
+            {
+              "code": "unverified-model-text",
+              "page": 2,
+              "blockId": "b-776b14b0609b8a61c2931d7b"
+            }
+          ],
+          "summary": {
+            "blocking": 1,
+            "informational": 0
+          }
+        },
+        "text": "Existing primary Beta.",
+        "selectedSource": "service",
+        "selectionReason": "best-readable-model-candidate",
+        "sourceHash": "6d766715552ea369aea39be0a7e9a3bff81b4343e4dd1f687c4f0e2140f126e4"
+      }
+    ],
+    "excluded": [],
+    "figures": [],
+    "pages": [
+      {
+        "n": 1,
+        "pageId": "p-d821666c92dbc8f14a11ba44",
+        "width": 600,
+        "height": 800,
+        "rotation": null,
+        "cropbox": null,
+        "nativeToRendered": null,
+        "status": "needs_review",
+        "quality": {
+          "status": "needs_review",
+          "issues": [
+            {
+              "code": "unverified-model-text",
+              "page": 1,
+              "blockId": "b-5eda307abd0c0ffb9e25c1d2"
+            }
+          ],
+          "summary": {
+            "blocking": 1,
+            "informational": 0
+          }
+        },
+        "blockIds": [
+          "b-5eda307abd0c0ffb9e25c1d2"
+        ],
+        "lineAssignments": [],
+        "unassignedLineIds": [],
+        "transforms": {
+          "service": {
+            "matrix": [
+              1,
+              0,
+              0,
+              1,
+              0,
+              0
+            ],
+            "status": "known",
+            "from": {
+              "width": 600,
+              "height": 800,
+              "rotation": 0
+            },
+            "to": {
+              "width": 600,
+              "height": 800
+            }
+          },
+          "vl": {
+            "matrix": null,
+            "status": "absent"
+          },
+          "pdf": {
+            "matrix": [
+              1,
+              0,
+              0,
+              1,
+              0,
+              0
+            ],
+            "status": "known",
+            "coordinateSpace": "rendered"
+          }
+        },
+        "fallback": {
+          "kind": "original-page",
+          "page": 1
+        }
+      },
+      {
+        "n": 2,
+        "pageId": "p-f1fd01fcc79ec7e5e590b094",
+        "width": 600,
+        "height": 800,
+        "rotation": null,
+        "cropbox": null,
+        "nativeToRendered": null,
+        "status": "needs_review",
+        "quality": {
+          "status": "needs_review",
+          "issues": [
+            {
+              "code": "unverified-model-text",
+              "page": 2,
+              "blockId": "b-776b14b0609b8a61c2931d7b"
+            }
+          ],
+          "summary": {
+            "blocking": 1,
+            "informational": 0
+          }
+        },
+        "blockIds": [
+          "b-776b14b0609b8a61c2931d7b"
+        ],
+        "lineAssignments": [],
+        "unassignedLineIds": [],
+        "transforms": {
+          "service": {
+            "matrix": [
+              1,
+              0,
+              0,
+              1,
+              0,
+              0
+            ],
+            "status": "known",
+            "from": {
+              "width": 600,
+              "height": 800,
+              "rotation": 0
+            },
+            "to": {
+              "width": 600,
+              "height": 800
+            }
+          },
+          "vl": {
+            "matrix": null,
+            "status": "absent"
+          },
+          "pdf": {
+            "matrix": [
+              1,
+              0,
+              0,
+              1,
+              0,
+              0
+            ],
+            "status": "known",
+            "coordinateSpace": "rendered"
+          }
+        },
+        "fallback": {
+          "kind": "original-page",
+          "page": 2
+        }
+      }
+    ],
+    "quality": {
+      "status": "needs_review",
+      "issues": [
+        {
+          "code": "unverified-model-text",
+          "page": 1,
+          "blockId": "b-5eda307abd0c0ffb9e25c1d2"
+        },
+        {
+          "code": "unverified-model-text",
+          "page": 2,
+          "blockId": "b-776b14b0609b8a61c2931d7b"
+        }
+      ],
+      "summary": {
+        "blocking": 2,
+        "informational": 0
+      },
+      "metrics": {
+        "pdfLines": 0,
+        "assignedLines": 0,
+        "excludedLines": 0,
+        "unassignedLines": 0
+      }
+    },
+    "rawRefs": [
+      {
+        "hash": "a269fae8420453707ce3b5bfb2afb02fa1604fc3bf396b1446694ff44c11ea4f",
+        "file": "raw/a269fae8420453707ce3b5bfb2afb02fa1604fc3bf396b1446694ff44c11ea4f.jsonl",
+        "page": "1-2",
+        "model": "PaddleOCR-VL-1.6",
+        "jobId": "synthetic-primary-job"
+      }
+    ],
+    "skipped": 0,
+    "resumedPages": 0,
+    "batchPages": 2,
+    "tables": 0
+  },
+  "input": {
+    "source": {
+      "path": "fixtures/layout-ir4-primary.pdf",
+      "sha256": "792103923e7c20caa6ca40595e251416242f70d4aee0a881611ba69a1782f064",
+      "size": 426,
+      "mtimeMs": 1795664202649
+    },
+    "model": "PaddleOCR-VL-1.6",
+    "jobId": "synthetic-primary-job",
+    "pageCount": 2,
+    "batchPages": 2
+  }
+}
