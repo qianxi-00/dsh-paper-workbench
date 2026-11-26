@@ -32,6 +32,7 @@ for (const source of [golden.layout.source, golden.input.source]) assert.equal(s
 assert.doesNotMatch(goldenBytes.toString(), /[A-Za-z]:[\\/]/, 'Fixture must not expose a machine path')
 let sequence = 0, passed = 0, failed = 0, ocrCalls = 0
 const childPids = new Set()
+const cliResults = [], shapeResults = []
 const forbiddenOcr = Object.fromEntries(['submitJob', 'pollJob', 'fetchResults'].map(name => [name, async () => {
   ocrCalls++; throw new Error('Offline replay attempted ' + name)
 }]))
@@ -119,6 +120,7 @@ function cli(f, target, args) {
   })
   assert.ifError(result.error)
   childPids.add(result.pid)
+  cliResults.push({ id: f.id, target, args, pid: result.pid, code: result.status, stdout: result.stdout, stderr: result.stderr })
   return { code: result.status, output: result.stdout + result.stderr }
 }
 async function upgraded(f, before) {
@@ -139,8 +141,61 @@ async function check(name, task) {
   catch (error) { failed++; console.error('FAIL ' + name + '\n' + error.stack) }
 }
 
+// Reference-shape mutations are explicit derivatives of the frozen archive;
+// never run the runner on the batch input before testing that input's shape.
+async function shapedFixture(build, shape) {
+  const f = await fixture()
+  if (build === 'ir-5') await f.runner.refillText(f.id)
+  const layout = await archive.readPublished(f.id), ref = structuredClone(layout.rawRefs[0])
+  layout.rawRefs = []
+  for (const page of layout.pages) delete page.rawRef
+  for (const block of layout.blocks) { block.sourceBlocks = []; block.candidates = [] }
+  const top = () => { layout.rawRefs = [structuredClone(ref)] }
+  const pages = hashOnly => { for (const page of layout.pages) page.rawRef = hashOnly ? { hash: ref.hash } : structuredClone(ref) }
+  const blocks = hashOnly => {
+    for (const block of layout.blocks) block.sourceBlocks = [{ source: 'service', rawRef: hashOnly ? { hash: ref.hash } : structuredClone(ref) }]
+  }
+  switch (shape) {
+    case 'top-only': top(); break
+    case 'page-only': pages(false); break
+    case 'page-hash-only': pages(true); break
+    case 'block-only': blocks(false); break
+    case 'block-hash-only': blocks(true); break
+    case 'mixed': top(); pages(false); blocks(false); break
+    case 'top-incomplete': top(); layout.rawRefs[0].page = '1-1'; break
+    case 'page-incomplete': pages(true); delete layout.pages[1].rawRef; break
+    case 'block-incomplete': blocks(true); layout.blocks[1].sourceBlocks = []; break
+    case 'mixed-conflict':
+      top(); blocks(false)
+      layout.pages[0].rawRef = await archive.saveRaw(f.id, golden.raw.replace('Existing primary Alpha.', 'Conflicting first page.'), { ...ref, page: '1-2' })
+      break
+    case 'mixed-range-conflict': top(); pages(false); layout.pages[1].rawRef.page = '1-1'; break
+    case 'no-references': break
+    default: throw new Error('Unknown reference shape: ' + shape)
+  }
+  const input = await archive.readInput(f.id, layout.revision)
+  await archive.publishDerived(f.id, layout, input)
+  const actual = await archive.readPublished(f.id)
+  assert.equal(actual.build, build)
+  assert.equal(actual.model, 'PaddleOCR-VL-1.6')
+  assert.equal(actual.servicePages, 2)
+  assert.deepEqual(content(actual), expected)
+  return f
+}
+async function shapeUpgrade(f, before, target) {
+  const layout = await archive.readPublished(f.id)
+  assert.equal(layout.build, 'ir-5')
+  assert.equal(layout.model, 'PaddleOCR-VL-1.6')
+  assert.deepEqual(content(layout), expected)
+  assert.deepEqual(layout.pages.map(page => page.n), [1, 2])
+  assert(layout.pages.every(page => page.rawRef.hash === sha(golden.raw) && page.rawRef.page === '1-2'))
+  history(before, await snapshot(f))
+  if (target === 'runner') assert.equal((await snapshot(f))['doc.json'], before['doc.json'])
+  else assert.equal((await read(store.paperFile(f.id, 'doc.json'))).revision, layout.revision)
+}
+
 try {
-  for (let round = 1; round <= Number(process.env.PB_REPLAY_ROUNDS || 10); round++) {
+  for (let round = 1; process.env.PB_REFILL_SHAPES_ONLY !== '1' && round <= Number(process.env.PB_REPLAY_ROUNDS || 10); round++) {
     await check(`${round}: pristine ir-4 primary runner upgrades and repeats offline`, async () => {
       const f = await fixture(), before = await snapshot(f)
       await f.runner.refillText(f.id)
@@ -255,13 +310,78 @@ try {
       assert.deepEqual(await snapshot(f), before)
     })
   }
+  // One complete shape sweep per build; the existing R1-R3 matrix above still
+  // defaults to ten rounds. Filters are only for a focused red/green loop.
+  for (const build of ['ir-4', 'ir-5']) for (const [shape, reason] of [
+    ['top-only', null], ['page-only', null], ['page-hash-only', null],
+    ['block-only', null], ['block-hash-only', null], ['mixed', null],
+    ['top-incomplete', /raw 页数与批次范围不符/],
+    ['page-incomplete', /无法恢复 raw 的完整页绑定/],
+    ['block-incomplete', /无法恢复 raw 的完整页绑定/],
+    ['mixed-conflict', /多个 raw 争用同一全局页/],
+    ['mixed-range-conflict', /页绑定与批次范围冲突/],
+    ['no-references', /缺少原始来源引用/],
+  ]) {
+    if (process.env.PB_REFILL_SHAPE_FILTER && !process.env.PB_REFILL_SHAPE_FILTER.split(',').includes(shape)) continue
+    await check(`${build}: ${shape} agrees across runner/rebuild/batch without cloud`, async () => {
+      const f = await shapedFixture(build, shape), r = await shapedFixture(build, shape), b = await shapedFixture(build, shape)
+      const before = await snapshot(f), rb = await snapshot(r), bb = await snapshot(b)
+      await store.setConfig({ ocr: { token: randomUUID(), maxCloudPages: 0 } })
+      try {
+        let runnerError = null
+        try { await f.runner.refillText(f.id) } catch (error) { runnerError = error.message }
+        const rd = cli(r, 'rebuild', [])
+        const rebuildDryUnchanged = JSON.stringify(await snapshot(r)) === JSON.stringify(rb)
+        const ra = cli(r, 'rebuild', ['--apply'])
+        const bd = cli(b, 'batch', ['--dry-run', '--refill-existing'])
+        const ordinary = cli(b, 'batch', ['--dry-run']), force = cli(b, 'batch', ['--dry-run', '--refill-existing', '--force'])
+        const batchDryUnchanged = JSON.stringify(await snapshot(b)) === JSON.stringify(bb)
+        const ba = cli(b, 'batch', ['--refill-existing'])
+        const record = (await read(path.join(root, '.batch-layout/manifest.json'))).papers[b.id]
+        shapeResults.push({ build, shape, expected: reason ? 'reject' : 'offline', runnerError,
+          runnerId: f.id, rebuildId: r.id, batchId: b.id, rebuildDry: rd, rebuildApply: ra, batchDry: bd, batchApply: ba,
+          ordinary, force, rebuildDryUnchanged, batchDryUnchanged, record, runnerBefore: before, runnerAfter: await snapshot(f),
+          rebuildBefore: rb, rebuildAfter: await snapshot(r), batchBefore: bb, batchAfter: await snapshot(b) })
+        if (reason) {
+          assert.match(runnerError || '', reason)
+          for (const result of [rd, ra, bd, ba]) { assert.equal(result.code, 1, result.output); assert.match(result.output, reason) }
+          assert.deepEqual(await snapshot(f), before)
+          assert.deepEqual(await snapshot(r), rb)
+          assert.deepEqual(await snapshot(b), bb)
+          assert.equal(record.status, 'failed')
+          assert.deepEqual(record.jobIds, [])
+        } else {
+          assert.equal(runnerError, null)
+          for (const result of [rd, ra, bd, ba]) assert.equal(result.code, 0, result.output)
+          assert.match(bd.output, /离线重建/)
+          for (const [item, snapshotBefore, target] of [[f, before, 'runner'], [r, rb, 'rebuild'], [b, bb, 'batch']]) await shapeUpgrade(item, snapshotBefore, target)
+          assert.equal(record.status, 'done')
+        }
+        assert(rebuildDryUnchanged)
+        assert(batchDryUnchanged)
+        assert.equal(record.attempts, 0)
+        assert.equal(record.ocrJobId, undefined)
+        for (const result of [bd, ba]) assert.doesNotMatch(result.output, /云端解析|Offline CLI attempted network|Token 后重试/)
+        assert.equal(ordinary.code, 0, ordinary.output)
+        const ordinaryOffline = build === 'ir-5' && ['top-only', 'top-incomplete', 'mixed', 'mixed-conflict', 'mixed-range-conflict'].includes(shape)
+        assert.match(ordinary.output, ordinaryOffline ? /离线重建/ : /云端解析/)
+        assert.equal(force.code, 0, force.output)
+        assert.match(force.output, /云端解析/)
+      } finally { await store.setConfig({ ocr: { token: '', maxCloudPages: 0 } }) }
+    })
+  }
   assert.equal(ocrCalls, 0)
   const loaded = (await fs.readFile(path.join(root, 'guard-loaded.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line).pid)
   assert.deepEqual(new Set(loaded), childPids, 'Every CLI process must load the transport guard')
   assert.equal(await fs.readFile(path.join(root, 'network-attempts.log'), 'utf8').catch(e => { if (e.code === 'ENOENT') return ''; throw e }), '')
 } finally {
+  if (process.env.PB_KEEP_LEGACY_FIXTURES === '1') {
+    await fs.writeFile(path.join(root, 'cli-results.json'), JSON.stringify(cliResults, null, 2))
+    await fs.writeFile(path.join(root, 'reference-shapes.json'), JSON.stringify(shapeResults, null, 2))
+    console.log('FIXTURE_ROOT ' + root)
+  }
   await store.closeDb()
-  await fs.rm(root, { recursive: true, force: true })
+  if (process.env.PB_KEEP_LEGACY_FIXTURES !== '1') await fs.rm(root, { recursive: true, force: true })
 }
 console.log(`${passed} PASS / ${failed} FAIL (legacy replay; zero OCR/network calls)`)
 process.exitCode = failed ? 1 : 0

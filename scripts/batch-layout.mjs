@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import * as store from '../lib/store.js'
 import * as pdf from '../lib/pdf.js'
 import * as ocr from '../lib/ocr.js'
-import { createLayout, LAYOUT_BUILD, LAYOUT_PARTIAL } from '../lib/layout.js'
+import { createLayout, replayLayoutPages, LAYOUT_BUILD, LAYOUT_PARTIAL } from '../lib/layout.js'
 import { createLayoutArchive, fingerprintPdf } from '../lib/layout-archive.js'
 import * as doc from '../lib/doc.js'
 import * as figures from '../lib/figures.js'
@@ -30,8 +30,13 @@ async function published(id, source, refillExisting = false) {
     if (layout?.schemaVersion !== 2 || !(layout.build === LAYOUT_BUILD || (refillExisting && layout.build === 'ir-4')) || !pointer?.revision || layout.revision !== pointer.revision ||
         pointer.sourceHash !== source.sha256 || layout.source?.sha256 !== source.sha256 || layout.pageCount !== source.pages ||
         !complete(numbers(layout.pages), source.pages) || layout.pages.some(page => page.status === 'failed') ||
-        !['passed', 'needs_review'].includes(layout.quality?.status) || !layout.rawRefs?.length) return null
-    for (const ref of layout.rawRefs) await archive.readRaw(id, ref)
+        !['passed', 'needs_review'].includes(layout.quality?.status)) return null
+    if (refillExisting) {
+      if (!(await replayLayoutPages(layout, ref => archive.readRaw(id, ref))).length) return null
+    } else {
+      if (!layout.rawRefs?.length) return null
+      for (const ref of layout.rawRefs) await archive.readRaw(id, ref)
+    }
     return layout
   } catch (error) {
     if (refillExisting) throw error
