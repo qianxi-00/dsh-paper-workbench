@@ -14,7 +14,7 @@
 
 新增 [test-layout-replay.mjs](../../scripts/test-layout-replay.mjs) 已纳入 npm test，默认每例十轮。通过真实 store/archive/runner 及重建 CLI 验证；只替换收费 OCR 和 runner 的 PDF 提取边界。CLI 成功路径实测无原 PDF 时的 lineAssignments 回退。
 
-本轮先在未修复产品观察原探针指定正文断言 exit 1；新增回归第一轮记录红灯。修复后新增回归 24 类 × 10 轮 = 240 PASS / 0 FAIL；包括三批/非首批、旧页无 rawRef、顶层/块级恢复、hash-only 兼容、相同 raw hash 跨批、空白、乱序、无关旧/坏 raw、重复/越界/缺页/坏行、全局范围错误、歧义、hash 损坏和丢失、补充来源拒绝、CLI dry-run/apply。拒绝路径逐字节比较 current、兼容投影、doc、PDF、raw/input/revision；成功路径保留原历史。
+本轮先在未修复产品观察原探针指定正文断言 exit 1；新增回归第一轮记录红灯。初版新增回归 24 类 × 10 轮 = 240 PASS / 0 FAIL；覆盖三批/非首批、旧页无 rawRef、顶层/块级恢复、hash-only 兼容、相同 raw hash 跨批、空白、乱序、无关旧/坏 raw、重复/越界/缺页/坏行、全局范围错误、歧义、hash 损坏和丢失、补充来源拒绝、CLI dry-run/apply。最终自查补第 25 类：旧云端空白页丢失全部引用时明确拒绝，先观察 24 PASS / 1 FAIL，再加守卫；最终十轮结果随精确 head 交付。拒绝路径逐字节比较 current、兼容投影、doc、PDF、raw/input/revision；成功路径保留原历史。
 
 已执行相关既有回归：页身份 8/0、IR 41/0、归档 7/0、模型 116/0、行守恒 7/0、表格 150/0、文库审计 13/0。文库审计首次沙箱 spawn EPERM 后，在获准环境重跑通过；环境失败不计产品失败或通过。
 

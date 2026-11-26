@@ -214,6 +214,11 @@ try {
       })
       await rejected(f)
     })
+    await check(`${round}: cloud blank pages with all references missing reject instead of a PDF-only no-op`, async () => {
+      const f = await fixture({ values: ['', ''], batchPages: 1 })
+      await legacy(f.id, layout => { layout.rawRefs = [] })
+      await rejected(f)
+    })
     await check(`${round}: supplemental model evidence rejects rather than silently dropping candidates`, async () => {
       const f = await fixture()
       await legacy(f.id, layout => { layout.blocks[0].sourceBlocks[0].source = 'vl' })
