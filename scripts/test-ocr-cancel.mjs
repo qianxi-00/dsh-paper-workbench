@@ -1,13 +1,17 @@
 /**
- * lib/ocr.js 取消与结果体上限自测脚本（全离线）。
+ * lib/ocr.js 与 layout runner 的取消、结果体上限自测脚本（全离线）。
  *
  * 目的：验证 AbortSignal 从提交 → 轮询（含 sleep 中途）→ 取结果整条链路都能被外部取消，
  * 且取结果时有响应体大小上限。全部用假 fetchImpl / sleepImpl，不联网、不读真实 token。
  * 运行：node scripts/test-ocr-cancel.mjs
  */
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 import { submitJob, pollJob, fetchResults } from '../lib/ocr.js'
+import { createLayout } from '../lib/layout.js'
 
 const stats = { pass: 0, fail: 0 }
 
@@ -74,6 +78,71 @@ function downloadAbortableFetch(counter) {
         }),
     }
   }
+}
+
+// Keep runner, OCR helpers, parsing and archive real; replace only PDF/transport I/O.
+async function layoutFixture(blockedStage) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pb-layout-cancel-'))
+  const pdfPath = path.join(root, 'input.pdf')
+  await fs.writeFile(pdfPath, 'Synthetic PDF consumed only by the fixture adapter')
+  const store = {
+    paperFile: (id, name) => path.join(root, id, name),
+    getMeta: async id => ({ id }),
+    resolvePdf: async () => ({ path: pdfPath }),
+    getConfig: async () => ({ ocr: { token: FAKE_TOKEN } }),
+    readJson: async (file, fallback) => {
+      try { return JSON.parse(await fs.readFile(file, 'utf8')) }
+      catch (error) { if (error.code === 'ENOENT') return fallback; throw error }
+    },
+    writeJsonAtomic: async (file, value) => {
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      await fs.writeFile(file, JSON.stringify(value))
+    },
+  }
+  const calls = []
+  let phase, blocking = false, seed = true, release = () => {}, notify
+  const entered = new Promise(resolve => { notify = resolve })
+  const fetchImpl = async (url, init) => {
+    const body = phase === 'submit' ? { data: { jobId: 'fixture-job' } }
+      : phase === 'poll' ? { data: { state: 'done', resultUrl: { jsonUrl: 'https://fixture.invalid/result' } } }
+        : { result: { layoutParsingResults: [{ prunedResult: {
+          page_index: 0, width: 600, height: 800,
+          parsing_res_list: [{ block_label: 'text', block_content: seed ? 'Previous layout.' : 'Current layout.', block_bbox: [20, 40, 580, 70] }],
+        } }] } }
+    const response = textResponse(JSON.stringify(body))
+    if (!blocking || phase !== blockedStage) return response
+    notify()
+    return new Promise((resolve, reject) => {
+      const onAbort = () => reject(Object.assign(new Error('fixture aborted'), { name: 'AbortError' }))
+      release = () => { init.signal?.removeEventListener('abort', onAbort); resolve(response) }
+      if (init.signal?.aborted) onAbort()
+      else init.signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+  const invoke = (stage, helper, options) => {
+    phase = stage
+    calls.push({ stage, signal: options.signal })
+    return helper({ ...options, fetchImpl, maxRetries: 0 })
+  }
+  const runner = createLayout({ store, pdf: { async callTool(command, input) {
+    if (command === 'info') return { pages: 1, sizes: [{ n: 1, w: 600, h: 800 }] }
+    if (command === 'split') { await fs.writeFile(input.out, 'fixture part'); return { ok: true } }
+    if (command === 'page_lines') return { lines: [] }
+    throw new Error('Unexpected PDF command: ' + command)
+  } }, ocr: {
+    submitJob: options => invoke('submit', submitJob, options),
+    pollJob: options => invoke('poll', pollJob, options),
+    fetchResults: options => invoke('fetch', fetchResults, options),
+  } })
+  await runner.runLayout('fixture', { resume: false })
+  const before = await runner.readLayout('fixture')
+  const pointer = await fs.readFile(store.paperFile('fixture', 'layout-data/current.json'), 'utf8')
+  const projection = await fs.readFile(store.paperFile('fixture', 'layout.json'), 'utf8')
+  seed = false
+  blocking = true
+  calls.length = 0
+  return { root, store, runner, calls, entered, before, pointer, projection,
+    release: () => { blocking = false; release() } }
 }
 
 async function run() {
@@ -246,6 +315,47 @@ async function run() {
     assert.equal(out.pages.length, 1)
     assert.equal(out.pages[0].markdown, '正常一页')
   })
+
+  for (const [stage, expected] of [
+    ['submit', ['submit']], ['poll', ['submit', 'poll']], ['fetch', ['submit', 'poll', 'fetch']],
+  ]) {
+    await check('runLayout：' + stage + ' 中取消立即结束、停止后续 OCR、保留断点并可续跑', async () => {
+      const f = await layoutFixture(stage)
+      const controller = new AbortController()
+      const work = f.runner.runLayout('fixture', { signal: controller.signal, resume: false })
+        .then(value => ({ value }), error => ({ error }))
+      let timer
+      try {
+        const started = await Promise.race([f.entered.then(() => true), work])
+        assert.equal(started, true, '没有到达目标 OCR 阶段')
+        controller.abort()
+        const outcome = await Promise.race([work, new Promise(resolve => { timer = setTimeout(() => resolve({ pending: true }), 1000) })])
+        assert.equal(outcome.pending, undefined, '取消后 runLayout 仍挂起：' + stage)
+        assert.match(outcome.error?.message || '', /已取消/)
+        assert.deepEqual(f.calls.map(call => call.stage), expected)
+        assert.ok(f.calls.every(call => call.signal === controller.signal), '必须透传 caller 的同一个 signal')
+        assert.deepEqual(await f.runner.readLayout('fixture'), f.before)
+        assert.equal(await fs.readFile(f.store.paperFile('fixture', 'layout-data/current.json'), 'utf8'), f.pointer)
+        assert.equal(await fs.readFile(f.store.paperFile('fixture', 'layout.json'), 'utf8'), f.projection)
+        const partial = await f.runner.readPartial('fixture')
+        assert.deepEqual(partial.pages, [])
+        assert.equal(partial.pending.start, 1)
+        assert.equal(partial.pending.jobId, stage === 'submit' ? undefined : 'fixture-job')
+        f.release()
+        f.calls.length = 0
+        const resumed = await f.runner.runLayout('fixture', { signal: new AbortController().signal })
+        assert.deepEqual(f.calls.map(call => call.stage), stage === 'submit' ? ['submit', 'poll', 'fetch'] : ['poll', 'fetch'])
+        assert.deepEqual(resumed.blocks.map(block => block.text), ['Current layout.'])
+        assert.equal(await f.runner.readPartial('fixture'), null)
+      } finally {
+        clearTimeout(timer)
+        controller.abort()
+        f.release()
+        await work
+        await fs.rm(f.root, { recursive: true, force: true })
+      }
+    })
+  }
 }
 
 try {
