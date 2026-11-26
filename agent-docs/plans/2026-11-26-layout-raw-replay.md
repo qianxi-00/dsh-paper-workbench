@@ -46,3 +46,14 @@
 - [x] 同步 `docs/v7-quality.md` 当前 build、rawRef 及历史兼容；未修改原探针、CI 判定或云端轮询。
 
 提交交付检查：在新精确 head 重跑原探针两种 batch 各十次、新旧回归和完整 npm/posttest；更新同一 PR 并读取 CI 当前状态，交回补验，不合入关单。精确 head、实际命令和结果记 QIAN-69 最终交付评论，不在文档中自引用本次提交 SHA。
+
+## PR #10 R3/S2/S3 返修（2026-11-26）
+
+固定退回点 46bff672fa6cfa201e0906cf38e3fecbba48df75；负责人评论 01a2161c-2f12-7308-b350-54782fa53efa 授权原分支续修。R1/R2 的正常路径独立通过仅属旧版本记录，整体验收仍为 request changes。
+
+- [x] 审阅者未改反例实际复现：raw 缺失/hash 损坏被预检吞成 null；dry-run 报云端，实际各两次 provider POST 在传输前拦截。
+- [x] 先补 ir-4/ir-5 × ENOENT/hash/EISDIR × dry-run/实际显式回填，未修产品观察六项失败和十二次 fetch 尝试。
+- [x] 最小修改 published 的异常传播：仅显式非 force 回填拒绝来源读取错误；不放宽来源、build、范围、完整性校验；保留普通/force 分流。
+- [x] 仅脱敏冻结档案的两处 source.path，保留原 producer/revision/raw/PDF；用固定 LF 的最终文件字节更新 SHA-256 与清单，回归验证摘要和相对路径。
+- [x] 合成库假 token + 传输前拦截，验证零 provider/上传及全论文/PDF 哈希保护；审阅者独立 seed 单独复核；有效旧版、主模型、普通/force 与歧义保护继续通过。
+- [ ] 新精确 head 的受影响回归、完整 npm/posttest、未改原探针两种 batch 各十次、CI 当前状态及新证据包交负责人补验补审；不合入关单。

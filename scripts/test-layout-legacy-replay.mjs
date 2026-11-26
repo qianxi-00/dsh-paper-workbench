@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -17,12 +17,21 @@ const { createLayout } = await import('../lib/layout.js')
 const { createLayoutArchive } = await import('../lib/layout-archive.js')
 const realPdf = await import('../lib/pdf.js')
 const archive = createLayoutArchive({ store })
-const golden = JSON.parse(await fs.readFile(new URL('./fixtures/layout-ir4-primary.json', import.meta.url), 'utf8'))
+const goldenBytes = await fs.readFile(new URL('./fixtures/layout-ir4-primary.json', import.meta.url))
+const golden = JSON.parse(goldenBytes)
 const repo = fileURLToPath(new URL('../', import.meta.url))
 const expected = [[1, 'Existing primary Alpha.'], [2, 'Existing primary Beta.']]
 const content = layout => layout.blocks.map(b => [b.page, b.text])
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
+const checksum = await fs.readFile(new URL('./fixtures/layout-ir4-primary.sha256', import.meta.url), 'utf8')
+const provenance = await fs.readFile(new URL('./fixtures/layout-ir4-primary.md', import.meta.url), 'utf8')
+assert.equal(checksum.trim(), sha(goldenBytes) + '  layout-ir4-primary.json')
+assert(provenance.includes('`' + sha(goldenBytes) + '`'), 'Provenance digest must match final file bytes')
+assert(!goldenBytes.includes(13), 'Frozen JSON must retain LF in clean checkouts')
+for (const source of [golden.layout.source, golden.input.source]) assert.equal(source.path, 'fixtures/layout-ir4-primary.pdf')
+assert.doesNotMatch(goldenBytes.toString(), /[A-Za-z]:[\\/]/, 'Fixture must not expose a machine path')
 let sequence = 0, passed = 0, failed = 0, ocrCalls = 0
+const childPids = new Set()
 const forbiddenOcr = Object.fromEntries(['submitJob', 'pollJob', 'fetchResults'].map(name => [name, async () => {
   ocrCalls++; throw new Error('Offline replay attempted ' + name)
 }]))
@@ -31,10 +40,20 @@ const forbiddenOcr = Object.fromEntries(['submitJob', 'pollJob', 'fetchResults']
 async function offlineNetwork() {
   const { appendFileSync } = await import('node:fs')
   const { join } = await import('node:path')
-  globalThis.fetch = async () => {
-    appendFileSync(join(process.env.DSH_PAPER_WORKBENCH_DATA, 'network-attempts.log'), 'forbidden\n')
-    throw new Error('Offline CLI attempted network')
+  const { syncBuiltinESMExports } = await import('node:module')
+  const root = process.env.DSH_PAPER_WORKBENCH_DATA
+  appendFileSync(join(root, 'guard-loaded.jsonl'), JSON.stringify({ pid: process.pid }) + '\n')
+  const forbid = layer => () => {
+    appendFileSync(join(root, 'network-attempts.log'), layer + '\n')
+    throw new Error('Offline CLI attempted network: ' + layer)
   }
+  globalThis.fetch = forbid('fetch')
+  for (const [name, methods] of [['http', ['request', 'get']], ['https', ['request', 'get']], ['net', ['connect', 'createConnection']], ['tls', ['connect']]]) {
+    const module = (await import('node:' + name)).default
+    for (const method of methods) module[method] = forbid(name + '.' + method)
+    if (name === 'net') module.Socket.prototype.connect = forbid('net.Socket.connect')
+  }
+  syncBuiltinESMExports()
 }
 const preload = 'data:text/javascript,' + encodeURIComponent('await (' + offlineNetwork.toString() + ')()')
 const read = file => fs.readFile(file, 'utf8').then(JSON.parse)
@@ -99,6 +118,7 @@ function cli(f, target, args) {
     cwd: repo, env: process.env, encoding: 'utf8', windowsHide: true, timeout: 30000,
   })
   assert.ifError(result.error)
+  childPids.add(result.pid)
   return { code: result.status, output: result.stdout + result.stderr }
 }
 async function upgraded(f, before) {
@@ -183,6 +203,43 @@ try {
       assert.match(result.output, /多个 raw 争用同一全局页/)
       assert.deepEqual(await snapshot(f), before)
     })
+    for (const build of ['ir-4', 'ir-5']) {
+      for (const [name, damage, reason] of [
+        ['missing raw', file => fs.unlink(file), /ENOENT/],
+        ['hash-corrupt raw', file => fs.writeFile(file, 'Corrupt synthetic raw'), /hash 校验失败/],
+        ['unreadable raw directory', async file => { await fs.unlink(file); await fs.mkdir(file) }, /EISDIR/],
+      ]) await check(`${round}: ${build} ${name} fails dry-run/apply before provider with a fake token`, async () => {
+        const f = await fixture()
+        if (build === 'ir-5') await f.runner.refillText(f.id)
+        const layout = await archive.readPublished(f.id)
+        assert.equal(layout.build, build)
+        const raw = store.paperFile(f.id, 'layout-data/raw/' + layout.rawRefs[0].hash + '.jsonl')
+        await damage(raw)
+        const before = await snapshot(f)
+        await store.setConfig({ ocr: { token: 'offline-test-' + randomUUID(), maxCloudPages: 0 } })
+        try {
+          // Execute both commands before asserting: a dry-run failure must not
+          // hide the actual apply branch under test.
+          const dry = cli(f, 'batch', ['--dry-run', '--refill-existing'])
+          const apply = cli(f, 'batch', ['--refill-existing'])
+          for (const result of [dry, apply]) {
+            assert.equal(result.code, 1, result.output)
+            assert.match(result.output, reason)
+            assert.doesNotMatch(result.output, /云端解析|Offline CLI attempted network|Token 后重试/)
+          }
+          assert.deepEqual(await snapshot(f), before, 'Source read failure changed paper/PDF evidence')
+          const record = (await read(path.join(root, '.batch-layout/manifest.json'))).papers[f.id]
+          assert.equal(record.status, 'failed')
+          assert.equal(record.attempts, 0, 'No provider method may be entered')
+          assert.equal(record.ocrJobId, undefined)
+          assert.deepEqual(record.jobIds, [])
+          assert.match(record.error, reason)
+          if (name === 'unreadable raw directory') assert((await fs.stat(raw)).isDirectory())
+        } finally {
+          await store.setConfig({ ocr: { token: '', maxCloudPages: 0 } })
+        }
+      })
+    }
     await check(`${round}: unknown build and non-refill/force do not bypass current build checks`, async () => {
       const f = await fixture()
       for (const args of [[], ['--refill-existing', '--force']]) {
@@ -199,6 +256,8 @@ try {
     })
   }
   assert.equal(ocrCalls, 0)
+  const loaded = (await fs.readFile(path.join(root, 'guard-loaded.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line).pid)
+  assert.deepEqual(new Set(loaded), childPids, 'Every CLI process must load the transport guard')
   assert.equal(await fs.readFile(path.join(root, 'network-attempts.log'), 'utf8').catch(e => { if (e.code === 'ENOENT') return ''; throw e }), '')
 } finally {
   await store.closeDb()

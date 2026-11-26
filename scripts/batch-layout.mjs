@@ -23,17 +23,20 @@ const numbers = pages => pages.map(page => page.n).sort((left, right) => left - 
 const complete = (pages, total) => pages.length === total && pages.every((page, index) => page === index + 1)
 const fresh = () => ({ status: 'queued', stage: 'inspect', pdf: null, coveredPages: [], jobIds: [], attempts: 0, error: null })
 
-async function published(id, source, allowLegacy = false) {
+async function published(id, source, refillExisting = false) {
   try {
     const layout = await archive.readPublished(id)
     const pointer = await read(id, 'layout-data/current.json')
-    if (layout?.schemaVersion !== 2 || !(layout.build === LAYOUT_BUILD || (allowLegacy && layout.build === 'ir-4')) || !pointer?.revision || layout.revision !== pointer.revision ||
+    if (layout?.schemaVersion !== 2 || !(layout.build === LAYOUT_BUILD || (refillExisting && layout.build === 'ir-4')) || !pointer?.revision || layout.revision !== pointer.revision ||
         pointer.sourceHash !== source.sha256 || layout.source?.sha256 !== source.sha256 || layout.pageCount !== source.pages ||
         !complete(numbers(layout.pages), source.pages) || layout.pages.some(page => page.status === 'failed') ||
         !['passed', 'needs_review'].includes(layout.quality?.status) || !layout.rawRefs?.length) return null
     for (const ref of layout.rawRefs) await archive.readRaw(id, ref)
     return layout
-  } catch { return null }
+  } catch (error) {
+    if (refillExisting) throw error
+    return null
+  }
 }
 
 async function derived(id, layout, source) {

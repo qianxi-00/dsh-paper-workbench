@@ -12,7 +12,7 @@
     "model": "PaddleOCR-VL-1.6",
     "jobId": "synthetic-primary-job",
     "source": {
-      "path": "C:\\Users\\15146\\multica_workspaces_desktop-api.multica.ai\\qian-xi-58eee77303a6\\qian-69-eeb561f9eae8\\workdir\\evidence\\ir4-fixture-producer\\synthetic.pdf",
+      "path": "fixtures/layout-ir4-primary.pdf",
       "sha256": "792103923e7c20caa6ca40595e251416242f70d4aee0a881611ba69a1782f064",
       "size": 426,
       "mtimeMs": 1795664202649
@@ -383,7 +383,7 @@
   },
   "input": {
     "source": {
-      "path": "C:\\Users\\15146\\multica_workspaces_desktop-api.multica.ai\\qian-xi-58eee77303a6\\qian-69-eeb561f9eae8\\workdir\\evidence\\ir4-fixture-producer\\synthetic.pdf",
+      "path": "fixtures/layout-ir4-primary.pdf",
       "sha256": "792103923e7c20caa6ca40595e251416242f70d4aee0a881611ba69a1782f064",
       "size": 426,
       "mtimeMs": 1795664202649

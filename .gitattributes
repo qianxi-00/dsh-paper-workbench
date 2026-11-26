@@ -1,1 +1,3 @@
 scripts/install.sh text eol=lf
+scripts/fixtures/layout-ir4-primary.json text eol=lf
+scripts/fixtures/layout-ir4-primary.sha256 text eol=lf
