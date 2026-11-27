@@ -20,6 +20,36 @@ const sourceHash = createHash('sha256').update('source bytes for fingerprint').d
 const rawText = '{"result":{"page_index":0,"text":"immutable evidence"}}\n'
 const fixture = revision => ({ version: 1, schemaVersion: 2, revision, source: { sha256: sourceHash }, pageCount: 2,
   pages: [{ n: 1 }, { n: 2 }], blocks: [{ page: 1, text: 'Kept source.' }], figures: [], quality: { status: 'needs_review', issues: [] } })
+const readFiles = files => Promise.all(files.map(file => fs.readFile(file, 'utf8')))
+async function interruptedPublication(id) {
+  const archive = module.createLayoutArchive({ store })
+  const raw = await archive.saveRaw(id, rawText, { page: '1-2', model: 'PP-StructureV3' })
+  const input = { rawRefs: [raw], model: 'PP-StructureV3', pdfPages: [{ page: 1, lines: [] }] }
+  await archive.publish(id, fixture('previous'), input)
+  const currentFiles = [store.paperFile(id, 'layout-data/current.json'), store.paperFile(id, 'layout.json')]
+  const currentBefore = await readFiles(currentFiles)
+  const layout = { ...fixture('ignored-by-derived'), at: 10, builtAt: 20 }
+  const originalWriteFile = fs.writeFile
+  let revision, faults = 0
+  fs.writeFile = async function (file, ...args) {
+    if (path.dirname(String(file)) === store.paperFile(id, 'layout-data/revisions') && faults++ === 0) {
+      revision = path.basename(String(file), '.json')
+      throw Object.assign(new Error('fixture: interrupted revision write'), { code: 'ENOSPC' })
+    }
+    return originalWriteFile.call(this, file, ...args)
+  }
+  try { await assert.rejects(archive.publishDerived(id, layout, input), { code: 'ENOSPC' }) }
+  finally { fs.writeFile = originalWriteFile }
+  assert.equal(faults, 1)
+  assert.match(revision, /^[a-f0-9]{64}$/)
+  assert.equal(await archive.readRevision(id, revision), null)
+  assert.equal((await archive.readInput(id, revision)).at, 10)
+  assert.deepEqual(await readFiles(currentFiles), currentBefore)
+  const immutableFiles = [store.paperFile(id, 'layout-data/inputs/' + revision + '.json'),
+    store.paperFile(id, 'layout-data/' + raw.file), store.paperFile(id, 'layout-data/revisions/previous.json')]
+  return { id, layout, input, revision, currentFiles, currentBefore, immutableFiles,
+    immutableBefore: await readFiles(immutableFiles), archive: module.createLayoutArchive({ store }) }
+}
 try {
   await check('PDF指纹为文件内容hash且携带尺寸', async () => {
     const source = await module.fingerprintPdf(file)
@@ -78,6 +108,56 @@ try {
     const changed = fixture('revision-immutable'); changed.blocks[0].text = 'different text'
     await assert.rejects(archive.publish('p5', changed, {}), /不可变|冲突/)
     assert.equal((await archive.readPublished('p5')).blocks[0].text, 'Kept source.')
+  })
+  await check('input已存但revision中断后，仅时间戳变化可恢复且证据字节不变', async () => {
+    const f = await interruptedPublication('retry-time')
+    const result = await f.archive.publishDerived(f.id, { ...f.layout, at: 11, builtAt: 21 }, f.input)
+    assert.equal(result.revision, f.revision)
+    assert.equal(result.projectionSynced, true)
+    assert.equal((await f.archive.readPublished(f.id)).blocks[0].text, 'Kept source.')
+    assert.equal((await f.archive.readPublished(f.id)).revision, f.revision)
+    assert.deepEqual(await readFiles(f.immutableFiles), f.immutableBefore)
+    const revisionFile = store.paperFile(f.id, 'layout-data/revisions/' + f.revision + '.json')
+    const revisionBefore = await fs.readFile(revisionFile, 'utf8')
+    await f.archive.publishDerived(f.id, { ...f.layout, at: 12, builtAt: 22 }, f.input)
+    assert.equal(await fs.readFile(revisionFile, 'utf8'), revisionBefore)
+    assert.deepEqual(await readFiles(f.immutableFiles), f.immutableBefore)
+  })
+  for (const kind of ['model', 'raw', 'pdf']) {
+    await check('中断重试仍拒绝真实输入冲突：' + kind, async () => {
+      const f = await interruptedPublication('conflict-' + kind)
+      const input = { ...f.input }
+      if (kind === 'model') input.model = 'different-model'
+      if (kind === 'raw') input.rawRefs = [{ ...input.rawRefs[0], jobId: 'different-job' }]
+      if (kind === 'pdf') input.pdfPages = [{ page: 1, lines: [{ text: 'Conflicting PDF evidence.' }] }]
+      await assert.rejects(f.archive.publishDerived(f.id, { ...f.layout, at: 11 }, input), /不可变|冲突/)
+      assert.deepEqual(await readFiles(f.currentFiles), f.currentBefore)
+      assert.deepEqual(await readFiles(f.immutableFiles), f.immutableBefore)
+      assert.equal(await f.archive.readRevision(f.id, f.revision), null)
+    })
+  }
+  for (const [kind, bytes, expected] of [
+    ['null', 'null\n', /不可变|冲突/], ['truncated', '{"model":', SyntaxError],
+  ]) {
+    await check('中断后非法input不能被覆盖或接受：' + kind, async () => {
+      const f = await interruptedPublication('invalid-' + kind)
+      await fs.writeFile(f.immutableFiles[0], bytes)
+      const before = await readFiles(f.immutableFiles)
+      await assert.rejects(f.archive.publishDerived(f.id, { ...f.layout, at: 11 }, f.input), expected)
+      assert.deepEqual(await readFiles(f.currentFiles), f.currentBefore)
+      assert.deepEqual(await readFiles(f.immutableFiles), before)
+      assert.equal(await f.archive.readRevision(f.id, f.revision), null)
+    })
+  }
+  await check('完整版本的真实输入冲突仍拒绝且历史和current不变', async () => {
+    const archive = module.createLayoutArchive({ store })
+    const layout = { ...fixture('complete'), at: 10 }
+    await archive.publish('conflict-complete', layout, { model: 'PP-StructureV3', at: 10 })
+    const files = ['layout-data/inputs/complete.json', 'layout-data/revisions/complete.json',
+      'layout-data/current.json', 'layout.json'].map(name => store.paperFile('conflict-complete', name))
+    const before = await readFiles(files)
+    await assert.rejects(archive.publish('conflict-complete', { ...layout, at: 11 }, { model: 'different-model', at: 11 }), /不可变|冲突/)
+    assert.deepEqual(await readFiles(files), before)
   })
   await check('路径参数不可越界读取原始数据或版本', async () => {
     const archive = module.createLayoutArchive({ store })
