@@ -112,6 +112,14 @@ node scripts/test-distribution.mjs
 
 这些运行不包含本轮新增文档；同步后的 CI 需要按新提交另查。
 
+### GitHub Actions 历史保留
+
+[cleanup-actions.yml](../../.github/workflows/cleanup-actions.yml) 每日 `03:17 UTC`（Asia/Shanghai `11:17`）运行，也提供手动 `workflow_dispatch`；手动入口默认 `dry_run=true`。清理脚本固定限定 `qianxi-00/dsh-paper-workbench`，权限为 `actions: write`、`contents: read`，不会访问账号下其他仓库。GitHub 仅在默认分支上运行 schedule，手动触发文件也必须先进入默认分支；进入 `dev` 不代表入口已启用。
+
+“最近一次”按组保留，不代表整个仓库最终只剩一条运行：每个 workflow 保留最近完成的运行及最近成功的运行；CI 对核心分支和开放 PR 分支分别保留最近结果与最近成功结果；已发布 tag 对应的 Release 运行另行保留。所有非 completed 运行均保留。每个 ref 仅保留最近访问的一个 Actions cache，同一 ref 的其他 cache key 可能需要冷启动。GitHub Releases、tags 和 release assets 不在清理范围内。
+
+Artifact 只有在关联信息能匹配到本轮 runs 快照、且关联 run 已 completed 后，才可能进入删除计划。缺少 run 关联或关联 run 不在快照中的 artifact 一律保守保留；关联的 run 尚未 completed 时，即使 artifact 标记 expired 也保留。summary 分别列出无关联、快照外 run、未完成 run 的产物 ID 与保留原因。已知 completed run 的过期产物，或未被保留策略覆盖的 completed run 产物，才可能删除。列表端点并非原子快照，因此未知关联不能按过期状态推定安全。
+
 ## Release：从标签到发行包
 
 定义：[release.yml](../../.github/workflows/release.yml)；[v1.2.0 固定版本](https://github.com/qianxi-00/dsh-paper-workbench/blob/5365e51227cff98f7b4d95629d475919e0a50b1a/.github/workflows/release.yml)。
