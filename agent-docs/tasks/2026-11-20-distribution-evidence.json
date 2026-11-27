@@ -1,0 +1,138 @@
+{
+  "checkedAt": "2026-11-20T11:44:52.288Z",
+  "target": {
+    "name": "dsh-paper-workbench",
+    "repository": "qianxi-00/dsh-paper-workbench",
+    "version": "1.2.0"
+  },
+  "sources": [
+    {
+      "id": "scout",
+      "url": "https://fegnze.github.io/dsh-plugin-scout/index.json",
+      "record": "https://github.com/fegnze/dsh-plugin-scout/issues/1",
+      "checkedAt": "2026-11-20T11:44:52.289Z",
+      "httpStatus": 200,
+      "parseStatus": "ok",
+      "bytes": 624694,
+      "sha256": "10235698eedb82c9138030bb69a2a3e87889ebbee71bc550fcc07d4f973bd8fa",
+      "totalPlugins": 466,
+      "matches": {
+        "name": 0,
+        "repository": 0,
+        "both": 0
+      },
+      "entries": [],
+      "status": "not-listed",
+      "followUp": {
+        "status": "waiting-review/policy",
+        "basisDate": "2026-11-20",
+        "record": "https://github.com/fegnze/dsh-plugin-scout/issues/1",
+        "note": "Recorded application context only; refresh the existing thread and source policy before acting."
+      }
+    },
+    {
+      "id": "open",
+      "url": "https://dshopen.org/index.json",
+      "record": "https://github.com/polang233/dsh-plugin-index/issues/552",
+      "checkedAt": "2026-11-20T11:44:52.324Z",
+      "httpStatus": 200,
+      "parseStatus": "ok",
+      "bytes": 2099265,
+      "sha256": "783dbc88c7bf12e6c6819984c9460a465ce3200d62d485144eee057394ae9b16",
+      "totalPlugins": 1318,
+      "matches": {
+        "name": 1,
+        "repository": 1,
+        "both": 1
+      },
+      "entries": [
+        {
+          "name": "dsh-paper-workbench",
+          "repository": "qianxi-00/dsh-paper-workbench",
+          "category": "knowledge",
+          "labels": [
+            "verified",
+            "trending",
+            "updated-recent",
+            "downloads-100"
+          ],
+          "versions": [
+            {
+              "version": "1.2.0",
+              "source": {
+                "type": "npm",
+                "registry": "https://registry.npmjs.org/"
+              },
+              "engines": {}
+            }
+          ]
+        }
+      ],
+      "status": "verified-live"
+    },
+    {
+      "id": "bruce",
+      "url": "https://bruc3van.com/dsh-plugins/index.json",
+      "record": "https://github.com/bruc3van/awesome-dsh-plugin-pro/issues/174",
+      "checkedAt": "2026-11-20T11:44:52.325Z",
+      "httpStatus": 200,
+      "parseStatus": "ok",
+      "bytes": 4840605,
+      "sha256": "09d7d8ab99cd20b3d1b4acca8213463fc028d4dadbfb50fca61b31f8463b4dbe",
+      "totalPlugins": 2629,
+      "matches": {
+        "name": 0,
+        "repository": 0,
+        "both": 0
+      },
+      "entries": [],
+      "status": "not-listed",
+      "followUp": {
+        "status": "waiting-review/policy",
+        "basisDate": "2026-11-20",
+        "record": "https://github.com/bruc3van/awesome-dsh-plugin-pro/issues/174",
+        "note": "Recorded application context only; refresh the existing thread and source policy before acting."
+      }
+    },
+    {
+      "id": "dshmarket",
+      "url": "https://dshmarket.com/index.json",
+      "record": "https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/17123",
+      "checkedAt": "2026-11-20T11:44:52.326Z",
+      "httpStatus": 200,
+      "parseStatus": "ok",
+      "bytes": 5194888,
+      "sha256": "230c0dc5b929ccab6224d9963e60affa01879ceb9092c95c8de3c9aef018f04a",
+      "totalPlugins": 6378,
+      "matches": {
+        "name": 1,
+        "repository": 1,
+        "both": 1
+      },
+      "entries": [
+        {
+          "name": "dsh-paper-workbench",
+          "repository": "qianxi-00/dsh-paper-workbench",
+          "category": "docs",
+          "labels": [],
+          "versions": [
+            {
+              "version": "1.1.2",
+              "source": {
+                "type": "npm"
+              },
+              "engines": {}
+            }
+          ]
+        }
+      ],
+      "status": "outdated"
+    }
+  ],
+  "summary": {
+    "not-listed": 2,
+    "verified-live": 1,
+    "outdated": 1
+  },
+  "exitCode": 1
+}

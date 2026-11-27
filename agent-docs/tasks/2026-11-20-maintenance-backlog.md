@@ -15,10 +15,9 @@
 
 ## DIST-001 · 跟进社区目录 1.2.0 更新
 
-- 状态：todo。
-- 依据：[市场 PR #17123](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/17123) 在核查时 OPEN；已合并的 [#16763](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/16763) 对应 1.1.2。
-- 下一步：重新查询 PR、目录 YAML 与公开索引；合并后分别检查 tarball 版本、索引版本及 npm 安装目标。只有出现实际不一致且用户请求处理时再修改上游。
-- 验收：登记版本和实际安装来源一致；不要通过本仓库新 tag 反复触发既有版本发布来刷新市场。
+- 状态：in_progress，由 QIAN-25 明确授权推进四源渠道；避免另建等价任务或重复申请。
+- 已落地内容、PR/commit、最新验证和外部阻塞见 [四源任务记录](2026-11-20-distribution-indexes.md)，操作路径见 [发布运维](../operations/release-and-distribution.md#四源检查与后续版本维护)。
+- 验收：各源的精确仓库/包名、目标版本及安装来源在真实公开 JSON 中一致；Awesome 固定 tarball、主站和独立镜像分别核对。新 tag 或 npm latest 不能代替索引验收。
 
 ## LAYOUT-001 · 验证多 raw 页身份
 
