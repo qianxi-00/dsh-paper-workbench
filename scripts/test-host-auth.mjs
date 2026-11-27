@@ -9,6 +9,7 @@ import { test } from 'node:test'
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pb-host-auth-'))
 process.env.DSH_PAPER_WORKBENCH_DATA = root
+const { createHandler, isTrusted } = await import('../lib/server.js')
 const host = await import('../lib/index.js')
 const store = await import('../lib/store.js')
 await store.setConfig({ workspace: { title: '鉴权测试', path: path.join(root, 'workspace') } })
@@ -51,6 +52,55 @@ function request(endpoint, method = 'GET', headers = {}) {
   return fetch(origin + '/paper-workbench' + endpoint, { method, headers, redirect: 'manual' })
 }
 try {
+  await test('HTTP 回环 Host / Origin 准入', async t => {
+    let businessCalls = 0
+    const handler = createHandler({
+      prefix: '/paper-workbench', appDir: path.resolve('assets/app'),
+      api: { probe: async () => { businessCalls++; return { reached: true } } },
+    })
+    const cases = [
+      ...[
+        ['localhost', true], ['LOCALHOST:43127', true],
+        ['127.0.0.0', true], ['127.0.0.1:43127', true],
+        ['127.42.8.9:43127', true], ['127.255.255.255:43127', true],
+        ['[::1]', true], ['[::1]:43127', true],
+        ['127.256.0.1', false], ['127.0.256.1:43127', false], ['127.0.0.256', false],
+        ['127.999.999.999:43127', false], ['127.0.0', false],
+        ['127.0.0.1.example', false], ['128.0.0.1:43127', false],
+      ].map(([host, trusted]) => [host, { host }, trusted]),
+      ['缺少 Host', {}, false],
+      ['HTTP 回环 Origin', { host: '127.0.0.1:43127', origin: 'http://127.0.0.1:43127', 'sec-fetch-site': 'same-origin' }, true],
+      ['localhost Origin', { host: 'localhost', origin: 'http://localhost:43127', 'sec-fetch-site': 'none' }, true],
+      ['IPv6 Origin', { host: '[::1]:43127', origin: 'http://[::1]:43127' }, true],
+      ['null Origin', { host: '127.0.0.1', origin: 'null' }, false],
+      ['越界数字 Origin', { host: '127.0.0.1', origin: 'http://127.999.999.999:43127' }, false],
+      ['HTTPS Origin', { host: '127.0.0.1', origin: 'https://127.0.0.1' }, false],
+      ['外部 Origin', { host: '127.0.0.1', origin: 'http://foreign.example' }, false],
+      ['cross-site', { host: '127.0.0.1', origin: 'http://127.0.0.1', 'sec-fetch-site': 'cross-site' }, false],
+      ['same-site', { host: '127.0.0.1', 'sec-fetch-site': 'same-site' }, false],
+    ]
+    for (const [name, headers, trusted] of cases) {
+      await t.test((trusted ? '允许 ' : '拒绝 ') + name, async () => {
+        let reads = 0
+        let status
+        let body
+        const before = businessCalls
+        const req = {
+          method: 'POST', url: '/paper-workbench/api/probe', headers,
+          async *[Symbol.asyncIterator]() { reads++; yield Buffer.from('{}') },
+        }
+        await handler(req, {
+          writeHead(value) { status = value },
+          end(value) { body = JSON.parse(value) },
+        })
+        assert.equal(isTrusted(req), trusted)
+        assert.equal(status, trusted ? 200 : 403)
+        assert.equal(reads, trusted ? 1 : 0)
+        assert.equal(businessCalls - before, trusted ? 1 : 0)
+        assert.deepEqual(body, trusted ? { ok: true, value: { reached: true } } : { ok: false, error: 'forbidden' })
+      })
+    }
+  })
   await test('宿主 HTTP 准入', async t => {
     await t.test('声明 connection 为必需宿主服务', () => {
       assert.ok(host.inject.includes('connection'))
