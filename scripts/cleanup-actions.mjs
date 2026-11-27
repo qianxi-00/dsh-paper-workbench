@@ -77,11 +77,38 @@ export function planCleanup({ runs, artifacts, caches, openPullBranches, publish
   const deleteRuns = completedRuns.filter((run) => !keepRuns.has(String(run.id)));
   const keepArtifacts = [];
   const deleteArtifacts = [];
+  const keepArtifactReasons = {
+    missingAssociation: [],
+    runMissingFromSnapshot: [],
+    activeRun: [],
+    retainedRun: [],
+  };
+  const runsById = new Map(runs.map((run) => [String(run.id), run]));
   for (const artifact of artifacts) {
-    requireId(artifact, 'Artifact');
+    const artifactId = requireId(artifact, 'Artifact');
     const runId = artifact.workflow_run?.id;
-    if (!artifact.expired && (runId === undefined || keepRuns.has(String(runId)))) keepArtifacts.push(artifact);
-    else deleteArtifacts.push(artifact);
+    if (runId === undefined || runId === null || String(runId) === '') {
+      keepArtifacts.push(artifact);
+      keepArtifactReasons.missingAssociation.push(artifactId);
+      continue;
+    }
+    const associatedRunId = String(runId);
+    const associatedRun = runsById.get(associatedRunId);
+    if (!associatedRun) {
+      keepArtifacts.push(artifact);
+      keepArtifactReasons.runMissingFromSnapshot.push(artifactId);
+    } else if (associatedRun.status !== 'completed') {
+      keepArtifacts.push(artifact);
+      keepArtifactReasons.activeRun.push(artifactId);
+    } else if (!artifact.expired && keepRuns.has(associatedRunId)) {
+      keepArtifacts.push(artifact);
+      keepArtifactReasons.retainedRun.push(artifactId);
+    } else {
+      deleteArtifacts.push(artifact);
+    }
+  }
+  for (const ids of Object.values(keepArtifactReasons)) {
+    ids.sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
   }
 
   const cachesByRef = groupBy(caches, (cache) => {
@@ -108,6 +135,7 @@ export function planCleanup({ runs, artifacts, caches, openPullBranches, publish
     deleteRunIds: sortedIds(deleteRuns.map((item) => requireId(item, 'Workflow run'))),
     keepArtifactIds: sortedIds(keepArtifacts.map((item) => requireId(item, 'Artifact'))),
     deleteArtifactIds: sortedIds(deleteArtifacts.map((item) => requireId(item, 'Artifact'))),
+    keepArtifactReasons,
     keepCacheIds: sortedIds(keepCaches.map((item) => requireId(item, 'Cache'))),
     deleteCacheIds: sortedIds(deleteCaches.map((item) => requireId(item, 'Cache'))),
   };
@@ -171,7 +199,7 @@ function assertRuntime(env) {
   }
 }
 
-function formatSummary({ before, plan, deleted }) {
+export function formatSummary({ before, plan, deleted }) {
   const lines = [
     '## Actions retention',
     '',
@@ -181,6 +209,16 @@ function formatSummary({ before, plan, deleted }) {
     `- Planned deletions: ${plan.deleteRunIds.length} runs, ${plan.deleteArtifactIds.length} artifacts, ${plan.deleteCacheIds.length} caches.`,
     '- GitHub Releases, tags, and release assets are not modified.',
   ];
+  lines.push('', '### Artifact retention reasons', '');
+  for (const [reason, label] of Object.entries({
+    missingAssociation: 'Artifact has no run association (kept conservatively)',
+    runMissingFromSnapshot: 'Associated run is absent from this run snapshot (kept conservatively)',
+    activeRun: 'Associated run is not completed (protected)',
+    retainedRun: 'Associated completed run is retained by policy',
+  })) {
+    const ids = plan.keepArtifactReasons[reason];
+    lines.push(`- ${label}: ${ids.length ? ids.join(', ') : 'None'}`);
+  }
   for (const [label, ids] of Object.entries({
     'workflow runs': plan.keepRunIds,
     artifacts: plan.keepArtifactIds,
