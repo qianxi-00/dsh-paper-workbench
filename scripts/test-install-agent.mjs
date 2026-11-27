@@ -349,6 +349,65 @@ try {
     ok(existsSync(path.join(profile2, 'node_modules', 'dsh-paper-workbench', 'package.json')), 'node_modules 副本应就绪')
   })
 
+  // Copy must not remove its source through either installation target's alias.
+  for (const [mode, location, alias] of [
+    ['copy', 'plugins', 'exact'], ['copy', 'plugins', 'case'], ['copy', 'plugins', 'junction'],
+    ['copy', 'node_modules', 'exact'], ['copy', 'node_modules', 'case'], ['copy', 'node_modules', 'junction'],
+    ['link', 'node_modules', 'case'],
+  ]) {
+    if (alias === 'case' && process.platform !== 'win32') {
+      console.log('SKIP  ' + mode + ' ' + location + ' Windows 大小写别名（仅 Windows）')
+      continue
+    }
+    const home = path.join(tmpRoot, 'same-source-' + mode + '-' + location + '-' + alias)
+    const profile = path.join(home, 'profiles', 'desktop')
+    const pluginDir = path.join(home, 'plugins', 'dsh-paper-workbench')
+    const nmDir = path.join(profile, 'node_modules', 'dsh-paper-workbench')
+    const source = location === 'plugins' ? pluginDir : nmDir
+    const sourcePkg = { name: 'dsh-paper-workbench', version: '1.2.0' }
+    await fsp.mkdir(source, { recursive: true })
+    await fsp.mkdir(profile, { recursive: true })
+    await fsp.writeFile(path.join(profile, 'package.json'), JSON.stringify({ private: true, dependencies: {} }))
+    await fsp.writeFile(path.join(source, 'package.json'), JSON.stringify(sourcePkg))
+    await fsp.writeFile(path.join(source, 'keep-source.txt'), 'source-must-survive')
+    await fsp.writeFile(path.join(source, '.env.keep-source'), 'synthetic-local-setting=keep\n')
+    let repoArgument = source
+    if (alias === 'case') repoArgument = location === 'plugins'
+      ? path.join(home, 'PLUGINS', 'dsh-paper-workbench')
+      : path.join(profile, 'NODE_MODULES', 'dsh-paper-workbench')
+    if (alias === 'junction') {
+      repoArgument = path.join(home, 'source-alias')
+      try { await fsp.symlink(source, repoArgument, process.platform === 'win32' ? 'junction' : 'dir') }
+      catch (error) {
+        if (!['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) throw error
+        console.log('SKIP  ' + mode + ' ' + location + ' 目录链接不可用：' + error.code)
+        continue
+      }
+    }
+    await check(mode + ' ' + location + ' ' + alias + ' 同源保留源文件且目标包有效', async () => {
+      eq(await fsp.realpath(repoArgument), await fsp.realpath(source), '夹具必须是真实同源')
+      const res = runInstaller([
+        '--repo', repoArgument, '--dsh-home', home, '--data-dir', path.join(home, 'data'),
+        '--workspace', path.join(home, 'workspace'), '--mode', mode, '--json', '--skip-py-install',
+      ])
+      eq(res.status, 0, res.stderr || res.stdout)
+      eq(JSON.parse(res.stdout).ok, true)
+      for (const name of ['package.json', 'keep-source.txt', '.env.keep-source']) {
+        ok(existsSync(path.join(source, name)), '同源安装不能删除源文件：' + name)
+      }
+      eq(JSON.parse(readFileSync(path.join(source, 'package.json'), 'utf8')), sourcePkg)
+      eq(readFileSync(path.join(source, 'keep-source.txt'), 'utf8'), 'source-must-survive')
+      eq(readFileSync(path.join(source, '.env.keep-source'), 'utf8'), 'synthetic-local-setting=keep\n')
+      for (const target of mode === 'copy' ? [pluginDir, nmDir] : [nmDir]) {
+        eq(JSON.parse(readFileSync(path.join(target, 'package.json'), 'utf8')), sourcePkg)
+        eq(readFileSync(path.join(target, 'keep-source.txt'), 'utf8'), 'source-must-survive')
+        if (await fsp.realpath(target) !== await fsp.realpath(source)) {
+          ok(!existsSync(path.join(target, '.env.keep-source')), '普通副本不能包含源本地配置')
+        }
+      }
+    })
+  }
+
   // 6. 指定不存在的 --dsh-home 报错
   await check('不存在的 --dsh-home 明确返回 ok:false 且退出码非 0', () => {
     const missing = path.join(tmpRoot, 'missing-dsh')
