@@ -11,7 +11,7 @@
  *   6. 输出人类 + Agent（--json）双友好的结构化报告与剩余用户可选项
  */
 import { spawn } from 'node:child_process'
-import { existsSync, promises as fsp, readFileSync } from 'node:fs'
+import { existsSync, promises as fsp, readFileSync, realpathSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'

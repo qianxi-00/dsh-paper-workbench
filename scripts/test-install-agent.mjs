@@ -44,8 +44,8 @@ async function check(name, fn) {
   }
 }
 
-function runInstaller(args, extraEnv = {}) {
-  const res = spawnSync(process.execPath, [INSTALLER, ...args], {
+function runInstaller(args, extraEnv = {}, installer = INSTALLER) {
+  const res = spawnSync(process.execPath, [installer, ...args], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
     timeout: 60000,
@@ -125,6 +125,25 @@ try {
     for (const flag of ['--dsh-home', '--data-dir', '--workspace', '--repo', '--mode', '--dry-run', '--json', '--skip-py-install']) {
       ok(res.stdout.includes(flag), '帮助文档缺少参数 ' + flag)
     }
+  })
+
+  const cliAlias = path.join(tmpRoot, 'cli-alias')
+  let cliAliasAvailable = true
+  try { await fsp.symlink(REPO_ROOT, cliAlias, process.platform === 'win32' ? 'junction' : 'dir') }
+  catch (error) {
+    if (!['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) throw error
+    cliAliasAvailable = false
+    console.log('SKIP  CLI 目录链接入口不可用：' + error.code)
+  }
+  if (cliAliasAvailable) await check('CLI 经目录链接启动仍执行入口并输出有效帮助 JSON', () => {
+    const direct = runInstaller(['--help', '--json'])
+    const aliased = runInstaller(['--help', '--json'], {}, path.join(cliAlias, 'scripts', 'install-agent.mjs'))
+    eq(direct.status, 0, direct.stderr)
+    eq(aliased.status, 0, aliased.stderr)
+    const expected = JSON.parse(direct.stdout)
+    eq(expected.ok, true)
+    ok(expected.help.includes('--dsh-home'))
+    eq(JSON.parse(aliased.stdout), expected)
   })
 
   await check('非法 --mode 在 --json 下输出合法错误 JSON 并返回非零退出码', () => {
