@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { planCleanup } from './cleanup-actions.mjs';
+import { formatSummary, planCleanup } from './cleanup-actions.mjs';
 
 const run = (id, workflowId, workflowName, headBranch, createdAt, status, conclusion) => ({
   id: String(id),
@@ -46,5 +46,49 @@ assert.deepEqual(plan.keepArtifactIds, ['71', '74']);
 assert.deepEqual(plan.deleteArtifactIds, ['72', '73']);
 assert.deepEqual(plan.keepCacheIds, ['82', '83']);
 assert.deepEqual(plan.deleteCacheIds, ['81']);
+
+const artifactSafety = planCleanup({
+  runs: [
+    run(701, 1, 'CI', 'dev', '2025-01-01T00:00:00Z', 'in_progress', null),
+    run(707, 1, 'CI', 'dev', '2025-01-01T00:00:00Z', 'queued', null),
+    run(708, 1, 'CI', 'dev', '2025-01-01T00:00:00Z', 'waiting', null),
+    run(709, 1, 'CI', 'dev', '2025-01-01T00:00:00Z', 'requested', null),
+    run(710, 1, 'CI', 'dev', '2025-01-01T00:00:00Z', 'pending', null),
+    run(702, 1, 'CI', 'dev', '2025-01-03T00:00:00Z', 'completed', 'success'),
+    run(703, 1, 'CI', 'dev', '2025-01-02T00:00:00Z', 'completed', 'success'),
+  ],
+  artifacts: [
+    { id: 900, expired: false, workflow_run: { id: 999 } },
+    { id: 901, expired: true, workflow_run: { id: 701 } },
+    { id: 911, expired: true, workflow_run: { id: 707 } },
+    { id: 912, expired: true, workflow_run: { id: 708 } },
+    { id: 913, expired: true, workflow_run: { id: 709 } },
+    { id: 914, expired: true, workflow_run: { id: 710 } },
+    { id: 902, expired: false },
+    { id: 903, expired: true, workflow_run: null },
+    { id: 904, expired: false, workflow_run: { id: 703 } },
+    { id: 905, expired: false, workflow_run: { id: 702 } },
+    { id: 906, expired: true, workflow_run: { id: 702 } },
+  ],
+  caches: [],
+  openPullBranches: [],
+  publishedReleaseTags: [],
+});
+assert.deepEqual(artifactSafety.keepArtifactIds, ['900', '901', '902', '903', '905', '911', '912', '913', '914']);
+assert.deepEqual(artifactSafety.deleteArtifactIds, ['904', '906']);
+assert.deepEqual(artifactSafety.keepArtifactReasons, {
+  missingAssociation: ['902', '903'],
+  runMissingFromSnapshot: ['900'],
+  activeRun: ['901', '911', '912', '913', '914'],
+  retainedRun: ['905'],
+});
+const summary = formatSummary({
+  before: { runs: [], artifacts: [], caches: [] },
+  plan: artifactSafety,
+  deleted: { runs: [], artifacts: [], caches: [] },
+});
+assert.match(summary, /Artifact has no run association \(kept conservatively\): 902, 903/);
+assert.match(summary, /Associated run is absent from this run snapshot \(kept conservatively\): 900/);
+assert.match(summary, /Associated run is not completed \(protected\): 901/);
 
 console.log('Actions retention policy checks passed.');
