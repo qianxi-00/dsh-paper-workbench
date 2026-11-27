@@ -139,6 +139,33 @@ async function main() {
     eq(db.transClear('p-clear'), 0)
   })
 
+  await check('JSON 落盘失败后回滚内存，后续无关事务不能提交失败候选', async () => {
+    if (engine !== 'json') return
+    const paperId = 'p-json-rollback'
+    const dbFile = db.dbPath()
+    db.transPut(paperId, { old: 'retained' })
+    const beforeRaw = readFileSync(dbFile, 'utf8')
+    const injectedTmp = dbFile + '.tmp'
+    await fsp.mkdir(injectedTmp)
+    let failure = null
+    try {
+      db.transReplace(paperId, { candidate: 'uncommitted' })
+    } catch (error) {
+      failure = error
+    } finally {
+      await fsp.rm(injectedTmp, { recursive: true, force: true })
+    }
+    ok(failure, '受控落盘失败应向调用方传播')
+    eq(db.transAll(paperId).entries, { old: 'retained' }, '失败后内存读取仍应保留旧译文')
+    eq(readFileSync(dbFile, 'utf8'), beforeRaw, '失败后磁盘文件字节应保持不变')
+
+    db.jobAppend('p-json-independent', { message: 'independent commit' })
+    db.closeDb()
+    eq(db.transAll(paperId).entries, { old: 'retained' }, '无关事务后关闭重开仍应保留旧译文')
+    const persisted = JSON.parse(readFileSync(dbFile, 'utf8'))
+    ok(!persisted.translations.some((row) => row.paper_id === paperId && row.key === 'candidate'), '失败候选不得持久化')
+  })
+
   // ---------------------------------------------------------------- 迁移老 trans.json
   await check('migrateTransJson 兼容老格式 { zh, at, model }，只导非空条目', () => {
     const legacy = {
