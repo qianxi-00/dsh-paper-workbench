@@ -98,6 +98,11 @@ async function main() {
     items: [made, { id: 'bad id' }, made, null],
   })
   check('列表：丢坏条目 + 去重 + activeId 兜底', chats.items.length === 1 && chats.activeId === made.id, JSON.stringify(chats.activeId))
+  const caseFoldedChats = normalizeChats({
+    activeId: 'C-TWO',
+    items: [{ id: 'C-ONE' }, { id: 'c-two' }],
+  })
+  check('列表：activeId 跟随会话 id 大小写归一化', caseFoldedChats.activeId === 'c-two', JSON.stringify(caseFoldedChats))
 
   // ---- 范围提示词
   const prompt = buildScopePrompt({
