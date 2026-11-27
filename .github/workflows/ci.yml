@@ -101,3 +101,6 @@ jobs:
 
       - name: Verify npm package manifest
         run: npm pack --dry-run
+
+      - name: Verify Actions retention policy
+        run: node scripts/test-actions-retention.mjs

@@ -1,0 +1,42 @@
+name: Actions Retention
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Preview the cleanup plan without deleting records'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: actions-retention-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Test retention selection
+        run: node scripts/test-actions-retention.mjs
+
+      - name: Clean old Actions records
+        env:
+          ACTIONS_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: node scripts/cleanup-actions.mjs
