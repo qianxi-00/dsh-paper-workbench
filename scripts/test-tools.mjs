@@ -26,7 +26,7 @@ const tools = new Map(createTools(api).map((tool) => [tool.name, tool]))
 const LOCAL_SAMPLE = 'G:\\笔记\\LLM知识体系论文\\加速训练\\FlashAttention.pdf'
 
 async function resolveSamplePdf() {
-  if (fs.existsSync(LOCAL_SAMPLE)) return { path: LOCAL_SAMPLE, synthetic: false }
+  if (process.env.PB_FORCE_SYNTH_SAMPLE !== '1' && fs.existsSync(LOCAL_SAMPLE)) return { path: LOCAL_SAMPLE, synthetic: false }
   const py = await findPython()
   if (!py || !py.python) throw new Error('CI / 离线样例生成需要可用的 Python + PyMuPDF')
   const outPdf = path.join(tmpRoot, 'FlashAttention-synth.pdf')
@@ -70,7 +70,65 @@ function body(result) {
   return result && typeof result.text === 'string' ? result.text : ''
 }
 
+async function checkDocPageLimit() {
+  const store = await import('../lib/store.js')
+  const py = await findPython()
+  const pdfPath = path.join(tmpRoot, 'page-limit-synth.pdf')
+  execFileSync(py.python, ['-c', [
+    'import fitz, sys',
+    'doc = fitz.open()',
+    'for n in range(1, 202):',
+    '    page = doc.new_page()',
+    '    page.insert_text((72, 138), "LIMIT REGRESSION CONTENT PAGE " + str(n) + ".", fontsize=10.5)',
+    'doc.save(sys.argv[1])',
+  ].join('\n'), pdfPath], { stdio: 'pipe' })
+
+  for (const fallback of [false, true]) {
+    const id = fallback ? 'p-limit-build' : 'p-limit-get'
+    const source = path.join(tmpRoot, id + '.pdf')
+    await fsp.copyFile(pdfPath, source)
+    await store.addPaper({ id, srcPath: source, title: 'Synthetic page limit', pageCount: 201 })
+    const contentCalls = []
+    const docTool = createTools({
+      ...api,
+      'doc.get': async (args) => {
+        contentCalls.push('doc.get')
+        if (fallback && contentCalls.length === 1) throw new Error('Synthetic missing document')
+        return api['doc.get'](args)
+      },
+      'doc.build': async (args) => {
+        contentCalls.push('doc.build')
+        return api['doc.build'](args)
+      },
+    }).find((tool) => tool.name === 'paper_doc')
+    const label = fallback ? 'doc.build 回退' : '冷 doc.get'
+    const rejected = await docTool.execute({ id, pages: '1-100,51-201' })
+    check('paper_doc ' + label + ' 拒绝 201 个唯一页', rejected.isError === true && /200.*本次未读取任何页/.test(body(rejected)))
+    check('paper_doc ' + label + ' 超限前不获取或构建正文', contentCalls.length === 0, JSON.stringify(contentCalls))
+    const cached = await store.readTextCache(id)
+    check('paper_doc ' + label + ' 超限不写正文缓存', !cached || !cached.pages?.length, 'cachedPages=' + (cached?.pages?.length || 0))
+
+    const positive = await docTool.execute({ id, pages: '1-2' })
+    check('paper_doc ' + label + ' 合法范围可正常读取', positive.isError === false && body(positive).includes('CONTENT PAGE 1.') && body(positive).includes('[p.2]') && !body(positive).includes('[p.3]'))
+    const boundary = await docTool.execute({ id, pages: '1-100,51-200,200', maxChars: 160000 })
+    check('paper_doc ' + label + ' 去重后 200 页仍可读取', boundary.isError === false && body(boundary).includes('[p.200]') && !body(boundary).includes('[p.201]'))
+  }
+
+  const doc = {
+    pdf: { pages: 2 },
+    sections: [{ id: 's1', page: 1, title: 'Synthetic section' }],
+    paragraphs: [{ section: 's1', page: 1, text: 'STRUCTURE PAGE COUNT FALLBACK' }],
+  }
+  const fallbackTool = createTools({
+    'library.get': async () => ({ meta: { title: 'Synthetic structure', pageCount: 0 } }),
+    'doc.get': async () => ({ doc }),
+  }).find((tool) => tool.name === 'paper_doc')
+  const all = await fallbackTool.execute({ id: 'p-structure', pages: ' ALL ' })
+  check('paper_doc all 保留文档页数回退', all.isError === false && body(all).includes('STRUCTURE PAGE COUNT FALLBACK'))
+}
+
 async function main() {
+  await checkDocPageLimit()
   const sampleInfo = await resolveSamplePdf()
   const SAMPLE = sampleInfo.path
   check('注册了 10 个工具', tools.size === 10 && tools.has('paper_doc') && tools.has('paper_explain'), [...tools.keys()].join(', '))
