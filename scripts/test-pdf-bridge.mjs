@@ -19,14 +19,30 @@ const endpoint = `import json, os, sys, time
 from pathlib import Path
 
 if sys.argv[0] == '-c':
+    identity = os.environ.get('PB_PDF_BRIDGE_ID') or Path(sys.executable).parent.name
+    control_path = os.environ.get('PB_PDF_BRIDGE_PROBE_CONTROL')
+    if control_path:
+        control = json.loads(Path(control_path).read_text(encoding='utf-8'))
+        if control.get('hold') == identity:
+            ready = Path(control['ready'])
+            release = Path(control['release'])
+            ready.write_text(identity, encoding='utf-8')
+            deadline = time.monotonic() + 10
+            while not release.exists():
+                if time.monotonic() >= deadline:
+                    os._exit(91)
+                time.sleep(0.01)
     print('SYNTHETIC-PDF-BRIDGE 1.0', flush=True)
     os._exit(0)
 if Path(sys.argv[0]).name == 'pdf_tool.py':
     try:
         payload = json.load(sys.stdin)
         command = sys.argv[1]
+        identity = os.environ.get('PB_PDF_BRIDGE_ID') or Path(sys.executable).parent.name
         Path(payload['ready']).write_text(json.dumps({'pid': os.getpid(), 'command': command}), encoding='utf-8')
         value = {'ok': True, 'value': 42, 'received': payload['value']}
+        if command == 'identity':
+            value = {'ok': True, 'identity': identity}
         if command == 'prefixed-json':
             print('Synthetic bridge diagnostic', flush=True)
         if command in ('protocol-error', 'protocol-exit7'):
@@ -95,13 +111,120 @@ try {
   process.env.PYTHONPATH = root
   process.env.PYTHONNOUSERSITE = '1'
   process.env.PYTHONUTF8 = '1'
-  const { callTool, findPython } = await import('../lib/pdf.js')
+  const store = await import('../lib/store.js')
+  const { callTool, findPython, resetPython } = await import('../lib/pdf.js')
+
+  const interpreterAliases = {}
+  for (const identity of ['A', 'B']) {
+    const aliasDir = path.join(root, 'interpreters', identity)
+    await fsp.mkdir(path.dirname(aliasDir), { recursive: true })
+    if (process.platform === 'win32') {
+      await fsp.symlink(path.dirname(python), aliasDir, 'junction')
+    } else {
+      await fsp.mkdir(aliasDir, { recursive: true })
+      await fsp.symlink(python, path.join(aliasDir, path.basename(python)))
+    }
+    interpreterAliases[identity] = path.join(aliasDir, path.basename(python))
+  }
 
   await check('真实 findPython 必须命中局部合成端点', async () => {
     assert.deepEqual(await findPython(), { python, version: 'SYNTHETIC-PDF-BRIDGE 1.0' })
   })
   // 端点未接管时禁止继续，防止测试意外执行真实 PDF handlers。
   assert.equal((await findPython()).version, 'SYNTHETIC-PDF-BRIDGE 1.0')
+
+  await check('idle 配置切换 + resetPython 应选择新解释器', async () => {
+    const original = await store.getConfig()
+    try {
+      await store.setConfig({ python: interpreterAliases.A })
+      resetPython()
+      process.env.PB_PDF_BRIDGE_ID = 'A'
+      assert.equal((await findPython()).python, interpreterAliases.A)
+      await store.setConfig({ python: interpreterAliases.B })
+      resetPython()
+      process.env.PB_PDF_BRIDGE_ID = 'B'
+      assert.equal((await findPython()).python, interpreterAliases.B)
+    } finally {
+      if (savedEnv.PB_PDF_BRIDGE_ID === undefined) delete process.env.PB_PDF_BRIDGE_ID
+      else process.env.PB_PDF_BRIDGE_ID = savedEnv.PB_PDF_BRIDGE_ID
+      await store.setConfig({ python: original.python })
+      resetPython()
+    }
+  })
+
+  await check('resetPython 后新探测隔离旧在途结果与缓存', async () => {
+    const original = await store.getConfig()
+    const controlPath = path.join(root, 'probe-control.json')
+    const readyPath = path.join(root, 'probe-A-ready')
+    const releasePath = path.join(root, 'probe-A-release')
+    let old
+    try {
+      await store.setConfig({ python: interpreterAliases.A })
+      resetPython()
+      process.env.PB_PDF_BRIDGE_ID = 'A'
+      await fsp.writeFile(controlPath, JSON.stringify({ hold: 'A', ready: readyPath, release: releasePath }))
+      process.env.PB_PDF_BRIDGE_PROBE_CONTROL = controlPath
+
+      old = findPython()
+      await waitFor(async () => {
+        try { return await fsp.readFile(readyPath, 'utf8') }
+        catch (error) { if (error.code === 'ENOENT') return null; throw error }
+      }, 'A 解释器探测进入受控门闩')
+
+      await store.setConfig({ python: interpreterAliases.B })
+      resetPython()
+      process.env.PB_PDF_BRIDGE_ID = 'B'
+      const next = findPython()
+      assert.notStrictEqual(next, old, 'reset 后不能复用 A 的旧 Promise')
+      assert.equal((await next).python, interpreterAliases.B)
+
+      await fsp.writeFile(releasePath, 'release')
+      assert.equal((await old).python, interpreterAliases.A)
+      assert.equal((await findPython()).python, interpreterAliases.B, 'A 完成后不能覆盖 B 的缓存')
+      assert.equal((await callTool('identity', {
+        value: 17,
+        ready: path.join(root, 'identity-tool.json'),
+      })).identity, 'B', '后续工具调用必须消费 B')
+    } finally {
+      await fsp.writeFile(releasePath, 'release')
+      if (old) await old.catch(() => {})
+      delete process.env.PB_PDF_BRIDGE_PROBE_CONTROL
+      if (savedEnv.PB_PDF_BRIDGE_ID === undefined) delete process.env.PB_PDF_BRIDGE_ID
+      else process.env.PB_PDF_BRIDGE_ID = savedEnv.PB_PDF_BRIDGE_ID
+      await store.setConfig({ python: original.python })
+      resetPython()
+    }
+  })
+
+  await check('同一配置代际的并发 findPython 仍合并为一个 Promise', async () => {
+    const original = await store.getConfig()
+    const controlPath = path.join(root, 'probe-control-concurrent.json')
+    const readyPath = path.join(root, 'probe-B-concurrent-ready')
+    const releasePath = path.join(root, 'probe-B-concurrent-release')
+    let pending
+    try {
+      await store.setConfig({ python: interpreterAliases.B })
+      resetPython()
+      process.env.PB_PDF_BRIDGE_ID = 'B'
+      await fsp.writeFile(controlPath, JSON.stringify({ hold: 'B', ready: readyPath, release: releasePath }))
+      process.env.PB_PDF_BRIDGE_PROBE_CONTROL = controlPath
+
+      pending = findPython()
+      await waitFor(async () => {
+        try { return await fsp.readFile(readyPath, 'utf8') }
+        catch (error) { if (error.code === 'ENOENT') return null; throw error }
+      }, 'B 并发探测进入受控门闩')
+      assert.strictEqual(findPython(), pending, '同代调用应共享在途探测')
+    } finally {
+      await fsp.writeFile(releasePath, 'release')
+      if (pending) await pending.catch(() => {})
+      delete process.env.PB_PDF_BRIDGE_PROBE_CONTROL
+      if (savedEnv.PB_PDF_BRIDGE_ID === undefined) delete process.env.PB_PDF_BRIDGE_ID
+      else process.env.PB_PDF_BRIDGE_ID = savedEnv.PB_PDF_BRIDGE_ID
+      await store.setConfig({ python: original.python })
+      resetPython()
+    }
+  })
 
   async function request(command, options = {}, onReady) {
     const readyFile = path.join(root, command + '.json')
