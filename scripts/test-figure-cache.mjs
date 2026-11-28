@@ -2,6 +2,7 @@
 /** Generated PDFs only; assert real rendered pixels at listFigures / figurePath. */
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { promises as fsp } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -126,6 +127,59 @@ try {
     await expectColor(after, [0, 255, 0])
     assert.notEqual(after, before, 'content-addressed assets must not overwrite the old image')
     await expectColor(before, [255, 0, 0])
+  })
+  await test('same-stat raster movement refreshes default geometry and crop without layout', async () => {
+    const pdf = path.join(root, 'moving-raster.pdf')
+    await exec(python, ['-c', `
+import fitz, struct, sys, zlib
+def chunk(tag, data):
+    return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff)
+png = (b'\\x89PNG\\r\\n\\x1a\\n'
+       + chunk(b'IHDR', struct.pack('>IIBBBBB', 100, 100, 8, 2, 0, 0, 0))
+       + chunk(b'IDAT', zlib.compress((b'\\x00' + bytes([255, 0, 0]) * 100) * 100))
+       + chunk(b'IEND', b''))
+with fitz.open() as doc:
+    page = doc.new_page(width=600, height=300)
+    page.insert_image(fitz.Rect(140, 60, 240, 160), stream=png)
+    doc.save(sys.argv[1], expand=1)
+`, pdf])
+    await fsp.utimes(pdf, 1700000000, 1700000000)
+    const originalStat = await fsp.stat(pdf)
+    const { meta } = await store.addPaper({ title: 'moving raster', srcPath: pdf })
+    assert.equal((await store.resolvePdf(meta.id)).path, pdf)
+    assert.equal((await figures.listFigures(meta.id))[0].x, 140)
+    const before = await figures.figurePath(meta.id, 0)
+    const beforeBytes = await fsp.readFile(before)
+    await expectColor(before, [255, 0, 0])
+    const cachePath = store.paperFile(meta.id, 'figures.json')
+    const cacheStat = await fsp.stat(cachePath)
+    const pngStat = await fsp.stat(before)
+    assert.equal(await figures.figurePath(meta.id, 0), before)
+    assert.equal((await fsp.stat(cachePath)).mtimeMs, cacheStat.mtimeMs, 'unchanged list is reused')
+    assert.equal((await fsp.stat(before)).mtimeMs, pngStat.mtimeMs, 'unchanged PNG is reused')
+
+    const bytes = await fsp.readFile(pdf)
+    const needle = Buffer.from('100 0 0 100 140 140 cm')
+    const at = bytes.indexOf(needle)
+    assert.ok(at >= 0, 'generated PDF must contain the uncompressed image transform')
+    assert.equal(bytes.indexOf(needle, at + 1), -1)
+    Buffer.from('100 0 0 100 340 140 cm').copy(bytes, at)
+    await fsp.writeFile(pdf, bytes)
+    await fsp.utimes(pdf, 1700000000, 1700000000)
+    const changedStat = await fsp.stat(pdf)
+    assert.equal(changedStat.size, originalStat.size)
+    assert.equal(changedStat.mtimeMs, originalStat.mtimeMs)
+    await assert.rejects(fsp.stat(store.paperFile(meta.id, LAYOUT_FILE)), { code: 'ENOENT' })
+
+    // Exercise the normal image entry first; no refresh or preloaded layout repairs the list.
+    const after = await figures.figurePath(meta.id, 0)
+    assert.equal((await figures.listFigures(meta.id))[0].x, 340)
+    await expectColor(after, [255, 0, 0])
+    assert.notEqual(after, before)
+    const descriptor = await store.readJson(after + '.json')
+    assert.equal(descriptor.pdfHash, createHash('sha256').update(bytes).digest('hex'))
+    assert.deepEqual(descriptor.bbox, [340, 60, 100, 100])
+    assert.deepEqual(await fsp.readFile(before), beforeBytes, 'historical PNG bytes remain unchanged')
   })
   await test('legacy f0.png and stamp are rebuilt instead of trusted', async () => {
     const item = await fixture('legacy')
