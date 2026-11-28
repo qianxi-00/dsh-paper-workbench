@@ -409,6 +409,110 @@ async function runExplainTests() {
     asyncRes.text.includes('## 3. 周围与引用关联图表') &&
     Boolean(asyncRes.explainGuide && asyncRes.systemHint))
 
+  const legacyHighlight = {
+    id: 'legacy-fallback',
+    page: 3,
+    sectionId: 's4',
+    blockId: 'b5',
+    quote: 'Legacy highlight fallback sentinel',
+  }
+  async function runDbReadCase(reads = {}) {
+    const calls = { annList: 0, studyNoteList: 0 }
+    const dbLib = {}
+    for (const method of ['annList', 'studyNoteList']) {
+      if (typeof reads[method] === 'function') {
+        dbLib[method] = (...args) => {
+          calls[method] += 1
+          return reads[method](...args)
+        }
+      }
+    }
+    const result = await buildPaperExplain(
+      { id: 'flash-attn-v2', mode: 'paper' },
+      {
+        store: {
+          getMeta: async () => sample.meta,
+          readTrans: async () => sample.trans,
+          readNotes: async () => ({ highlights: [legacyHighlight] }),
+        },
+        docLib: { getDoc: async () => ({ doc: sample.doc }) },
+        figuresLib: { listFigures: async () => [] },
+        dbLib,
+      },
+    )
+    return { calls, text: result.text }
+  }
+
+  const dbReadsSucceeded = await runDbReadCase({
+    annList: () => sample.annotations,
+    studyNoteList: () => sample.studyNotes,
+  })
+  check('buildPaperExplain: DB 标注优先于 legacy 且两项 DB 结果均保留',
+    dbReadsSucceeded.calls.annList === 1 && dbReadsSucceeded.calls.studyNoteList === 1 &&
+    dbReadsSucceeded.text.includes('关键优化：延迟缩放减少非矩阵乘指令') &&
+    dbReadsSucceeded.text.includes('初版记录：利用 SRAM 分块与延迟归一化。') &&
+    !dbReadsSucceeded.text.includes('Legacy highlight fallback sentinel'))
+
+  const notesRejected = await runDbReadCase({
+    annList: () => sample.annotations,
+    studyNoteList: async () => { throw new Error('controlled async studyNoteList failure') },
+  })
+  check('buildPaperExplain: studyNoteList rejection 保留成功标注且不选 legacy',
+    notesRejected.calls.annList === 1 && notesRejected.calls.studyNoteList === 1 &&
+    notesRejected.text.includes('关键优化：延迟缩放减少非矩阵乘指令') &&
+    !notesRejected.text.includes('Legacy highlight fallback sentinel') &&
+    !notesRejected.text.includes('初版记录：利用 SRAM 分块与延迟归一化。'))
+
+  const notesThrew = await runDbReadCase({
+    annList: () => sample.annotations,
+    studyNoteList: () => { throw new Error('controlled sync studyNoteList failure') },
+  })
+  check('buildPaperExplain: studyNoteList 同步 throw 仅降级笔记读取',
+    notesThrew.calls.annList === 1 && notesThrew.calls.studyNoteList === 1 &&
+    notesThrew.text.includes('关键优化：延迟缩放减少非矩阵乘指令') &&
+    !notesThrew.text.includes('Legacy highlight fallback sentinel'))
+
+  const annotationsRejected = await runDbReadCase({
+    annList: async () => { throw new Error('controlled async annList failure') },
+    studyNoteList: () => sample.studyNotes,
+  })
+  check('buildPaperExplain: annList rejection 后仍读取并保留笔记与 legacy fallback',
+    annotationsRejected.calls.annList === 1 && annotationsRejected.calls.studyNoteList === 1 &&
+    annotationsRejected.text.includes('初版记录：利用 SRAM 分块与延迟归一化。') &&
+    annotationsRejected.text.includes('Legacy highlight fallback sentinel'))
+
+  const annotationsThrew = await runDbReadCase({
+    annList: () => { throw new Error('controlled sync annList failure') },
+    studyNoteList: () => sample.studyNotes,
+  })
+  check('buildPaperExplain: annList 同步 throw 后仍保留成功笔记与 legacy fallback',
+    annotationsThrew.calls.annList === 1 && annotationsThrew.calls.studyNoteList === 1 &&
+    annotationsThrew.text.includes('初版记录：利用 SRAM 分块与延迟归一化。') &&
+    annotationsThrew.text.includes('Legacy highlight fallback sentinel'))
+
+  const bothReadsFailed = await runDbReadCase({
+    annList: () => { throw new Error('controlled annList failure') },
+    studyNoteList: async () => { throw new Error('controlled studyNoteList failure') },
+  })
+  check('buildPaperExplain: 双 DB 读取失败仍使用 legacy 且调用两项读取',
+    bothReadsFailed.calls.annList === 1 && bothReadsFailed.calls.studyNoteList === 1 &&
+    bothReadsFailed.text.includes('Legacy highlight fallback sentinel') &&
+    !bothReadsFailed.text.includes('初版记录：利用 SRAM 分块与延迟归一化。'))
+
+  const emptyAnnotations = await runDbReadCase({
+    annList: () => [],
+    studyNoteList: () => sample.studyNotes,
+  })
+  check('buildPaperExplain: 空 DB 标注列表继续 legacy fallback 并保留研读笔记',
+    emptyAnnotations.calls.annList === 1 && emptyAnnotations.calls.studyNoteList === 1 &&
+    emptyAnnotations.text.includes('Legacy highlight fallback sentinel') &&
+    emptyAnnotations.text.includes('初版记录：利用 SRAM 分块与延迟归一化。'))
+
+  const optionalReadsMissing = await runDbReadCase()
+  check('buildPaperExplain: 缺少可选 DB 读取方法时安全使用 legacy fallback',
+    optionalReadsMissing.calls.annList === 0 && optionalReadsMissing.calls.studyNoteList === 0 &&
+    optionalReadsMissing.text.includes('Legacy highlight fallback sentinel'))
+
   // ---- 7. 自适应深度讲解画像 detectExplainFocusProfile 与动态框架测试
   const formulaProf = detectExplainFocusProfile({
     selection: 'O^{(j)} = \\text{diag}(\\ell^{(j)})^{-1} \\tilde{O}^{(j)}, \\quad \\mathcal{L}(\\theta) = -\\sum_{t=1}^T \\log p_\\theta(y_t)',
