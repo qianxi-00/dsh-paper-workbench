@@ -95,6 +95,57 @@ async function check(name, fn) {
   }
 }
 
+// 真实 ENOENT 后有界让行，放大锁外创建快照的竞态；正确串行实现无需第二次缺失检查。
+async function concurrentCreate(kb, title, upsert) {
+  const dir = path.join(kb, '论文', '并发测试'), target = path.join(dir, title + '.md')
+  const backup = path.join(dir, title + '.pb-backup.md')
+  const alpha = { title, category: '并发测试', fields: { lane_alpha: 'alpha' }, sections: { 精读报告: 'MANAGED ALPHA' } }
+  const beta = { title, category: '并发测试', fields: { lane_beta: 'beta' }, sections: { 译文摘要: 'MANAGED BETA' } }
+  const stat = fsp.stat, copy = fsp.copyFile, preimages = []
+  let absent = 0, release
+  const ready = new Promise((resolve) => { release = resolve })
+  fsp.stat = async (file, ...args) => {
+    try { return await stat(file, ...args) } catch (error) {
+      if (file !== target || error.code !== 'ENOENT') throw error
+      if (++absent === 2) release()
+      let timer
+      try { await Promise.race([ready, new Promise((resolve) => { timer = setTimeout(resolve, 250) })]) }
+      finally { clearTimeout(timer) }
+      throw error
+    }
+  }
+  fsp.copyFile = async (source, destination, ...args) => {
+    if (source !== target || destination !== backup) return copy(source, destination, ...args)
+    const before = await fsp.readFile(source)
+    await copy(source, destination, ...args)
+    eq(Buffer.compare(await fsp.readFile(destination), before), 0, '每次备份等于真实前像')
+    preimages.push(before)
+  }
+  try {
+    const results = await Promise.all([upsert(alpha), upsert(beta)])
+    eq(results.map((result) => result.created).sort(), [false, true], '仅一次实际创建')
+    ok(results.every((result) => result.changed && result.path === target), '两个合法补丁均成功且目标一致')
+    const bytes = await fsp.readFile(target), text = bytes.toString('utf8')
+    const fields = obsidian.parseFrontmatter(text).frontmatter
+    eq(fields.lane_alpha, 'alpha', '当前卡片不得丢失成功的 alpha 补丁')
+    eq(fields.lane_beta, 'beta')
+    ok(text.includes('MANAGED ALPHA') && text.includes('MANAGED BETA'), '两个受管小节都保留')
+    eq(preimages.length, 1, '首次创建无旧文件，第二次合并备份一次')
+    const backupBytes = await fsp.readFile(backup)
+    eq(Buffer.compare(backupBytes, preimages[0]), 0)
+    const again = await upsert(beta)
+    eq(again.created, false)
+    eq(again.changed, false, '相同补丁幂等')
+    eq(Buffer.compare(await fsp.readFile(target), bytes), 0)
+    eq(Buffer.compare(await fsp.readFile(backup), backupBytes), 0, '幂等不改备份')
+    const names = (await fsp.readdir(dir)).filter((name) => name.startsWith(title + '.'))
+    eq(names.sort(), [title + '.md', title + '.pb-backup.md'].sort(), '唯一卡片、唯一备份且没有 tmp')
+  } finally {
+    fsp.stat = stat
+    fsp.copyFile = copy
+  }
+}
+
 async function main() {
   const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'pb-obs-test-'))
   const vault = path.join(tmpRoot, 'vault')
@@ -375,6 +426,99 @@ async function main() {
     ok(text.includes('第二版内容。'))
     ok(!text.includes('第一版内容。'))
     eq(obsidian.parseFrontmatter(text).frontmatter.reviewer, 'Qian Xi')
+  })
+
+  // ---- 10. 首次创建与既有写入使用同一目标队列
+  await check('首次并发 upsertCard 保留两份补丁，created 反映实际创建且幂等', async () => {
+    await concurrentCreate(kb, 'Concurrent Module', (paper) => obsidian.upsertCard(kb, paper))
+  })
+
+  await check('既有卡片并发及 ENOSPC 恢复保留用户字节和每次写前备份', async () => {
+    const target = path.join(kb, '论文', '并发测试', 'Existing.md')
+    const backup = target.replace(/\.md$/, '.pb-backup.md')
+    const raw = '\uFEFF---\r\n# keep comment\r\ncustom_nested:\r\n  owner: fixture\r\ncustom: keep\r\npaper_status: unread\r\npaper_priority: normal\r\n---\r\n\r\n# Existing\r\n\r\n## 人工备注\r\n\r\nUSER CONTENT\r\n\r\nmanual footer\r\n'
+    await fsp.mkdir(path.dirname(target), { recursive: true })
+    for (const inject of [false, true]) {
+      await fsp.writeFile(target, raw)
+      const copy = fsp.copyFile, rename = fsp.rename, preimages = []
+      let failures = 0
+      fsp.copyFile = async (source, destination, ...args) => {
+        if (source !== target || destination !== backup) return copy(source, destination, ...args)
+        const before = await fsp.readFile(source)
+        await copy(source, destination, ...args)
+        eq(Buffer.compare(await fsp.readFile(destination), before), 0, '逐次前像备份')
+        preimages.push(before)
+      }
+      fsp.rename = async (source, destination, ...args) => {
+        if (inject && destination === target && failures++ === 0) throw Object.assign(new Error('fixture ENOSPC'), { code: 'ENOSPC' })
+        return rename(source, destination, ...args)
+      }
+      try {
+        const patch = { title: 'Existing', fields: { lane_beta: 'beta' }, sections: { 译文摘要: 'MANAGED BETA' } }
+        const results = await Promise.allSettled([obsidian.setStatus(kb, target, 'reading', 'high'), obsidian.upsertCard(kb, patch)])
+        eq(results[0].status, inject ? 'rejected' : 'fulfilled')
+        if (inject) eq(results[0].reason.code, 'ENOSPC')
+        eq(results[1].status, 'fulfilled', '失败不毒化队列')
+        const bytes = await fsp.readFile(target), text = bytes.toString('utf8')
+        const fields = obsidian.parseFrontmatter(text).frontmatter
+        eq(fields.paper_status, inject ? 'unread' : 'reading')
+        eq(fields.paper_priority, inject ? 'normal' : 'high')
+        eq(fields.lane_beta, 'beta')
+        ok(text.includes('MANAGED BETA'), '后续补丁发布成功')
+        ok(text.startsWith('\uFEFF---\r\n') && !text.replace(/\r\n/g, '').includes('\n'), 'BOM/CRLF 保留')
+        for (const block of ['# keep comment\r\ncustom_nested:\r\n  owner: fixture\r\ncustom: keep\r\n', '## 人工备注\r\n\r\nUSER CONTENT\r\n', 'manual footer\r\n']) ok(text.includes(block), '用户内容逐字节保留')
+        eq(preimages.length, 2)
+        eq(Buffer.compare(preimages[0], Buffer.from(raw)), 0)
+        if (inject) eq(Buffer.compare(preimages[1], Buffer.from(raw)), 0, '失败未更改当前文件')
+        const backupBytes = await fsp.readFile(backup)
+        eq(Buffer.compare(backupBytes, preimages[1]), 0)
+        eq((await obsidian.upsertCard(kb, patch)).changed, false)
+        eq(Buffer.compare(await fsp.readFile(target), bytes), 0)
+        eq(Buffer.compare(await fsp.readFile(backup), backupBytes), 0)
+        ok((await fsp.readdir(path.dirname(target))).every((name) => !name.endsWith('.tmp')), '无孤立 tmp')
+      } finally { fsp.copyFile = copy; fsp.rename = rename }
+    }
+  })
+
+  await check('首次创建 rename 失败后下一合法请求仍可创建，无孤立 tmp', async () => {
+    const target = path.join(kb, '论文', '并发测试', 'Retry Create.md'), rename = fsp.rename
+    let failures = 0
+    fsp.rename = async (source, destination, ...args) => {
+      if (destination === target && failures++ === 0) throw Object.assign(new Error('fixture ENOSPC'), { code: 'ENOSPC' })
+      return rename(source, destination, ...args)
+    }
+    try {
+      const results = await Promise.allSettled(['alpha', 'beta'].map((lane) => obsidian.upsertCard(kb, {
+        title: 'Retry Create', category: '并发测试', fields: { lane },
+      })))
+      const rejected = results.filter((result) => result.status === 'rejected')
+      eq(rejected.length, 1)
+      eq(rejected[0].reason.code, 'ENOSPC')
+      const success = results.findIndex((result) => result.status === 'fulfilled')
+      eq(results[success].value.created, true)
+      eq(obsidian.parseFrontmatter(await fsp.readFile(target, 'utf8')).frontmatter.lane, ['alpha', 'beta'][success])
+      ok((await fsp.readdir(path.dirname(target))).every((name) => !name.endsWith('.tmp')), '失败临时文件已清理')
+    } finally { fsp.rename = rename }
+  })
+
+  await check('真实 createApi vault.upsert 首次并发保留两份补丁并关联唯一卡片', async () => {
+    const dataRoot = process.env.DSH_PAPER_WORKBENCH_DATA
+    process.env.DSH_PAPER_WORKBENCH_DATA = path.join(tmpRoot, 'rpc-data')
+    let store
+    try {
+      store = await import('../lib/store.js')
+      eq(store.DATA_ROOT, process.env.DSH_PAPER_WORKBENCH_DATA, 'import 前隔离数据根')
+      const { createApi } = await import('../lib/index.js')
+      await store.setConfig({ vault, kb, obsidian: { enabled: true, syncStatus: true } })
+      await store.addPaper({ id: 'concurrent-rpc', title: 'Concurrent RPC', topics: ['并发测试'] })
+      const api = createApi()
+      await concurrentCreate(kb, 'Concurrent RPC', (paper) => api['vault.upsert']({ id: 'concurrent-rpc', fields: paper.fields, sections: paper.sections }))
+      eq((await store.getMeta('concurrent-rpc')).vaultCard, path.join(kb, '论文', '并发测试', 'Concurrent RPC.md'))
+    } finally {
+      if (store) await store.closeDb()
+      if (dataRoot === undefined) delete process.env.DSH_PAPER_WORKBENCH_DATA
+      else process.env.DSH_PAPER_WORKBENCH_DATA = dataRoot
+    }
   })
 
   // ---- 收尾
