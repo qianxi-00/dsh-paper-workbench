@@ -115,6 +115,67 @@ async function run(attempt) {
     assert.equal(model.rows[0].cells[0].text, 'line1\nline2')
   })
 
+  await check('HTML：只识别精确 rowspan/colspan 属性', () => {
+    const regular = buildTableModelFromHtml(
+      '<tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr>',
+    )
+    for (const attrs of [
+      ' data-rowspan="2"',
+      ' data-colspan="2"',
+      ' data-note="colspan=2"',
+      ' data-note="metadata contains colspan=2"',
+    ]) {
+      const metadata = buildTableModelFromHtml(
+        '<tr><td' + attrs + '>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr>',
+      )
+      assert.deepEqual(metadata, regular, 'metadata must not change table geometry: ' + attrs)
+    }
+
+    const realRowSpans = [
+      ' rowspan="2"',
+      " ROWSPAN = '2'",
+      ' rowspan=2',
+    ]
+    for (const attrs of realRowSpans) {
+      const model = buildTableModelFromHtml(
+        '<tr><td' + attrs + '>A</td><td>B</td></tr><tr><td>C</td></tr>',
+      )
+      assert.equal(model.cols, 2, 'real rowspan must preserve two columns: ' + attrs)
+      assert.equal(model.rows[0].cells[0].rowSpan, 2, 'real rowspan must be retained: ' + attrs)
+      assert.equal(model.rows[1].cells[0].placeholder, true, 'rowspan must create a placeholder: ' + attrs)
+    }
+
+    const realColSpans = [
+      ' colspan="2"',
+      " COLSPAN = '2'",
+      ' colspan=2',
+    ]
+    for (const attrs of realColSpans) {
+      const model = buildTableModelFromHtml(
+        '<tr><td data-note="colspan=2"' + attrs + '>A</td></tr><tr><td>C</td><td>D</td></tr>',
+      )
+      assert.equal(model.cols, 2, 'real colspan must preserve two columns: ' + attrs)
+      assert.equal(model.rows[0].cells[0].colSpan, 2, 'real colspan must be retained: ' + attrs)
+      assert.equal(model.rows[0].cells[1].placeholder, true, 'colspan must create a placeholder: ' + attrs)
+    }
+
+    const mixed = buildTableModelFromHtml(
+      '<tr><td data-rowspan="8" data-note="colspan=7" ROWSPAN = \'2\' colspan=2>A</td></tr>' +
+        '<tr><td>C</td></tr><tr><td>D</td></tr>',
+    )
+    assert.equal(mixed.rows[0].cells[0].rowSpan, 2)
+    assert.equal(mixed.rows[0].cells[0].colSpan, 2)
+    assert.equal(mixed.rows[1].cells[0].placeholder, true)
+    assert.equal(mixed.rows[1].cells[1].placeholder, true)
+
+    const invalid = buildTableModelFromHtml(
+      '<tr><td rowspan="-2" colspan="two">A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr>',
+    )
+    assert.equal(invalid.cols, 2)
+    assert.equal(invalid.rows[0].cells[0].rowSpan, 1)
+    assert.equal(invalid.rows[0].cells[0].colSpan, 1)
+  })
+
   await check('HTML：没有 <tr> 返回 null', () => {
     assert.equal(buildTableModelFromHtml('<div>纯文本</div>'), null)
   })
