@@ -602,6 +602,7 @@ export async function runInstall(options) {
   if (repoPkg.name !== 'dsh-paper-workbench') {
     throw new Error('目标目录不是 dsh-paper-workbench 仓库（package.json name=' + repoPkg.name + '）')
   }
+  const sourcePath = await fsp.realpath(repoRoot)
 
   const dataDir = path.resolve(
     options.dataDir || process.env.DSH_PAPER_WORKBENCH_DATA || path.join(os.homedir(), '.dsh', 'paper-workbench'),
@@ -796,7 +797,7 @@ export async function runInstall(options) {
       let alreadyLinked = false
       if (existsSync(nmLinkPath)) {
         try {
-          alreadyLinked = realpathSync(nmLinkPath) === realpathSync(repoRoot)
+          alreadyLinked = (await fsp.realpath(nmLinkPath)) === sourcePath
         } catch {
           alreadyLinked = false
         }
@@ -816,8 +817,8 @@ export async function runInstall(options) {
         actions.push({ action: 'symlink', target: nmLinkPath, source: repoRoot, executed: true })
       }
     } else {
-      const sameCopyDir = path.resolve(copyDir) === path.resolve(repoRoot)
-      const sameNmDir = path.resolve(nmLinkPath) === path.resolve(repoRoot)
+      const sameCopyDir = existsSync(copyDir) && (await fsp.realpath(copyDir)) === sourcePath
+      const sameNmDir = existsSync(nmLinkPath) && (await fsp.realpath(nmLinkPath)) === sourcePath
       if (options.dryRun) {
         nmStatus = 'planned'
         if (!sameCopyDir) {

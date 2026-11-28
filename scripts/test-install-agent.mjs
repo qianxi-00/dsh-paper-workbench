@@ -44,8 +44,8 @@ async function check(name, fn) {
   }
 }
 
-function runInstaller(args, extraEnv = {}) {
-  const res = spawnSync(process.execPath, [INSTALLER, ...args], {
+function runInstaller(args, extraEnv = {}, installer = INSTALLER) {
+  const res = spawnSync(process.execPath, [installer, ...args], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
     timeout: 60000,
@@ -125,6 +125,25 @@ try {
     for (const flag of ['--dsh-home', '--data-dir', '--workspace', '--repo', '--mode', '--dry-run', '--json', '--skip-py-install']) {
       ok(res.stdout.includes(flag), '帮助文档缺少参数 ' + flag)
     }
+  })
+
+  const cliAlias = path.join(tmpRoot, 'cli-alias')
+  let cliAliasAvailable = true
+  try { await fsp.symlink(REPO_ROOT, cliAlias, process.platform === 'win32' ? 'junction' : 'dir') }
+  catch (error) {
+    if (!['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) throw error
+    cliAliasAvailable = false
+    console.log('SKIP  CLI 目录链接入口不可用：' + error.code)
+  }
+  if (cliAliasAvailable) await check('CLI 经目录链接启动仍执行入口并输出有效帮助 JSON', () => {
+    const direct = runInstaller(['--help', '--json'])
+    const aliased = runInstaller(['--help', '--json'], {}, path.join(cliAlias, 'scripts', 'install-agent.mjs'))
+    eq(direct.status, 0, direct.stderr)
+    eq(aliased.status, 0, aliased.stderr)
+    const expected = JSON.parse(direct.stdout)
+    eq(expected.ok, true)
+    ok(expected.help.includes('--dsh-home'))
+    eq(JSON.parse(aliased.stdout), expected)
   })
 
   await check('非法 --mode 在 --json 下输出合法错误 JSON 并返回非零退出码', () => {
@@ -348,6 +367,65 @@ try {
     ok(existsSync(path.join(expectedCopyDir, 'lib', 'index.js')), 'plugins/dsh-paper-workbench 应含 lib/index.js')
     ok(existsSync(path.join(profile2, 'node_modules', 'dsh-paper-workbench', 'package.json')), 'node_modules 副本应就绪')
   })
+
+  // Copy must not remove its source through either installation target's alias.
+  for (const [mode, location, alias] of [
+    ['copy', 'plugins', 'exact'], ['copy', 'plugins', 'case'], ['copy', 'plugins', 'junction'],
+    ['copy', 'node_modules', 'exact'], ['copy', 'node_modules', 'case'], ['copy', 'node_modules', 'junction'],
+    ['link', 'node_modules', 'case'],
+  ]) {
+    if (alias === 'case' && process.platform !== 'win32') {
+      console.log('SKIP  ' + mode + ' ' + location + ' Windows 大小写别名（仅 Windows）')
+      continue
+    }
+    const home = path.join(tmpRoot, 'same-source-' + mode + '-' + location + '-' + alias)
+    const profile = path.join(home, 'profiles', 'desktop')
+    const pluginDir = path.join(home, 'plugins', 'dsh-paper-workbench')
+    const nmDir = path.join(profile, 'node_modules', 'dsh-paper-workbench')
+    const source = location === 'plugins' ? pluginDir : nmDir
+    const sourcePkg = { name: 'dsh-paper-workbench', version: '1.2.0' }
+    await fsp.mkdir(source, { recursive: true })
+    await fsp.mkdir(profile, { recursive: true })
+    await fsp.writeFile(path.join(profile, 'package.json'), JSON.stringify({ private: true, dependencies: {} }))
+    await fsp.writeFile(path.join(source, 'package.json'), JSON.stringify(sourcePkg))
+    await fsp.writeFile(path.join(source, 'keep-source.txt'), 'source-must-survive')
+    await fsp.writeFile(path.join(source, '.env.keep-source'), 'synthetic-local-setting=keep\n')
+    let repoArgument = source
+    if (alias === 'case') repoArgument = location === 'plugins'
+      ? path.join(home, 'PLUGINS', 'dsh-paper-workbench')
+      : path.join(profile, 'NODE_MODULES', 'dsh-paper-workbench')
+    if (alias === 'junction') {
+      repoArgument = path.join(home, 'source-alias')
+      try { await fsp.symlink(source, repoArgument, process.platform === 'win32' ? 'junction' : 'dir') }
+      catch (error) {
+        if (!['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) throw error
+        console.log('SKIP  ' + mode + ' ' + location + ' 目录链接不可用：' + error.code)
+        continue
+      }
+    }
+    await check(mode + ' ' + location + ' ' + alias + ' 同源保留源文件且目标包有效', async () => {
+      eq(await fsp.realpath(repoArgument), await fsp.realpath(source), '夹具必须是真实同源')
+      const res = runInstaller([
+        '--repo', repoArgument, '--dsh-home', home, '--data-dir', path.join(home, 'data'),
+        '--workspace', path.join(home, 'workspace'), '--mode', mode, '--json', '--skip-py-install',
+      ])
+      eq(res.status, 0, res.stderr || res.stdout)
+      eq(JSON.parse(res.stdout).ok, true)
+      for (const name of ['package.json', 'keep-source.txt', '.env.keep-source']) {
+        ok(existsSync(path.join(source, name)), '同源安装不能删除源文件：' + name)
+      }
+      eq(JSON.parse(readFileSync(path.join(source, 'package.json'), 'utf8')), sourcePkg)
+      eq(readFileSync(path.join(source, 'keep-source.txt'), 'utf8'), 'source-must-survive')
+      eq(readFileSync(path.join(source, '.env.keep-source'), 'utf8'), 'synthetic-local-setting=keep\n')
+      for (const target of mode === 'copy' ? [pluginDir, nmDir] : [nmDir]) {
+        eq(JSON.parse(readFileSync(path.join(target, 'package.json'), 'utf8')), sourcePkg)
+        eq(readFileSync(path.join(target, 'keep-source.txt'), 'utf8'), 'source-must-survive')
+        if (await fsp.realpath(target) !== await fsp.realpath(source)) {
+          ok(!existsSync(path.join(target, '.env.keep-source')), '普通副本不能包含源本地配置')
+        }
+      }
+    })
+  }
 
   // 6. 指定不存在的 --dsh-home 报错
   await check('不存在的 --dsh-home 明确返回 ok:false 且退出码非 0', () => {
