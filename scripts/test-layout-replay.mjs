@@ -1,4 +1,4 @@
-// Public seams: persisted runLayout -> refillText, and rebuild-layout CLI.
+// Public seams: persisted runLayout -> refillText/refreshTables, and rebuild-layout CLI.
 // Catches cross-batch text loss, guessed identities and writes after rejection.
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -26,24 +26,26 @@ async function check(name, task) {
   catch (error) { failed++; console.error('FAIL ' + name + '\n' + error.stack) }
 }
 const texts = ['First page.', 'Second page.', 'Third page.', 'Fourth page.', 'Fifth page.', 'Sixth page.']
-function row(text, index) {
+function row(text, index, table = false) {
   return JSON.stringify({ result: { layoutParsingResults: [{ prunedResult: {
     page_index: index, width: 600, height: 800,
-    parsing_res_list: text ? [{ block_label: 'text', block_content: text, block_bbox: [20, 40, 580, 80] }] : [],
+    parsing_res_list: text ? [{ block_label: table ? 'table' : 'text', block_content: text, block_bbox: [20, 40, 580, 80] }] : [],
   } }] } })
 }
-async function fixture({ values = texts, batchPages = 2, reverse = false, model } = {}) {
+async function fixture({ values = texts, batchPages = 2, reverse = false, model, table = false } = {}) {
   const id = 'replay-' + (++sequence)
   const source = path.join(root, id + '.pdf')
   await fs.writeFile(source, 'Unique fixture PDF bytes: ' + id)
   inputs.set(id, source)
   await store.addPaper({ id, title: 'Offline replay fixture', srcPath: source, storage: 'link', pageCount: values.length, hasText: false })
   let submits = 0
+  let tableRows = [['Model', 'Score'], ['Baseline', '1']]
   const jobs = new Map()
   const runner = createLayout({ store, pdf: { async callTool(command, args) {
     if (command === 'info') return { pages: values.length, sizes: values.map((_, i) => ({ n: i + 1, w: 600, h: 800 })) }
     if (command === 'split') return { ok: true }
     if (command === 'page_lines') return { lines: [] }
+    if (command === 'tables' && table) return { tables: [{ bbox: [20, 40, 580, 80], rows: tableRows, headerRows: 1 }] }
     throw new Error('Unexpected PDF command: ' + command)
   } }, ocr: {
     async submitJob({ filePath }) {
@@ -55,12 +57,12 @@ async function fixture({ values = texts, batchPages = 2, reverse = false, model 
     async pollJob({ jobId }) { return { jsonUrl: jobId } },
     async fetchResults({ jsonUrl }) {
       const [start, end] = jobs.get(jsonUrl)
-      const rows = values.slice(start - 1, end).map((value, i) => row(value, i))
+      const rows = values.slice(start - 1, end).map((value, i) => row(value, i, table))
       return { text: (reverse ? rows.reverse() : rows).join('\n') }
     },
   } })
   await runner.runLayout(id, { batchPages, resume: false, model })
-  return { id, runner, submits: () => submits,
+  return { id, runner, submits: () => submits, setTableRows: rows => { tableRows = rows },
     expected: values.flatMap((value, i) => value ? [[i + 1, value]] : []) }
 }
 const content = layout => layout.blocks.map(block => [block.page, block.text])
@@ -114,6 +116,91 @@ function cliRun(id, apply = true) {
 try {
   // Ten independent fixtures per case run locally and through the existing CI npm test step.
   for (let round = 1; round <= Number(process.env.PB_REPLAY_ROUNDS || 10); round++) {
+    await check(`${round}: refill and table refresh share input identity across repeated offline operations`, async () => {
+      const f = await fixture({ values: ['First page.'], batchPages: 1 })
+      await f.runner.refillText(f.id)
+      const refilled = await archive.readPublished(f.id)
+      const input = await archive.readInput(f.id, refilled.revision)
+      assert.equal(input.pageCount, 1)
+      assert.equal(input.batchPages, 1)
+      const before = await snapshot(f.id)
+      for (let i = 0; i < 2; i++) {
+        await f.runner.refreshTables(f.id)
+        await f.runner.refillText(f.id)
+        const current = await archive.readPublished(f.id)
+        assert.equal(current.revision, refilled.revision, 'Equivalent offline results must reuse the revision')
+        assert.deepEqual(content(current), [[1, 'First page.']])
+        assert.deepEqual(await archive.readInput(f.id, current.revision), input)
+      }
+      assert.deepEqual(await snapshot(f.id), before, 'Equivalent operations changed current or historical bytes')
+      assert.equal(f.submits(), 1, 'Offline operations submitted OCR')
+    })
+    await check(`${round}: actual table changes publish a new revision without changing historical evidence`, async () => {
+      const f = await fixture({ values: ['Table source.'], batchPages: 1, table: true })
+      await f.runner.refreshTables(f.id)
+      const initial = await archive.readPublished(f.id)
+      await f.runner.refreshTables(f.id)
+      assert.equal((await archive.readPublished(f.id)).revision, initial.revision)
+      await f.runner.refillText(f.id)
+      const refilled = await archive.readPublished(f.id)
+      const input = await archive.readInput(f.id, refilled.revision)
+      const before = await snapshot(f.id)
+      f.setTableRows([['Model', 'Score'], ['Baseline', '2']])
+      await f.runner.refreshTables(f.id)
+      const changed = await archive.readPublished(f.id)
+      assert.notEqual(changed.revision, refilled.revision)
+      assert.deepEqual(changed.blocks.find(block => block.kind === 'table').table.rows.map(row => row.cells.map(cell => cell.text)),
+        [['Model', 'Score'], ['Baseline', '2']])
+      const nextInput = await archive.readInput(f.id, changed.revision)
+      assert.deepEqual({ ...nextInput, at: input.at }, input, 'Table changes lost input evidence')
+      await f.runner.refreshTables(f.id)
+      assert.equal((await archive.readPublished(f.id)).revision, changed.revision)
+      const after = await snapshot(f.id)
+      for (const [file, bytes] of Object.entries(before)) {
+        if (/^layout-data\/(raw|inputs|revisions)\//.test(file) || file === 'source-pdf') assert.equal(after[file], bytes, file)
+      }
+      assert.equal(f.submits(), 1, 'Offline table changes submitted OCR')
+    })
+    await check(`${round}: real input conflicts still reject and preserve current and history`, async () => {
+      const f = await fixture({ values: ['First page.'], batchPages: 1 })
+      await f.runner.refillText(f.id)
+      await f.runner.refreshTables(f.id)
+      const layout = await archive.readPublished(f.id)
+      const input = await archive.readInput(f.id, layout.revision)
+      const before = await snapshot(f.id)
+      for (const change of [
+        { model: 'different-model' },
+        { rawRefs: [{ hash: 'f'.repeat(64), page: '1-1' }] },
+        { pdfPages: [{ page: 1, lines: [{ text: 'Changed source line.' }] }] },
+        { pageCount: 2 },
+      ]) {
+        await assert.rejects(archive.publishDerived(f.id, layout, { ...input, ...change }), /输入.*冲突/)
+        assert.deepEqual(await snapshot(f.id), before, 'Input conflict changed persisted artifacts')
+      }
+      assert.equal(f.submits(), 1)
+    })
+    await check(`${round}: unreadable current input rejects table refresh without overwriting it`, async () => {
+      const f = await fixture({ values: ['First page.'], batchPages: 1 })
+      await f.runner.refillText(f.id)
+      const layout = await archive.readPublished(f.id)
+      await fs.writeFile(store.paperFile(f.id, 'layout-data/inputs/' + layout.revision + '.json'), '{broken')
+      const before = await snapshot(f.id)
+      await assert.rejects(f.runner.refreshTables(f.id), SyntaxError)
+      assert.deepEqual(await snapshot(f.id), before, 'Bad input changed current or history')
+      assert.equal(f.submits(), 1)
+    })
+    await check(`${round}: legacy layouts without archived input can still refresh tables repeatedly`, async () => {
+      const f = await fixture({ values: ['First page.'], batchPages: 1 })
+      const initial = await archive.readPublished(f.id)
+      await fs.unlink(store.paperFile(f.id, 'layout-data/inputs/' + initial.revision + '.json'))
+      await f.runner.refreshTables(f.id)
+      const refreshed = await archive.readPublished(f.id)
+      await f.runner.refreshTables(f.id)
+      assert.equal((await archive.readPublished(f.id)).revision, refreshed.revision)
+      assert.deepEqual(content(refreshed), [[1, 'First page.']])
+      assert.deepEqual(await archive.readRevision(f.id, initial.revision), initial)
+      assert.equal(f.submits(), 1)
+    })
     await check(`${round}: configured non-default primary model retains service provenance offline`, async () => {
       const f = await fixture({ model: 'PaddleOCR-VL-1.6' })
       assert.equal((await archive.readPublished(f.id)).model, 'PaddleOCR-VL-1.6')
